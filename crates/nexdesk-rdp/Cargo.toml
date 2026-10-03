@@ -22,3 +22,9 @@ anyhow = "1"
 rpassword = "7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Keyboard capture (Linux only): X11 via XInput2, Wayland via shortcuts-inhibit.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl = "2"
+wayland-client = { version = "0.31", features = ["system"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }

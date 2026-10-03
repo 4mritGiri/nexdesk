@@ -184,6 +184,9 @@ impl SessionManager {
         if !profile.clipboard {
             cmd.arg("--no-clipboard");
         }
+        if profile.fullscreen {
+            cmd.arg("--fullscreen");
+        }
         // Environment handoff avoids command-line exposure. The manager never logs this value.
         if let Some(secret) = &session.password {
             cmd.env("NEXDESK_PASSWORD", secret.expose());

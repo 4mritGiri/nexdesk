@@ -14,6 +14,8 @@ pub struct Profile {
     pub width: u16,
     pub height: u16,
     pub clipboard: bool,
+    /// Start the session full screen (mstsc: `screen mode id:i:2`).
+    pub fullscreen: bool,
 }
 
 impl Profile {
@@ -35,6 +37,7 @@ impl Default for Profile {
             width: 1920,
             height: 1080,
             clipboard: true,
+            fullscreen: false,
         }
     }
 }
@@ -56,6 +59,7 @@ impl Profile {
                 .or_else(|| f.get_int("myrdp clipboard"))
                 .map(|v| v != 0)
                 .unwrap_or(true),
+            fullscreen: f.get_int("screen mode id") == Some(2),
         }
     }
 
@@ -72,6 +76,10 @@ impl Profile {
         s.push_str(&format!("desktopwidth:i:{}\r\n", self.width));
         s.push_str(&format!("desktopheight:i:{}\r\n", self.height));
         s.push_str(&format!("redirectclipboard:i:{}\r\n", self.clipboard as u8));
+        s.push_str(&format!(
+            "screen mode id:i:{}\r\n",
+            if self.fullscreen { 2 } else { 1 }
+        ));
         s
     }
 
@@ -190,6 +198,7 @@ mod tests {
             width: 1600,
             height: 900,
             clipboard: false,
+            fullscreen: true,
         }
     }
 

@@ -4561,7 +4561,10 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wayland-client",
+ "wayland-protocols",
  "winit",
+ "x11-dl",
 ]
 
 [[package]]

@@ -15,8 +15,9 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{Cursor, CursorIcon, CustomCursor, Fullscreen, Window, WindowId};
 
+use crate::grab::KeyboardGrab;
 use crate::keymap;
 
 pub enum UserEvent {
@@ -40,6 +41,10 @@ pub struct App {
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     frame: Option<Frame>,
     pending_resize: Option<(Instant, u16, u16)>,
+    start_fullscreen: bool,
+    capture_keys: bool,
+    focused: bool,
+    grab: KeyboardGrab,
     /// Set when the session ended abnormally; `main` turns this into an error exit.
     pub failure: Option<String>,
 }
@@ -49,6 +54,8 @@ impl App {
         title: String,
         initial_size: (u32, u32),
         dynamic_resize: bool,
+        start_fullscreen: bool,
+        capture_keys: bool,
         input_tx: UnboundedSender<RdpInputEvent>,
     ) -> Self {
         Self {
@@ -62,6 +69,10 @@ impl App {
             surface: None,
             frame: None,
             pending_resize: None,
+            start_fullscreen,
+            capture_keys,
+            focused: false,
+            grab: KeyboardGrab::new(),
             failure: None,
         }
     }
@@ -78,6 +89,35 @@ impl App {
         if !events.is_empty() {
             let _ = self.input_tx.send(RdpInputEvent::FastPath(events));
         }
+    }
+
+    fn is_fullscreen(&self) -> bool {
+        self.window
+            .as_ref()
+            .map(|w| w.fullscreen().is_some())
+            .unwrap_or(false)
+    }
+
+    /// Capture Super / Alt+Tab etc. only while full screen and focused (mstsc's default).
+    fn sync_grab(&mut self) {
+        let want = self.capture_keys && self.focused && self.is_fullscreen();
+        if let Some(w) = self.window.clone() {
+            self.grab.set(&w, want);
+        }
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        // Release keys first so Ctrl/Alt are not left "held" on the remote side.
+        self.release_all_keys();
+        if let Some(w) = &self.window {
+            let next = if w.fullscreen().is_some() {
+                None
+            } else {
+                Some(Fullscreen::Borderless(None))
+            };
+            w.set_fullscreen(next);
+        }
+        self.sync_grab();
     }
 
     fn fit(&self) -> Option<Fit> {
@@ -119,10 +159,15 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, state: ElementState) {
+        let ctrl = self.db.is_key_pressed(Scancode::from_u16(0x1D));
+        let alt = self.db.is_key_pressed(Scancode::from_u16(0x38));
+        // Local hotkey: Ctrl+Alt+Break toggles full screen (same as mstsc).
+        if code == KeyCode::Pause && state == ElementState::Pressed && ctrl && alt {
+            self.toggle_fullscreen();
+            return;
+        }
         // Local hotkey: Ctrl+Alt+End sends Ctrl+Alt+Del (the real one is grabbed by the local OS).
         if code == KeyCode::End && state == ElementState::Pressed {
-            let ctrl = self.db.is_key_pressed(Scancode::from_u16(0x1D));
-            let alt = self.db.is_key_pressed(Scancode::from_u16(0x38));
             if ctrl && alt {
                 let del = Scancode::from_u16(0xE053);
                 self.send_ops([Operation::KeyPressed(del), Operation::KeyReleased(del)]);
@@ -146,7 +191,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
-            .with_inner_size(LogicalSize::new(self.initial_size.0, self.initial_size.1));
+            .with_inner_size(LogicalSize::new(self.initial_size.0, self.initial_size.1))
+            .with_fullscreen(
+                self.start_fullscreen
+                    .then_some(Fullscreen::Borderless(None)),
+            );
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -191,8 +240,37 @@ impl ApplicationHandler<UserEvent> for App {
                     w.set_cursor(CursorIcon::Default);
                 }
             }
-            // Server-drawn cursor shapes are not rendered yet (see docs/ROADMAP.md).
-            RdpOutputEvent::PointerBitmap(_) | RdpOutputEvent::PointerPosition { .. } => {}
+            RdpOutputEvent::PointerBitmap(p) => {
+                // The server sends premultiplied RGBA; winit wants straight alpha.
+                let mut rgba = p.bitmap_data.clone();
+                for px in rgba.chunks_exact_mut(4) {
+                    let a = u32::from(px[3]);
+                    if a != 0 && a != 255 {
+                        for c in &mut px[..3] {
+                            *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+                        }
+                    }
+                }
+                let (w, h) = (p.width, p.height);
+                let (hx, hy) = (p.hotspot_x.min(w.saturating_sub(1)), p.hotspot_y.min(h.saturating_sub(1)));
+                match CustomCursor::from_rgba(rgba, w, h, hx, hy) {
+                    Ok(src) => {
+                        let cursor = el.create_custom_cursor(src);
+                        if let Some(win) = &self.window {
+                            win.set_cursor(Cursor::Custom(cursor));
+                            win.set_cursor_visible(true);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("bad pointer bitmap: {e}");
+                        if let Some(win) = &self.window {
+                            win.set_cursor_visible(true);
+                            win.set_cursor(CursorIcon::Default);
+                        }
+                    }
+                }
+            }
+            RdpOutputEvent::PointerPosition { .. } => {}
             RdpOutputEvent::ConnectionFailure(e) => {
                 self.failure = Some(format!("connection failed: {e}"));
                 el.exit();
@@ -215,6 +293,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::Resized(size) => {
+                self.sync_grab(); // leaving/entering full screen via the window manager
                 if self.dynamic_resize && size.width > 0 && size.height > 0 {
                     let w = (size.width.min(8192) & !1) as u16; // width must be even
                     let h = size.height.min(8192) as u16;
@@ -224,7 +303,13 @@ impl ApplicationHandler<UserEvent> for App {
                     w.request_redraw();
                 }
             }
-            WindowEvent::Focused(false) => self.release_all_keys(),
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if !focused {
+                    self.release_all_keys();
+                }
+                self.sync_grab();
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.repeat {
                     return; // the server generates its own key repeat

@@ -1,5 +1,6 @@
 //! nexdesk: a Rust RDP desktop client (winit + softbuffer) built on IronRDP.
 mod app;
+mod grab;
 mod keymap;
 
 use std::path::PathBuf;
@@ -28,11 +29,13 @@ OPTIONS:
   --width <N>            desktop width  (default 1920)
   --height <N>           desktop height (default 1080)
   --dynamic-resize       (experimental) resize the remote desktop with the window
+  --fullscreen           start full screen
+  --no-key-capture       do not send Super/Alt+Tab to the remote while full screen
   --no-clipboard         disable clipboard redirection
   -h, --help             show this help
 
 The password is read from $NEXDESK_PASSWORD or prompted (never passed as an argument).
-Hotkey: Ctrl+Alt+End sends Ctrl+Alt+Del to the remote. Logs: NEXDESK_LOG=debug
+Hotkeys: Ctrl+Alt+End = Ctrl+Alt+Del on the remote; Ctrl+Alt+Break = toggle full screen. Logs: NEXDESK_LOG=debug
 ";
 
 struct Args {
@@ -43,6 +46,8 @@ struct Args {
     width: Option<u16>,
     height: Option<u16>,
     dynamic_resize: bool,
+    fullscreen: bool,
+    capture_keys: bool,
     clipboard: bool,
 }
 
@@ -55,6 +60,8 @@ fn parse_args() -> Result<Option<Args>> {
         width: None,
         height: None,
         dynamic_resize: false,
+        fullscreen: false,
+        capture_keys: true,
         clipboard: true,
     };
     let mut it = std::env::args().skip(1);
@@ -72,6 +79,8 @@ fn parse_args() -> Result<Option<Args>> {
             "--width" => a.width = Some(val("--width")?.parse().context("--width")?),
             "--height" => a.height = Some(val("--height")?.parse().context("--height")?),
             "--dynamic-resize" => a.dynamic_resize = true,
+            "--fullscreen" => a.fullscreen = true,
+            "--no-key-capture" => a.capture_keys = false,
             "--no-clipboard" => a.clipboard = false,
             other => bail!("unknown argument: {other}\n\n{HELP}"),
         }
@@ -184,6 +193,8 @@ fn main() -> Result<()> {
         format!("nexdesk - {host}"),
         (u32::from(width), u32::from(height)),
         args.dynamic_resize,
+        args.fullscreen || file.get_int("screen mode id") == Some(2),
+        args.capture_keys,
         input_tx,
     );
     event_loop.run_app(&mut app)?;

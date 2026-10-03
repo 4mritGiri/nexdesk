@@ -10,11 +10,15 @@ use gpui::{
     div, fill, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem, Context,
     CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
     FontWeight, GlobalElementId, KeyBinding, LayoutId, PaintQuad, Pixels, Point, Render,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, WindowBounds, WindowOptions,
+    MouseButton, ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, WindowBounds,
+    WindowOptions,
 };
 
 use gpui_platform::application;
-use nexdesk_core::{credentials::Secret, profiles::Profile};
+use nexdesk_core::{
+    credentials::Secret,
+    profiles::{file_stem_for, Profile},
+};
 use nexdesk_session::SessionState;
 
 // ============================================================================
@@ -22,20 +26,20 @@ use nexdesk_session::SessionState;
 // ============================================================================
 
 gpui::actions!(
-    nexdesk_password_input,
+    nexdesk_text_input,
     [
-        PasswordBackspace,
-        PasswordDelete,
-        PasswordLeft,
-        PasswordRight,
-        PasswordSelectLeft,
-        PasswordSelectRight,
-        PasswordSelectAll,
-        PasswordHome,
-        PasswordEnd,
-        PasswordPaste,
-        PasswordCopy,
-        PasswordCut,
+        InputBackspace,
+        InputDelete,
+        InputLeft,
+        InputRight,
+        InputSelectLeft,
+        InputSelectRight,
+        InputSelectAll,
+        InputHome,
+        InputEnd,
+        InputPaste,
+        InputCopy,
+        InputCut,
     ]
 );
 
@@ -51,8 +55,34 @@ pub struct NexDeskApp {
     pub selected_profile: Option<usize>,
 
     pub password_dialog: bool,
-    pub password_input: Entity<PasswordInput>,
+    pub password_input: Entity<TextInput>,
     pub password_error: Option<String>,
+
+    /// Open "New / Edit connection" dialog, if any.
+    pub editor: Option<Editor>,
+    /// Index awaiting a second click on Delete (confirmation).
+    pub pending_delete: Option<usize>,
+}
+
+/// State of the connection editor dialog.
+pub struct Editor {
+    /// Name of the profile being edited (`None` = creating a new one).
+    original: Option<String>,
+    name: Entity<TextInput>,
+    host: Entity<TextInput>,
+    user: Entity<TextInput>,
+    domain: Entity<TextInput>,
+    width: Entity<TextInput>,
+    height: Entity<TextInput>,
+    clipboard: bool,
+    fullscreen: bool,
+    error: Option<String>,
+}
+
+fn make_input(cx: &mut Context<NexDeskApp>, placeholder: &'static str, value: &str) -> Entity<TextInput> {
+    let input = cx.new(|cx| TextInput::new(cx, false, placeholder));
+    input.update(cx, |i, cx| i.set_value(value, cx));
+    input
 }
 
 impl NexDeskApp {
@@ -61,7 +91,7 @@ impl NexDeskApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let password_input = cx.new(|cx| PasswordInput::new(cx));
+        let password_input = cx.new(|cx| TextInput::new(cx, true, "Password"));
 
         Self {
             state: ManagerState::load(engine_path),
@@ -71,7 +101,220 @@ impl NexDeskApp {
             password_dialog: false,
             password_input,
             password_error: None,
+            editor: None,
+            pending_delete: None,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Connection editor (New / Edit / Duplicate / Delete)
+    // ------------------------------------------------------------------
+
+    fn selected_profile_cloned(&self) -> Option<Profile> {
+        self.selected_profile
+            .and_then(|i| self.state.profiles.get(i))
+            .cloned()
+    }
+
+    fn open_editor_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_editor(None, window, cx);
+    }
+
+    fn open_editor_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.selected_profile_cloned() {
+            Some(p) => self.open_editor(Some(p), window, cx),
+            None => {
+                self.state.status = "Select a connection to edit.".into();
+                cx.notify();
+            }
+        }
+    }
+
+    fn open_editor(&mut self, existing: Option<Profile>, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_delete = None;
+        let original = existing.as_ref().map(|p| p.name.clone());
+        let p = existing.unwrap_or_default();
+
+        let name = make_input(cx, "Display name (optional)", &p.name);
+        let host = make_input(cx, "host or host:port", &p.host);
+        let user = make_input(cx, "User name", &p.user);
+        let domain = make_input(cx, "Domain (optional)", &p.domain);
+        let width = make_input(cx, "1920", &p.width.to_string());
+        let height = make_input(cx, "1080", &p.height.to_string());
+        let first = host.read(cx).focus_handle.clone();
+
+        self.editor = Some(Editor {
+            original,
+            name,
+            host,
+            user,
+            domain,
+            width,
+            height,
+            clipboard: p.clipboard,
+            fullscreen: p.fullscreen,
+            error: None,
+        });
+        window.focus(&first, cx);
+        cx.notify();
+    }
+
+    fn cancel_editor(&mut self, cx: &mut Context<Self>) {
+        self.editor = None;
+        cx.notify();
+    }
+
+    fn toggle_editor_flag(&mut self, flag: &str, cx: &mut Context<Self>) {
+        if let Some(ed) = self.editor.as_mut() {
+            match flag {
+                "clipboard" => ed.clipboard = !ed.clipboard,
+                "fullscreen" => ed.fullscreen = !ed.fullscreen,
+                _ => {}
+            }
+        }
+        cx.notify();
+    }
+
+    /// Read the dialog fields into a validated profile.
+    fn build_profile(&self, cx: &App) -> Result<Profile, String> {
+        let ed = self.editor.as_ref().ok_or("No editor open")?;
+        let host = ed.host.read(cx).value().trim().to_string();
+        let user = ed.user.read(cx).value().trim().to_string();
+        let domain = ed.domain.read(cx).value().trim().to_string();
+        let mut name = ed.name.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            name = host.clone();
+        }
+        let width: u16 = ed
+            .width
+            .read(cx)
+            .value()
+            .trim()
+            .parse()
+            .map_err(|_| "Width must be a number".to_string())?;
+        let height: u16 = ed
+            .height
+            .read(cx)
+            .value()
+            .trim()
+            .parse()
+            .map_err(|_| "Height must be a number".to_string())?;
+
+        let profile = Profile {
+            name,
+            host,
+            user,
+            domain,
+            width,
+            height,
+            clipboard: ed.clipboard,
+            fullscreen: ed.fullscreen,
+        };
+        profile.validate().map_err(str::to_string)?;
+        if file_stem_for(&profile.name).is_none() {
+            return Err("Connection name is not usable as a file name".into());
+        }
+        Ok(profile)
+    }
+
+    /// Persist `profile`; returns the refreshed list.
+    fn persist_profile(&self, profile: &Profile) -> Result<Vec<Profile>, String> {
+        let store = self
+            .state
+            .store
+            .as_ref()
+            .ok_or("No config directory available on this system")?;
+        let original = self.editor.as_ref().and_then(|e| e.original.clone());
+        let new_stem = file_stem_for(&profile.name);
+        let clashes = store.list().iter().any(|p| {
+            file_stem_for(&p.name) == new_stem && Some(&p.name) != original.as_ref()
+        });
+        if clashes {
+            return Err("A connection with this name already exists".into());
+        }
+        store.save(profile).map_err(|e| format!("Save failed: {e}"))?;
+        if let Some(old) = original {
+            if file_stem_for(&old) != new_stem {
+                let _ = store.delete(&old); // rename: drop the old file
+            }
+        }
+        Ok(store.list())
+    }
+
+    fn save_editor(&mut self, cx: &mut Context<Self>) {
+        let result = self
+            .build_profile(cx)
+            .and_then(|p| self.persist_profile(&p).map(|list| (p, list)));
+        match result {
+            Ok((profile, list)) => {
+                self.selected_profile = list.iter().position(|p| p.name == profile.name);
+                self.state.selected = self.selected_profile;
+                self.state.profiles = list;
+                self.state.status = format!("Saved \"{}\" (password is never saved)", profile.name);
+                self.editor = None;
+            }
+            Err(message) => {
+                if let Some(ed) = self.editor.as_mut() {
+                    ed.error = Some(message);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn duplicate_selected(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut p) = self.selected_profile_cloned() else {
+            self.state.status = "Select a connection to duplicate.".into();
+            cx.notify();
+            return;
+        };
+        p.name = format!("{} (copy)", p.name);
+        let result = match self.state.store.as_ref() {
+            Some(store) => store.save(&p).map(|_| store.list()).map_err(|e| e.to_string()),
+            None => Err("No config directory available".to_string()),
+        };
+        match result {
+            Ok(list) => {
+                self.selected_profile = list.iter().position(|x| x.name == p.name);
+                self.state.selected = self.selected_profile;
+                self.state.profiles = list;
+                self.state.status = format!("Created \"{}\"", p.name);
+            }
+            Err(e) => self.state.status = format!("Duplicate failed: {e}"),
+        }
+        cx.notify();
+    }
+
+    fn delete_selected(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.selected_profile else {
+            self.state.status = "Select a connection to delete.".into();
+            cx.notify();
+            return;
+        };
+        let Some(profile) = self.state.profiles.get(index).cloned() else {
+            return;
+        };
+        if self.pending_delete != Some(index) {
+            self.pending_delete = Some(index);
+            self.state.status = format!("Click Delete again to remove \"{}\".", profile.name);
+            cx.notify();
+            return;
+        }
+        self.pending_delete = None;
+        let result = match self.state.store.as_ref() {
+            Some(store) => store.delete(&profile.name).map(|_| store.list()).map_err(|e| e.to_string()),
+            None => Err("No config directory available".to_string()),
+        };
+        match result {
+            Ok(list) => {
+                self.state.profiles = list;
+                self.selected_profile = None;
+                self.state.selected = None;
+                self.state.status = format!("Deleted \"{}\"", profile.name);
+            }
+            Err(e) => self.state.status = format!("Delete failed: {e}"),
+        }
+        cx.notify();
     }
 
     fn open_password_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -204,7 +447,8 @@ impl Render for NexDeskApp {
 
         let content = match self.nav.screen {
             Screen::Connections => {
-                connection_view(profiles, self.selected_profile, cx).into_any_element()
+                connection_view(profiles, self.selected_profile, self.pending_delete, cx)
+                    .into_any_element()
             }
 
             Screen::Sessions => session_view(sessions, cx).into_any_element(),
@@ -243,7 +487,9 @@ impl Render for NexDeskApp {
                     ),
             );
 
-        if self.password_dialog {
+        if let Some(ed) = self.editor.as_ref() {
+            main.child(editor_dialog(ed, cx))
+        } else if self.password_dialog {
             main.child(password_dialog(
                 self.selected_profile
                     .and_then(|i| self.state.profiles.get(i))
@@ -351,9 +597,23 @@ fn sidebar_button(
 fn connection_view(
     profiles: Vec<Profile>,
     selected_profile: Option<usize>,
+    pending_delete: Option<usize>,
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
     let mut list = div().flex().flex_col().gap_2();
+
+    if profiles.is_empty() {
+        list = list.child(
+            div()
+                .p_5()
+                .rounded_md()
+                .bg(panel())
+                .border_1()
+                .border_color(border())
+                .text_color(muted())
+                .child("No connections yet. Press New to add one."),
+        );
+    }
 
     for (index, profile) in profiles.into_iter().enumerate() {
         let selected = selected_profile == Some(index);
@@ -390,37 +650,59 @@ fn connection_view(
                         .child(format!("{}  •  {}", profile.host, profile.user)),
                 )
                 .child(div().mt_1().text_xs().text_color(muted()).child(format!(
-                    "{} × {}  •  Clipboard {}",
+                    "{} × {}  •  Clipboard {}{}",
                     profile.width,
                     profile.height,
                     if profile.clipboard {
                         "enabled"
                     } else {
                         "disabled"
+                    },
+                    if profile.fullscreen {
+                        "  •  Full screen"
+                    } else {
+                        ""
                     }
                 ))),
         );
     }
 
-    let connect_enabled = selected_profile.is_some();
+    let has_selection = selected_profile.is_some();
+    let delete_label = if pending_delete.is_some() && pending_delete == selected_profile {
+        "Confirm delete"
+    } else {
+        "Delete"
+    };
 
     div()
         .flex()
         .flex_col()
         .gap_4()
-        .child(div().text_sm().text_color(muted()).child(
-            "Select a saved connection and connect. \
-                     Passwords are never stored in .rdp files.",
-        ))
-        .child(list)
         .child(
             div()
-                .mt_2()
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(action_button("Connect", connect_enabled, cx)),
+                .child(action_button("Connect", has_selection, cx))
+                .child(toolbar_button("New", true, NexDeskApp::open_editor_new, cx))
+                .child(toolbar_button("Edit", has_selection, NexDeskApp::open_editor_edit, cx))
+                .child(toolbar_button(
+                    "Duplicate",
+                    has_selection,
+                    NexDeskApp::duplicate_selected,
+                    cx,
+                ))
+                .child(toolbar_button(
+                    delete_label,
+                    has_selection,
+                    NexDeskApp::delete_selected,
+                    cx,
+                )),
         )
+        .child(div().text_sm().text_color(muted()).child(
+            "Passwords are never stored in .rdp files; you are asked each time you connect.",
+        ))
+        .child(list)
 }
 
 // ============================================================================
@@ -564,7 +846,7 @@ fn settings_view() -> impl IntoElement {
 
 fn password_dialog(
     profile_name: String,
-    password_input: Entity<PasswordInput>,
+    password_input: Entity<TextInput>,
     error: Option<String>,
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
@@ -626,8 +908,195 @@ fn password_dialog(
 }
 
 // ============================================================================
+// Connection editor dialog
+// ============================================================================
+
+fn field_row(label: &'static str, input: Entity<TextInput>) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(div().w(px(120.)).text_sm().text_color(muted()).child(label))
+        .child(
+            div()
+                .flex_1()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(border())
+                .bg(bg())
+                .child(input),
+        )
+}
+
+fn checkbox_row(
+    id: &'static str,
+    label: &'static str,
+    checked: bool,
+    cx: &mut Context<NexDeskApp>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _event, _window, cx| {
+            this.toggle_editor_flag(id, cx);
+        }))
+        .child(
+            div()
+                .w(px(18.))
+                .h(px(18.))
+                .rounded_sm()
+                .border_1()
+                .border_color(if checked { accent() } else { border() })
+                .bg(if checked { accent() } else { bg() })
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .text_color(bg())
+                .child(if checked { "✓" } else { "" }),
+        )
+        .child(div().text_sm().child(label))
+}
+
+fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+    let title = if ed.original.is_some() {
+        "Edit connection"
+    } else {
+        "New connection"
+    };
+
+    div()
+        .absolute()
+        .inset_0()
+        .bg(rgba(0x000000b8))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .w(px(580.))
+                .p_6()
+                .rounded_lg()
+                .bg(panel())
+                .border_1()
+                .border_color(border())
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(div().text_xl().font_weight(FontWeight::BOLD).child(title))
+                .child(field_row("Computer", ed.host.clone()))
+                .child(field_row("User name", ed.user.clone()))
+                .child(field_row("Domain", ed.domain.clone()))
+                .child(field_row("Display name", ed.name.clone()))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(div().w(px(120.)).text_sm().text_color(muted()).child("Desktop size"))
+                        .child(
+                            div()
+                                .w(px(110.))
+                                .p_2()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(border())
+                                .bg(bg())
+                                .child(ed.width.clone()),
+                        )
+                        .child(div().text_color(muted()).child("×"))
+                        .child(
+                            div()
+                                .w(px(110.))
+                                .p_2()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(border())
+                                .bg(bg())
+                                .child(ed.height.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt_1()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(checkbox_row("clipboard", "Redirect clipboard", ed.clipboard, cx))
+                        .child(checkbox_row("fullscreen", "Start in full screen", ed.fullscreen, cx)),
+                )
+                .when_some(ed.error.clone(), |element, error| {
+                    element.child(div().text_sm().text_color(gpui::rgb(0xff7777)).child(error))
+                })
+                .child(
+                    div()
+                        .mt_2()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("editor-cancel")
+                                .px_4()
+                                .py_2()
+                                .rounded_md()
+                                .bg(panel_2())
+                                .text_color(text())
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.cancel_editor(cx);
+                                }))
+                                .child("Cancel"),
+                        )
+                        .child(
+                            div()
+                                .id("editor-save")
+                                .px_4()
+                                .py_2()
+                                .rounded_md()
+                                .bg(accent())
+                                .text_color(bg())
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.save_editor(cx);
+                                }))
+                                .child("Save"),
+                        ),
+                ),
+        )
+}
+
+// ============================================================================
 // Buttons
 // ============================================================================
+
+fn toolbar_button(
+    label: &'static str,
+    enabled: bool,
+    action: fn(&mut NexDeskApp, &mut Window, &mut Context<NexDeskApp>),
+    cx: &mut Context<NexDeskApp>,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("toolbar-{label}")))
+        .px_4()
+        .py_2()
+        .rounded_md()
+        .bg(panel_2())
+        .text_color(if enabled { text() } else { muted() })
+        .when(enabled, |element| {
+            element.cursor_pointer().on_click(cx.listener(
+                move |this, _event, window, cx| {
+                    action(this, window, cx);
+                },
+            ))
+        })
+        .child(label)
+}
 
 fn action_button(
     label: &'static str,
@@ -683,8 +1152,12 @@ fn dialog_button(
 // Password input state
 // ============================================================================
 
-pub struct PasswordInput {
+/// Single-line text input. `masked` renders bullets (password fields).
+pub struct TextInput {
     pub focus_handle: FocusHandle,
+
+    masked: bool,
+    placeholder: SharedString,
 
     content: String,
     selected_range: Range<usize>,
@@ -695,10 +1168,12 @@ pub struct PasswordInput {
     last_bounds: Option<Bounds<Pixels>>,
 }
 
-impl PasswordInput {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+impl TextInput {
+    pub fn new(cx: &mut Context<Self>, masked: bool, placeholder: &'static str) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            masked,
+            placeholder: SharedString::from(placeholder),
             content: String::new(),
             selected_range: 0..0,
             selection_reversed: false,
@@ -710,6 +1185,15 @@ impl PasswordInput {
 
     pub fn value(&self) -> String {
         self.content.clone()
+    }
+
+    pub fn set_value(&mut self, value: &str, cx: &mut Context<Self>) {
+        self.content = value.replace(['\n', '\r'], " ");
+        let end = self.content.len();
+        self.selected_range = end..end;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
@@ -771,7 +1255,7 @@ impl PasswordInput {
         cx.notify();
     }
 
-    fn left(&mut self, _action: &PasswordLeft, _window: &mut Window, cx: &mut Context<Self>) {
+    fn left(&mut self, _action: &InputLeft, _window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);
         } else {
@@ -779,7 +1263,7 @@ impl PasswordInput {
         }
     }
 
-    fn right(&mut self, _action: &PasswordRight, _window: &mut Window, cx: &mut Context<Self>) {
+    fn right(&mut self, _action: &InputRight, _window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.next_boundary(self.cursor_offset()), cx);
         } else {
@@ -789,7 +1273,7 @@ impl PasswordInput {
 
     fn select_left(
         &mut self,
-        _action: &PasswordSelectLeft,
+        _action: &InputSelectLeft,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -798,7 +1282,7 @@ impl PasswordInput {
 
     fn select_right(
         &mut self,
-        _action: &PasswordSelectRight,
+        _action: &InputSelectRight,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -807,7 +1291,7 @@ impl PasswordInput {
 
     fn select_all(
         &mut self,
-        _action: &PasswordSelectAll,
+        _action: &InputSelectAll,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -817,17 +1301,17 @@ impl PasswordInput {
         cx.notify();
     }
 
-    fn home(&mut self, _action: &PasswordHome, _window: &mut Window, cx: &mut Context<Self>) {
+    fn home(&mut self, _action: &InputHome, _window: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
     }
 
-    fn end(&mut self, _action: &PasswordEnd, _window: &mut Window, cx: &mut Context<Self>) {
+    fn end(&mut self, _action: &InputEnd, _window: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
     }
 
     fn backspace(
         &mut self,
-        _action: &PasswordBackspace,
+        _action: &InputBackspace,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -846,7 +1330,7 @@ impl PasswordInput {
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn delete(&mut self, _action: &PasswordDelete, window: &mut Window, cx: &mut Context<Self>) {
+    fn delete(&mut self, _action: &InputDelete, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let cursor = self.cursor_offset();
 
@@ -862,13 +1346,13 @@ impl PasswordInput {
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn paste(&mut self, _action: &PasswordPaste, window: &mut Window, cx: &mut Context<Self>) {
+    fn paste(&mut self, _action: &InputPaste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_text_in_range(None, &text.replace('\n', ""), window, cx);
         }
     }
 
-    fn copy(&mut self, _action: &PasswordCopy, _window: &mut Window, cx: &mut Context<Self>) {
+    fn copy(&mut self, _action: &InputCopy, _window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             return;
         }
@@ -878,8 +1362,8 @@ impl PasswordInput {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
-    fn cut(&mut self, _action: &PasswordCut, window: &mut Window, cx: &mut Context<Self>) {
-        self.copy(&PasswordCopy, window, cx);
+    fn cut(&mut self, _action: &InputCut, window: &mut Window, cx: &mut Context<Self>) {
+        self.copy(&InputCopy, window, cx);
 
         self.replace_text_in_range(None, "", window, cx);
     }
@@ -929,7 +1413,7 @@ impl PasswordInput {
 // GPUI text input handler
 // ============================================================================
 
-impl EntityInputHandler for PasswordInput {
+impl EntityInputHandler for TextInput {
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,
@@ -1082,17 +1566,17 @@ impl EntityInputHandler for PasswordInput {
 // Password input element
 // ============================================================================
 
-struct PasswordInputElement {
-    input: Entity<PasswordInput>,
+struct TextInputElement {
+    input: Entity<TextInput>,
 }
 
-struct PasswordInputPrepaintState {
+struct TextInputPrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
 }
 
-impl IntoElement for PasswordInputElement {
+impl IntoElement for TextInputElement {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -1100,9 +1584,9 @@ impl IntoElement for PasswordInputElement {
     }
 }
 
-impl Element for PasswordInputElement {
+impl Element for TextInputElement {
     type RequestLayoutState = ();
-    type PrepaintState = PasswordInputPrepaintState;
+    type PrepaintState = TextInputPrepaintState;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -1140,10 +1624,25 @@ impl Element for PasswordInputElement {
 
         let content = input.content.clone();
 
+        let masked = input.masked;
         let display_text = if content.is_empty() {
-            SharedString::from("Password")
-        } else {
+            input.placeholder.clone()
+        } else if masked {
             SharedString::from("•".repeat(content.chars().count()))
+        } else {
+            SharedString::from(content.clone())
+        };
+        // Byte offset in `content` -> byte offset in the displayed string. Bullets are 3 bytes
+        // each, so masked fields need the char-count mapping (otherwise the caret drifts left).
+        let to_display = |offset: usize| -> usize {
+            let offset = offset.min(content.len());
+            if masked && !content.is_empty() {
+                content[..offset].chars().count() * '•'.len_utf8()
+            } else if content.is_empty() {
+                0
+            } else {
+                offset
+            }
         };
 
         let selected_range = input.selected_range.clone();
@@ -1173,7 +1672,7 @@ impl Element for PasswordInputElement {
             .text_system()
             .shape_line(display_text, font_size, &[run], None);
 
-        let cursor_pos = line.x_for_index(cursor.min(line.text.len()));
+        let cursor_pos = line.x_for_index(to_display(cursor));
 
         let (selection, cursor) = if selected_range.is_empty() {
             (
@@ -1191,11 +1690,11 @@ impl Element for PasswordInputElement {
                 Some(fill(
                     Bounds::from_corners(
                         Point::new(
-                            bounds.left() + line.x_for_index(selected_range.start),
+                            bounds.left() + line.x_for_index(to_display(selected_range.start)),
                             bounds.top(),
                         ),
                         Point::new(
-                            bounds.left() + line.x_for_index(selected_range.end),
+                            bounds.left() + line.x_for_index(to_display(selected_range.end)),
                             bounds.bottom(),
                         ),
                     ),
@@ -1205,7 +1704,7 @@ impl Element for PasswordInputElement {
             )
         };
 
-        PasswordInputPrepaintState {
+        TextInputPrepaintState {
             line: Some(line),
             cursor,
             selection,
@@ -1260,16 +1759,22 @@ impl Element for PasswordInputElement {
 }
 
 // ============================================================================
-// Render PasswordInput
+// Render TextInput
 // ============================================================================
 
-impl Render for PasswordInput {
+impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
-            .key_context("NexDeskPasswordInput")
+            .key_context("NexDeskTextInput")
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, window, cx| {
+                    window.focus(&this.focus_handle, cx);
+                }),
+            )
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
@@ -1288,7 +1793,7 @@ impl Render for PasswordInput {
                 div()
                     .h(px(24.))
                     .w_full()
-                    .child(PasswordInputElement { input: cx.entity() }),
+                    .child(TextInputElement { input: cx.entity() }),
             )
     }
 }
@@ -1300,30 +1805,30 @@ impl Render for PasswordInput {
 pub fn run(engine_path: std::path::PathBuf) {
     application().run(move |cx: &mut App| {
         cx.bind_keys([
-            KeyBinding::new("backspace", PasswordBackspace, Some("NexDeskPasswordInput")),
-            KeyBinding::new("delete", PasswordDelete, Some("NexDeskPasswordInput")),
-            KeyBinding::new("left", PasswordLeft, Some("NexDeskPasswordInput")),
-            KeyBinding::new("right", PasswordRight, Some("NexDeskPasswordInput")),
+            KeyBinding::new("backspace", InputBackspace, Some("NexDeskTextInput")),
+            KeyBinding::new("delete", InputDelete, Some("NexDeskTextInput")),
+            KeyBinding::new("left", InputLeft, Some("NexDeskTextInput")),
+            KeyBinding::new("right", InputRight, Some("NexDeskTextInput")),
             KeyBinding::new(
                 "shift-left",
-                PasswordSelectLeft,
-                Some("NexDeskPasswordInput"),
+                InputSelectLeft,
+                Some("NexDeskTextInput"),
             ),
             KeyBinding::new(
                 "shift-right",
-                PasswordSelectRight,
-                Some("NexDeskPasswordInput"),
+                InputSelectRight,
+                Some("NexDeskTextInput"),
             ),
-            KeyBinding::new("cmd-a", PasswordSelectAll, Some("NexDeskPasswordInput")),
-            KeyBinding::new("ctrl-a", PasswordSelectAll, Some("NexDeskPasswordInput")),
-            KeyBinding::new("cmd-v", PasswordPaste, Some("NexDeskPasswordInput")),
-            KeyBinding::new("ctrl-v", PasswordPaste, Some("NexDeskPasswordInput")),
-            KeyBinding::new("cmd-c", PasswordCopy, Some("NexDeskPasswordInput")),
-            KeyBinding::new("ctrl-c", PasswordCopy, Some("NexDeskPasswordInput")),
-            KeyBinding::new("cmd-x", PasswordCut, Some("NexDeskPasswordInput")),
-            KeyBinding::new("ctrl-x", PasswordCut, Some("NexDeskPasswordInput")),
-            KeyBinding::new("home", PasswordHome, Some("NexDeskPasswordInput")),
-            KeyBinding::new("end", PasswordEnd, Some("NexDeskPasswordInput")),
+            KeyBinding::new("cmd-a", InputSelectAll, Some("NexDeskTextInput")),
+            KeyBinding::new("ctrl-a", InputSelectAll, Some("NexDeskTextInput")),
+            KeyBinding::new("cmd-v", InputPaste, Some("NexDeskTextInput")),
+            KeyBinding::new("ctrl-v", InputPaste, Some("NexDeskTextInput")),
+            KeyBinding::new("cmd-c", InputCopy, Some("NexDeskTextInput")),
+            KeyBinding::new("ctrl-c", InputCopy, Some("NexDeskTextInput")),
+            KeyBinding::new("cmd-x", InputCut, Some("NexDeskTextInput")),
+            KeyBinding::new("ctrl-x", InputCut, Some("NexDeskTextInput")),
+            KeyBinding::new("home", InputHome, Some("NexDeskTextInput")),
+            KeyBinding::new("end", InputEnd, Some("NexDeskTextInput")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1120.), px(720.)), cx);
