@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=NexDesk
+Comment=Enterprise Remote Desktop
+Exec=nexdesk
+Icon=computer
+Terminal=false
+Type=Application
+Categories=Network;RemoteAccess;

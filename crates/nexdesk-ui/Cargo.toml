@@ -1,0 +1,12 @@
+[package]
+name = "nexdesk-ui"
+description = "GPUI presentation components and manager state for NexDesk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", branch = "main", package = "gpui" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", branch = "main", package = "gpui_platform", features = ["font-kit", "wayland", "x11"] }
+nexdesk-core = { path = "../nexdesk-core" }
+nexdesk-session = { path = "../nexdesk-session" }

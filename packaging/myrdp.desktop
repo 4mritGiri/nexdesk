@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=myrdp
+Comment=Remote Desktop Connection
+Exec=myrdp-app
+Terminal=false
+Categories=Network;RemoteAccess;

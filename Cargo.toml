@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nexdesk-core",
+    "crates/nexdesk-session",
+    "crates/nexdesk-renderer",
+    "crates/nexdesk-ui",
+    "crates/nexdesk-rdp",
+    "crates/nexdesk",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

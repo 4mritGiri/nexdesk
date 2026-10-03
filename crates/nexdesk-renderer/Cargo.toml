@@ -1,0 +1,9 @@
+[package]
+name = "nexdesk-renderer"
+description = "UI-independent framebuffer and display abstractions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nexdesk-core = { path = "../nexdesk-core" }

@@ -1,0 +1,9 @@
+[package]
+name = "nexdesk-core"
+description = "UI-agnostic connection, RDP-file, scaling and secure file-transfer primitives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zeroize = { version = "1", features = ["zeroize_derive"] }
