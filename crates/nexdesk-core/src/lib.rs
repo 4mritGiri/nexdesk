@@ -2,6 +2,7 @@
 //! Security-sensitive parsing, profile persistence, coordinate mapping and file staging live here.
 pub mod clipfiles;
 pub mod credentials;
+pub mod knownhosts;
 pub mod profiles;
 pub mod rdpfile;
 pub mod scale;

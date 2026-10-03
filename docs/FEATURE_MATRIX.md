@@ -10,9 +10,11 @@ Legend: **Done** = written (not all compiled/tested yet) · **Next** = planned, 
 | Server cursor shapes | yes | **Done** |
 | Passwords never on disk, zeroized in memory | keyring option | **Done** (no keyring yet) |
 | Process isolation per session (crash-safe) | no | **Done** |
-| Clipboard text/images (Linux) | yes | **Gap**: stock IronRDP is a stub on Linux (docs/CLIPBOARD.md) |
-| Clipboard **files** Windows -> Linux | partial | **Next**: helpers + tests exist in `nexdesk-core::clipfiles` |
-| TLS certificate verification / known hosts | yes | **Gap, top security item**: IronRDP client skips verification |
+| Clipboard text/images (Linux) | yes | **Done**: X11 + Wayland (via XWayland), needs real-server testing (docs/CLIPBOARD.md) |
+| Clipboard **files** both directions, folders | partial | **Done**: staged download + streamed upload |
+| Drag & drop files onto the session | yes | **Done** on X11/XWayland (`--x11`); native Wayland blocked by winit |
+| Full-screen connection bar (min/restore/close/pin) | yes | **Done** |
+| TLS certificate verification / known hosts | yes | **Done**: system trust store, else TOFU pinning + changed-cert warning, handshake signatures verified |
 | OS keyring (Secret Service) credentials | yes | **Next**: `CredentialStore` trait is ready |
 | Drive redirection | yes | **Next** |
 | Auto-reconnect | yes | **Next**: lifecycle states exist |

@@ -56,3 +56,12 @@ NEXDESK_PASSWORD='...' ./target/release/nexdesk-rdp --host jump.example.com -u a
 The original `myrdp` core/viewer/app crates were converted into the NexDesk crate names rather than discarded. The existing IronRDP connection, keyboard, mouse, scaling and clipboard behavior remains in `nexdesk-rdp`/`nexdesk-core`.
 
 The new session layer is deliberately a foundation: reconnect policy and OS keyring storage are exposed as boundaries so they can be added without coupling the GPUI UI to IronRDP internals.
+
+## Viewer features added in this revision
+* **Full-screen connection bar** (like mstsc): move the mouse to the top edge; pin / minimise / restore / close. `Ctrl+Alt+Break` still toggles full screen.
+* **Clipboard**: text, images and files in both directions, X11 and Wayland (XWayland). See `docs/CLIPBOARD.md`.
+* **Drag & drop** local files onto the window (use `--x11` on Wayland).
+* **TLS verification**: `--tls ask|accept-new|strict|insecure`, pins fingerprints in `~/.config/nexdesk/known_hosts`, `--forget-host` to reset.
+* Connection errors are shown inside the window instead of only on stderr.
+
+Local patches to IronRDP are in `vendor/` (see `vendor/README.md`).

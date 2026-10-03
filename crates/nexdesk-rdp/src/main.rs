@@ -2,6 +2,8 @@
 mod app;
 mod grab;
 mod keymap;
+mod tls;
+mod ui;
 
 use std::path::PathBuf;
 
@@ -31,10 +33,16 @@ OPTIONS:
   --dynamic-resize       (experimental) resize the remote desktop with the window
   --fullscreen           start full screen
   --no-key-capture       do not send Super/Alt+Tab to the remote while full screen
-  --no-clipboard         disable clipboard redirection
+  --no-clipboard         disable clipboard redirection (text, images, files)
+  --no-drop-paste        after dropping files on the window, do not press Ctrl+V on the remote
+  --tls <MODE>           server certificate checking: ask (default) | accept-new | strict | insecure
+  --forget-host          delete the pinned certificate for this host, then continue
+  --x11 / --wayland      force the window system (default: automatic). File drops from the
+                         local desktop need --x11 on Wayland (the winit toolkit lacks Wayland DnD)
   -h, --help             show this help
 
 The password is read from $NEXDESK_PASSWORD or prompted (never passed as an argument).
+In full screen, move the mouse to the top edge to show the connection bar (pin, minimise, restore, close).
 Hotkeys: Ctrl+Alt+End = Ctrl+Alt+Del on the remote; Ctrl+Alt+Break = toggle full screen. Logs: NEXDESK_LOG=debug
 ";
 
@@ -49,6 +57,16 @@ struct Args {
     fullscreen: bool,
     capture_keys: bool,
     clipboard: bool,
+    drop_paste: bool,
+    tls: tls::Policy,
+    forget_host: bool,
+    backend: Option<Backend>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    X11,
+    Wayland,
 }
 
 fn parse_args() -> Result<Option<Args>> {
@@ -63,6 +81,10 @@ fn parse_args() -> Result<Option<Args>> {
         fullscreen: false,
         capture_keys: true,
         clipboard: true,
+        drop_paste: true,
+        tls: std::env::var("NEXDESK_TLS").ok().and_then(|v| tls::Policy::parse(&v)).unwrap_or(tls::Policy::Ask),
+        forget_host: false,
+        backend: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -82,6 +104,14 @@ fn parse_args() -> Result<Option<Args>> {
             "--fullscreen" => a.fullscreen = true,
             "--no-key-capture" => a.capture_keys = false,
             "--no-clipboard" => a.clipboard = false,
+            "--no-drop-paste" => a.drop_paste = false,
+            "--forget-host" => a.forget_host = true,
+            "--x11" => a.backend = Some(Backend::X11),
+            "--wayland" => a.backend = Some(Backend::Wayland),
+            "--tls" => {
+                let v = val("--tls")?;
+                a.tls = tls::Policy::parse(&v).with_context(|| format!("--tls: unknown mode {v:?}"))?;
+            }
             other => bail!("unknown argument: {other}\n\n{HELP}"),
         }
     }
@@ -160,15 +190,78 @@ fn main() -> Result<()> {
     if let Some(d) = domain {
         builder = builder.with_domain(d);
     }
-    let config = builder.build()?;
+    let mut config = builder.build()?;
+
+    // ---- TLS: pin / verify the server certificate (stock IronRDP accepts anything)
+    let known_path = nexdesk_core::knownhosts::default_path();
+    let key = nexdesk_core::knownhosts::host_key(config.destination().name(), config.destination().port());
+    let mut known = match &known_path {
+        Some(p) => nexdesk_core::knownhosts::KnownHosts::load(p),
+        None => nexdesk_core::knownhosts::KnownHosts::in_memory(),
+    };
+    if args.forget_host {
+        match known.forget(&key) {
+            Ok(true) => eprintln!("forgot the pinned certificate for {key}"),
+            Ok(false) => eprintln!("no pinned certificate for {key}"),
+            Err(e) => eprintln!("cannot update known_hosts: {e}"),
+        }
+    }
+
+    let mut builder = EventLoop::<UserEvent>::with_user_event();
+    #[cfg(target_os = "linux")]
+    match args.backend {
+        Some(Backend::X11) => {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            builder.with_x11();
+        }
+        Some(Backend::Wayland) => {
+            use winit::platform::wayland::EventLoopBuilderExtWayland;
+            builder.with_wayland();
+        }
+        None => {}
+    }
+    let event_loop = builder.build()?;
+    let proxy = event_loop.create_proxy();
+
+    if args.tls != tls::Policy::Insecure {
+        let prompt_proxy = proxy.clone();
+        let prompt: tls::Prompt = std::sync::Arc::new(move |info| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            if prompt_proxy.send_event(UserEvent::CertPrompt(info, tx)).is_err() {
+                return false;
+            }
+            rx.recv_timeout(std::time::Duration::from_secs(300)).unwrap_or(false)
+        });
+        let verifier = tls::PolicyVerifier::new(
+            config.destination().name(),
+            config.destination().port(),
+            args.tls,
+            known,
+            prompt,
+        );
+        config.set_tls_verifier(verifier);
+    } else {
+        eprintln!("WARNING: --tls insecure: the server certificate is NOT verified");
+    }
 
     // Protocol engine runs on its own tokio runtime; the UI thread owns the window.
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<RdpOutputEvent>(64);
-    let client = RdpClient::new(config, out_tx);
+    let mut client = RdpClient::new(config, out_tx);
     let input_tx = client.input_sender();
 
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
-    let proxy = event_loop.create_proxy();
+    // ---- Clipboard: real Linux backend instead of IronRDP's no-op stub
+    let mut clip_handle = None;
+    if args.clipboard {
+        let sink_tx = input_tx.clone();
+        let clip = nexdesk_clipboard::LinuxClipboard::new(
+            std::sync::Arc::new(move |m| {
+                let _ = sink_tx.send(ironrdp_client::rdp::RdpInputEvent::Clipboard(m));
+            }),
+            nexdesk_clipboard::Config::default(),
+        );
+        client.set_clipboard_factory(clip.backend_factory());
+        clip_handle = Some(clip.handle());
+    }
 
     std::thread::Builder::new()
         .name("rdp-engine".into())
@@ -190,12 +283,17 @@ fn main() -> Result<()> {
         })?;
 
     let mut app = App::new(
-        format!("nexdesk - {host}"),
-        (u32::from(width), u32::from(height)),
-        args.dynamic_resize,
-        args.fullscreen || file.get_int("screen mode id") == Some(2),
-        args.capture_keys,
+        app::Options {
+            title: format!("nexdesk - {host}"),
+            host_label: host.clone(),
+            initial_size: (u32::from(width), u32::from(height)),
+            dynamic_resize: args.dynamic_resize,
+            start_fullscreen: args.fullscreen || file.get_int("screen mode id") == Some(2),
+            capture_keys: args.capture_keys,
+            drop_paste: args.drop_paste,
+        },
         input_tx,
+        clip_handle,
     );
     event_loop.run_app(&mut app)?;
 

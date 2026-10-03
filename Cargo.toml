@@ -6,6 +6,7 @@ members = [
     "crates/nexdesk-renderer",
     "crates/nexdesk-ui",
     "crates/nexdesk-rdp",
+    "crates/nexdesk-clipboard",
     "crates/nexdesk",
 ]
 
@@ -18,3 +19,10 @@ license = "MIT OR Apache-2.0"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Local patches of two IronRDP crates (see vendor/README.md):
+#  * ironrdp-client: lets the embedding app inject a clipboard backend and a TLS verifier
+#  * ironrdp-tls:    adds `upgrade_with_verifier` (stock code accepts every certificate)
+[patch.crates-io]
+ironrdp-client = { path = "vendor/ironrdp-client" }
+ironrdp-tls = { path = "vendor/ironrdp-tls" }

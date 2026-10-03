@@ -1,0 +1,16 @@
+[package]
+name = "nexdesk-clipboard"
+description = "Linux clipboard + file-transfer backend for IronRDP's CLIPRDR channel (X11 and Wayland via XWayland)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nexdesk-core = { path = "../nexdesk-core" }
+ironrdp-cliprdr = "0.7"
+ironrdp-core = "0.2"
+tracing = "0.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(unix)'.dependencies]
+x11rb = { version = "0.13", features = ["xfixes"] }

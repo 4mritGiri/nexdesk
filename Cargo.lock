@@ -2369,6 +2369,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "font8x8"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
+
+[[package]]
 name = "fontconfig-parser"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3637,8 +3643,6 @@ dependencies = [
 [[package]]
 name = "ironrdp-client"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2a3b44f8af101cf5a8cc5bf80470d64099c95c553d5597dec55ff38a821243e"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -3882,8 +3886,6 @@ dependencies = [
 [[package]]
 name = "ironrdp-tls"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea5f0bb732e33159834f06a687f5415dae1a82c71c123c1c3a3689d41ed47645"
 dependencies = [
  "tokio",
  "tokio-rustls",
@@ -4540,6 +4542,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexdesk-clipboard"
+version = "0.2.0"
+dependencies = [
+ "image",
+ "ironrdp-cliprdr",
+ "ironrdp-core",
+ "nexdesk-core",
+ "tracing",
+ "x11rb",
+]
+
+[[package]]
 name = "nexdesk-core"
 version = "0.2.0"
 dependencies = [
@@ -4551,12 +4565,17 @@ name = "nexdesk-rdp"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "font8x8",
  "ironrdp-client",
  "ironrdp-input",
  "ironrdp-pdu",
+ "ironrdp-tls",
+ "nexdesk-clipboard",
  "nexdesk-core",
  "picky-krb",
  "rpassword",
+ "rustls-native-certs",
+ "sha2 0.10.9",
  "softbuffer",
  "tokio",
  "tracing",
@@ -4565,6 +4584,7 @@ dependencies = [
  "wayland-protocols",
  "winit",
  "x11-dl",
+ "x509-cert",
 ]
 
 [[package]]
