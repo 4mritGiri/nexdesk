@@ -7,13 +7,21 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 pub struct Secret(String);
 
 impl Secret {
-    pub fn new(value: impl Into<String>) -> Self { Self(value.into()) }
-    pub fn expose(&self) -> &str { &self.0 }
-    pub fn is_empty(&self) -> bool { self.0.is_empty() }
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl fmt::Debug for Secret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("Secret(REDACTED)") }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret(REDACTED)")
+    }
 }
 
 pub trait CredentialStore: Send + Sync {
@@ -29,7 +37,10 @@ pub enum CredentialError {
 }
 impl fmt::Display for CredentialError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self { Self::Unavailable(s) => write!(f, "credential store unavailable: {s}"), Self::Failed(s) => write!(f, "credential operation failed: {s}") }
+        match self {
+            Self::Unavailable(s) => write!(f, "credential store unavailable: {s}"),
+            Self::Failed(s) => write!(f, "credential operation failed: {s}"),
+        }
     }
 }
 impl std::error::Error for CredentialError {}
@@ -41,7 +52,11 @@ impl CredentialStore for EphemeralCredentialStore {
         Ok(std::env::var("NEXDESK_PASSWORD").ok().map(Secret::new))
     }
     fn set_password(&self, _profile_id: &str, _password: Secret) -> Result<(), CredentialError> {
-        Err(CredentialError::Unavailable("ephemeral store cannot persist passwords".into()))
+        Err(CredentialError::Unavailable(
+            "ephemeral store cannot persist passwords".into(),
+        ))
     }
-    fn delete_password(&self, _profile_id: &str) -> Result<(), CredentialError> { Ok(()) }
+    fn delete_password(&self, _profile_id: &str) -> Result<(), CredentialError> {
+        Ok(())
+    }
 }

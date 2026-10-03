@@ -92,15 +92,20 @@ fn platform() -> MajorPlatformType {
 fn main() -> Result<()> {
     use tracing_subscriber::EnvFilter;
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_env("NEXDESK_LOG").unwrap_or_else(|_| EnvFilter::new("warn")))
+        .with_env_filter(
+            EnvFilter::try_from_env("NEXDESK_LOG").unwrap_or_else(|_| EnvFilter::new("warn")),
+        )
         .init();
 
-    let Some(args) = parse_args()? else { return Ok(()) };
+    let Some(args) = parse_args()? else {
+        return Ok(());
+    };
 
     // .rdp file values act as defaults; explicit flags win.
     let file = match &args.rdp {
         Some(p) => {
-            let text = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+            let text =
+                std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
             RdpFile::parse(&text)
         }
         None => RdpFile::default(),
@@ -116,7 +121,10 @@ fn main() -> Result<()> {
         .clone()
         .or_else(|| file.username().map(str::to_owned))
         .context("no username given: use -u or put it in the .rdp file")?;
-    let domain = args.domain.clone().or_else(|| file.domain().map(str::to_owned));
+    let domain = args
+        .domain
+        .clone()
+        .or_else(|| file.domain().map(str::to_owned));
     let (fw, fh) = file.desktop_size().unwrap_or((1920, 1080));
     let (width, height) = (args.width.unwrap_or(fw), args.height.unwrap_or(fh));
 
@@ -135,7 +143,11 @@ fn main() -> Result<()> {
         .with_platform(platform())
         .with_desktop_width(width)
         .with_desktop_height(height)
-        .with_clipboard(if args.clipboard { ClipboardType::Enable } else { ClipboardType::Disable });
+        .with_clipboard(if args.clipboard {
+            ClipboardType::Enable
+        } else {
+            ClipboardType::Disable
+        });
     if let Some(d) = domain {
         builder = builder.with_domain(d);
     }

@@ -57,7 +57,10 @@ pub fn file_uri(path: &Path) -> Option<String> {
     if !path.is_absolute() {
         return None;
     }
-    Some(format!("file://{}", percent_encode_path(&path.to_string_lossy())))
+    Some(format!(
+        "file://{}",
+        percent_encode_path(&path.to_string_lossy())
+    ))
 }
 
 /// Payload for the `text/uri-list` clipboard target (CRLF terminated lines).
@@ -117,9 +120,9 @@ impl StagingDir {
     /// Create the directory (or the parent directories of the file) for `entry`
     /// and return the destination path the caller should write bytes to.
     pub fn prepare_entry(&self, entry: &FileEntry) -> io::Result<PathBuf> {
-        let path = self
-            .resolve(&entry.rel_path)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe path from server"))?;
+        let path = self.resolve(&entry.rel_path).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "unsafe path from server")
+        })?;
         if entry.is_dir {
             std::fs::create_dir_all(&path)?;
         } else if let Some(parent) = path.parent() {
@@ -154,8 +157,14 @@ mod tests {
 
     #[test]
     fn sanitize_accepts_normal_and_converts_separators() {
-        assert_eq!(sanitize_relative_path("a\\b\\c.txt").as_deref(), Some("a/b/c.txt"));
-        assert_eq!(sanitize_relative_path("\\\\lead\\x").as_deref(), Some("lead/x"));
+        assert_eq!(
+            sanitize_relative_path("a\\b\\c.txt").as_deref(),
+            Some("a/b/c.txt")
+        );
+        assert_eq!(
+            sanitize_relative_path("\\\\lead\\x").as_deref(),
+            Some("lead/x")
+        );
         assert_eq!(sanitize_relative_path("./x/./y").as_deref(), Some("x/y"));
     }
 
@@ -172,17 +181,26 @@ mod tests {
 
     #[test]
     fn uri_encoding() {
-        assert_eq!(percent_encode_path("/tmp/my file#1.txt"), "/tmp/my%20file%231.txt");
+        assert_eq!(
+            percent_encode_path("/tmp/my file#1.txt"),
+            "/tmp/my%20file%231.txt"
+        );
         assert_eq!(percent_encode_path("/tmp/é"), "/tmp/%C3%A9");
         assert_eq!(file_uri(Path::new("relative")), None);
-        assert_eq!(file_uri(Path::new("/tmp/a b")).as_deref(), Some("file:///tmp/a%20b"));
+        assert_eq!(
+            file_uri(Path::new("/tmp/a b")).as_deref(),
+            Some("file:///tmp/a%20b")
+        );
     }
 
     #[test]
     fn clipboard_payloads() {
         let p = vec![PathBuf::from("/tmp/a b"), PathBuf::from("/tmp/c")];
         assert_eq!(uri_list(&p), "file:///tmp/a%20b\r\nfile:///tmp/c\r\n");
-        assert_eq!(gnome_copied_files(&p, false), "copy\nfile:///tmp/a%20b\nfile:///tmp/c");
+        assert_eq!(
+            gnome_copied_files(&p, false),
+            "copy\nfile:///tmp/a%20b\nfile:///tmp/c"
+        );
         assert_eq!(gnome_copied_files(&p[..1], true), "cut\nfile:///tmp/a%20b");
     }
 
@@ -197,9 +215,21 @@ mod tests {
         assert!(StagingDir::create(&base, "a/b").is_err());
 
         let entries = vec![
-            FileEntry { rel_path: "Docs".into(), size: 0, is_dir: true },
-            FileEntry { rel_path: "Docs\\r.txt".into(), size: 3, is_dir: false },
-            FileEntry { rel_path: "solo.bin".into(), size: 9, is_dir: false },
+            FileEntry {
+                rel_path: "Docs".into(),
+                size: 0,
+                is_dir: true,
+            },
+            FileEntry {
+                rel_path: "Docs\\r.txt".into(),
+                size: 3,
+                is_dir: false,
+            },
+            FileEntry {
+                rel_path: "solo.bin".into(),
+                size: 9,
+                is_dir: false,
+            },
         ];
         for e in &entries {
             let p = sd.prepare_entry(e).unwrap();
@@ -207,11 +237,18 @@ mod tests {
         }
         assert!(sd.root().join("Docs").is_dir());
 
-        let evil = FileEntry { rel_path: "..\\..\\x".into(), size: 1, is_dir: false };
+        let evil = FileEntry {
+            rel_path: "..\\..\\x".into(),
+            size: 1,
+            is_dir: false,
+        };
         assert!(sd.prepare_entry(&evil).is_err());
 
         let top = sd.top_level_paths(&entries);
-        assert_eq!(top, vec![sd.root().join("Docs"), sd.root().join("solo.bin")]);
+        assert_eq!(
+            top,
+            vec![sd.root().join("Docs"), sd.root().join("solo.bin")]
+        );
 
         let root = sd.root().to_path_buf();
         sd.cleanup().unwrap();

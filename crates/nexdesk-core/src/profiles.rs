@@ -19,7 +19,9 @@ pub struct Profile {
 impl Profile {
     /// Stable, filesystem-safe identity used by the session and credential layers.
     pub fn profile_id(&self) -> String {
-        file_stem_for(&self.name).unwrap_or_else(|| "connection".into()).to_ascii_lowercase()
+        file_stem_for(&self.name)
+            .unwrap_or_else(|| "connection".into())
+            .to_ascii_lowercase()
     }
 }
 
@@ -92,7 +94,13 @@ pub fn file_stem_for(name: &str) -> Option<String> {
     let s: String = name
         .trim()
         .chars()
-        .map(|c| if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let s = s.trim_matches(|c| c == '.' || c == ' ').to_string();
     if s.is_empty() || s.len() > 100 {
@@ -131,29 +139,35 @@ impl Store {
     }
 
     pub fn save(&self, p: &Profile) -> io::Result<()> {
-        let stem = file_stem_for(&p.name)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid connection name"))?;
+        let stem = file_stem_for(&p.name).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid connection name")
+        })?;
         std::fs::create_dir_all(&self.dir)?;
         std::fs::write(self.dir.join(format!("{stem}.rdp")), p.to_rdp_text())
     }
 
     pub fn delete(&self, name: &str) -> io::Result<()> {
-        let stem = file_stem_for(name)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid connection name"))?;
+        let stem = file_stem_for(name).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid connection name")
+        })?;
         std::fs::remove_file(self.dir.join(format!("{stem}.rdp")))
     }
 
     /// All saved profiles, sorted by name (case-insensitive). Unreadable files are skipped.
     pub fn list(&self) -> Vec<Profile> {
         let mut out = Vec::new();
-        let Ok(rd) = std::fs::read_dir(&self.dir) else { return out };
+        let Ok(rd) = std::fs::read_dir(&self.dir) else {
+            return out;
+        };
         for e in rd.flatten() {
             let path = e.path();
             if path.extension().and_then(|x| x.to_str()) != Some("rdp") {
                 continue;
             }
-            let (Some(stem), Ok(text)) = (path.file_stem().and_then(|s| s.to_str()), std::fs::read_to_string(&path))
-            else {
+            let (Some(stem), Ok(text)) = (
+                path.file_stem().and_then(|s| s.to_str()),
+                std::fs::read_to_string(&path),
+            ) else {
                 continue;
             };
             out.push(Profile::from_rdp(stem, &RdpFile::parse(&text)));
@@ -211,7 +225,10 @@ mod tests {
     #[test]
     fn file_stems_are_safe() {
         assert_eq!(file_stem_for("My Server-1").as_deref(), Some("My Server-1"));
-        assert_eq!(file_stem_for("../../etc/passwd").as_deref(), Some("_.._etc_passwd"));
+        assert_eq!(
+            file_stem_for("../../etc/passwd").as_deref(),
+            Some("_.._etc_passwd")
+        );
         assert_eq!(file_stem_for("a/b\\c").as_deref(), Some("a_b_c"));
         assert_eq!(file_stem_for("   "), None);
         assert_eq!(file_stem_for("..."), None);
@@ -231,7 +248,12 @@ mod tests {
         store.delete("alpha").unwrap();
         assert_eq!(store.list().len(), 1);
         assert!(store.delete("nope").is_err());
-        assert!(store.save(&Profile { name: "///".into(), ..sample() }).is_ok()); // sanitised to "___"
+        assert!(store
+            .save(&Profile {
+                name: "///".into(),
+                ..sample()
+            })
+            .is_ok()); // sanitised to "___"
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

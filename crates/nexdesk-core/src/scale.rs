@@ -50,7 +50,9 @@ pub fn blit_fit(src: &[u32], sw: u32, sh: u32, dst: &mut [u32], dw: u32, dh: u32
     if src.len() < (sw as usize) * (sh as usize) || dst.len() < (dw as usize) * (dh as usize) {
         return;
     }
-    let Some(fit) = Fit::new(sw, sh, dw, dh) else { return };
+    let Some(fit) = Fit::new(sw, sh, dw, dh) else {
+        return;
+    };
     dst[..(dw as usize) * (dh as usize)].fill(0);
 
     let xmap: Vec<u32> = (0..fit.draw_w)

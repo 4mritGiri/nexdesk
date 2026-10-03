@@ -6,7 +6,10 @@ pub enum Value {
     Str(String),
     Int(i64),
     /// Unknown type letter (e.g. `b` binary) or an `i` value that is not a number.
-    Other { ty: String, raw: String },
+    Other {
+        ty: String,
+        raw: String,
+    },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -32,9 +35,15 @@ impl RdpFile {
                 "s" => Value::Str(v.to_string()),
                 "i" => match v.trim().parse::<i64>() {
                     Ok(n) => Value::Int(n),
-                    Err(_) => Value::Other { ty: "i".into(), raw: v.into() },
+                    Err(_) => Value::Other {
+                        ty: "i".into(),
+                        raw: v.into(),
+                    },
                 },
-                other => Value::Other { ty: other.into(), raw: v.into() },
+                other => Value::Other {
+                    ty: other.into(),
+                    raw: v.into(),
+                },
             };
             map.insert(key, value);
         }

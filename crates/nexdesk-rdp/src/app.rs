@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ironrdp_client::rdp::{RdpInputEvent, RdpOutputEvent};
-use ironrdp_input::{Database, MouseButton as RdpButton, MousePosition, Operation, Scancode, WheelRotations};
+use ironrdp_input::{
+    Database, MouseButton as RdpButton, MousePosition, Operation, Scancode, WheelRotations,
+};
 use nexdesk_core::scale::{blit_fit, Fit};
 use tokio::sync::mpsc::UnboundedSender;
 use winit::application::ApplicationHandler;
@@ -88,9 +90,11 @@ impl App {
     }
 
     fn draw(&mut self) {
-        let (Some(window), Some(surface), Some(frame)) =
-            (self.window.as_ref(), self.surface.as_mut(), self.frame.as_ref())
-        else {
+        let (Some(window), Some(surface), Some(frame)) = (
+            self.window.as_ref(),
+            self.surface.as_mut(),
+            self.frame.as_ref(),
+        ) else {
             return;
         };
         let size = window.inner_size();
@@ -100,8 +104,17 @@ impl App {
         if surface.resize(w, h).is_err() {
             return;
         }
-        let Ok(mut buffer) = surface.buffer_mut() else { return };
-        blit_fit(&frame.buf, frame.w, frame.h, &mut buffer, size.width, size.height);
+        let Ok(mut buffer) = surface.buffer_mut() else {
+            return;
+        };
+        blit_fit(
+            &frame.buf,
+            frame.w,
+            frame.h,
+            &mut buffer,
+            size.width,
+            size.height,
+        );
         let _ = buffer.present();
     }
 
@@ -143,7 +156,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
-        let surface = softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
+        let surface =
+            softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
         self.window = Some(window);
         self.context = Some(context);
         self.surface = Some(surface);
@@ -152,8 +166,16 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         let UserEvent::Rdp(ev) = event;
         match ev {
-            RdpOutputEvent::Image { buffer, width, height } => {
-                self.frame = Some(Frame { buf: buffer, w: u32::from(width.get()), h: u32::from(height.get()) });
+            RdpOutputEvent::Image {
+                buffer,
+                width,
+                height,
+            } => {
+                self.frame = Some(Frame {
+                    buf: buffer,
+                    w: u32::from(width.get()),
+                    h: u32::from(height.get()),
+                });
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
