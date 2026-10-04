@@ -20,7 +20,7 @@ use crate::tls::CertInfo;
 use crate::ui::{self, BarHit, Canvas, Modal, ModalHit, Toast, Toolbar};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Cursor, CursorIcon, CustomCursor, Fullscreen, Window, WindowId};
+use winit::window::{Cursor, CursorIcon, CustomCursor, Fullscreen, ResizeDirection, Window, WindowId};
 
 use crate::grab::KeyboardGrab;
 use crate::keymap;
@@ -40,6 +40,8 @@ pub struct Options {
     pub capture_keys: bool,
     /// After a file drop, press Ctrl+V on the remote so the files land in the focused folder.
     pub drop_paste: bool,
+    /// Use the system title bar instead of NexDesk's own header bar.
+    pub native_frame: bool,
 }
 
 struct Frame {
@@ -73,6 +75,11 @@ pub struct App {
     drop_batch: Vec<PathBuf>,
     drop_deadline: Option<Instant>,
     paste_at: Option<Instant>,
+    native_frame: bool,
+    server_cursor: Cursor,
+    server_cursor_hidden: bool,
+    cursor_overridden: bool,
+    last_header_click: Option<Instant>,
     /// Set when the session ended abnormally; `main` turns this into an error exit.
     pub failure: Option<String>,
 }
@@ -108,6 +115,11 @@ impl App {
             drop_batch: Vec::new(),
             drop_deadline: None,
             paste_at: None,
+            native_frame: o.native_frame,
+            server_cursor: Cursor::Icon(CursorIcon::Default),
+            server_cursor_hidden: false,
+            cursor_overridden: false,
+            last_header_click: None,
             failure: None,
         }
     }
@@ -161,7 +173,7 @@ impl App {
             (s.width, s.height)
         };
         let f = self.frame.as_ref()?;
-        Fit::new(f.w, f.h, w, h)
+        Fit::new(f.w, f.h, w, h.saturating_sub(self.header_h() as u32))
     }
 
     /// UI scale for overlay widgets (1 on normal screens, 2 on HiDPI).
@@ -175,8 +187,86 @@ impl App {
         }
     }
 
+    /// Windowed mode with our own header bar (no system title bar).
+    fn docked(&self) -> bool {
+        !self.native_frame && !self.is_fullscreen()
+    }
+
+    /// Height of the docked header in physical pixels (0 when not docked).
+    fn header_h(&self) -> i32 {
+        if self.docked() { 40 * self.ui_scale() } else { 0 }
+    }
+
     fn bar_visible(&self) -> bool {
-        self.is_fullscreen() && self.modal.is_none() && self.toolbar.visible()
+        self.docked() || (self.is_fullscreen() && self.modal.is_none() && self.toolbar.visible())
+    }
+
+    /// Window edge under the pointer, for resizing the undecorated window.
+    fn resize_edge(&self) -> Option<ResizeDirection> {
+        let w = self.window.as_ref()?;
+        if !self.docked() || w.is_maximized() || self.modal.is_some() {
+            return None;
+        }
+        let s = w.inner_size();
+        let e = f64::from(6 * self.ui_scale());
+        let (x, y) = self.cursor;
+        let (l, r) = (x < e, x >= f64::from(s.width) - e);
+        let (t, b) = (y < e, y >= f64::from(s.height) - e);
+        Some(match (l, r, t, b) {
+            (true, _, true, _) => ResizeDirection::NorthWest,
+            (_, true, true, _) => ResizeDirection::NorthEast,
+            (true, _, _, true) => ResizeDirection::SouthWest,
+            (_, true, _, true) => ResizeDirection::SouthEast,
+            (true, ..) => ResizeDirection::West,
+            (_, true, ..) => ResizeDirection::East,
+            (_, _, true, _) => ResizeDirection::North,
+            (_, _, _, true) => ResizeDirection::South,
+            _ => return None,
+        })
+    }
+
+    /// Pointer cursor over buttons, resize cursors on edges, otherwise the server's cursor.
+    fn update_cursor(&mut self) {
+        let hit = self.bar_hit();
+        let edge = self.resize_edge();
+        let want: Option<CursorIcon> = match (hit, edge) {
+            (_, Some(d)) => Some(match d {
+                ResizeDirection::North | ResizeDirection::South => CursorIcon::NsResize,
+                ResizeDirection::East | ResizeDirection::West => CursorIcon::EwResize,
+                ResizeDirection::NorthWest | ResizeDirection::SouthEast => CursorIcon::NwseResize,
+                ResizeDirection::NorthEast | ResizeDirection::SouthWest => CursorIcon::NeswResize,
+            }),
+            (BarHit::Close | BarHit::Minimize | BarHit::Restore | BarHit::Pin, None) => Some(CursorIcon::Pointer),
+            (BarHit::Bar, None) => Some(CursorIcon::Default),
+            (BarHit::None, None) => None,
+        };
+        let Some(w) = self.window.clone() else { return };
+        match want {
+            Some(icon) => {
+                w.set_cursor_visible(true);
+                w.set_cursor(icon);
+                self.cursor_overridden = true;
+            }
+            None if self.cursor_overridden => {
+                self.cursor_overridden = false;
+                self.apply_server_cursor();
+            }
+            None => {}
+        }
+    }
+
+    fn apply_server_cursor(&self) {
+        if self.cursor_overridden {
+            return;
+        }
+        if let Some(w) = &self.window {
+            if self.server_cursor_hidden {
+                w.set_cursor_visible(false);
+            } else {
+                w.set_cursor_visible(true);
+                w.set_cursor(self.server_cursor.clone());
+            }
+        }
     }
 
     fn bar_hit(&self) -> BarHit {
@@ -184,6 +274,9 @@ impl App {
             return BarHit::None;
         }
         let w = self.window.as_ref().map(|w| w.inner_size().width as i32).unwrap_or(0);
+        if self.modal.is_some() {
+            return BarHit::None;
+        }
         self.toolbar.hit(w, self.ui_scale(), self.cursor.0, self.cursor.1)
     }
 
@@ -276,8 +369,15 @@ impl App {
         let Ok(mut buffer) = surface.buffer_mut() else {
             return;
         };
+        let hb = (if self.native_frame || window.fullscreen().is_some() { 0 } else { 40 * u }) as u32;
+        let hb = hb.min(size.height);
         match self.frame.as_ref() {
-            Some(frame) => blit_fit(&frame.buf, frame.w, frame.h, &mut buffer, size.width, size.height),
+            Some(frame) => {
+                let skip = ((hb as usize) * (size.width as usize)).min(buffer.len());
+                let (top, rest) = buffer.split_at_mut(skip);
+                top.fill(ui::BG);
+                blit_fit(&frame.buf, frame.w, frame.h, rest, size.width, size.height - hb);
+            }
             None => buffer.fill(ui::BG),
         }
         {
@@ -334,6 +434,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
+            .with_decorations(self.native_frame)
             .with_inner_size(LogicalSize::new(self.initial_size.0, self.initial_size.1))
             .with_fullscreen(
                 self.start_fullscreen
@@ -412,15 +513,13 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             RdpOutputEvent::PointerHidden => {
-                if let Some(w) = &self.window {
-                    w.set_cursor_visible(false);
-                }
+                self.server_cursor_hidden = true;
+                self.apply_server_cursor();
             }
             RdpOutputEvent::PointerDefault => {
-                if let Some(w) = &self.window {
-                    w.set_cursor_visible(true);
-                    w.set_cursor(CursorIcon::Default);
-                }
+                self.server_cursor_hidden = false;
+                self.server_cursor = Cursor::Icon(CursorIcon::Default);
+                self.apply_server_cursor();
             }
             RdpOutputEvent::PointerBitmap(p) => {
                 // The server sends premultiplied RGBA; winit wants straight alpha.
@@ -437,18 +536,15 @@ impl ApplicationHandler<UserEvent> for App {
                 let (hx, hy) = (p.hotspot_x.min(w.saturating_sub(1)), p.hotspot_y.min(h.saturating_sub(1)));
                 match CustomCursor::from_rgba(rgba, w, h, hx, hy) {
                     Ok(src) => {
-                        let cursor = el.create_custom_cursor(src);
-                        if let Some(win) = &self.window {
-                            win.set_cursor(Cursor::Custom(cursor));
-                            win.set_cursor_visible(true);
-                        }
+                        self.server_cursor = Cursor::Custom(el.create_custom_cursor(src));
+                        self.server_cursor_hidden = false;
+                        self.apply_server_cursor();
                     }
                     Err(e) => {
                         tracing::debug!("bad pointer bitmap: {e}");
-                        if let Some(win) = &self.window {
-                            win.set_cursor_visible(true);
-                            win.set_cursor(CursorIcon::Default);
-                        }
+                        self.server_cursor = Cursor::Icon(CursorIcon::Default);
+                        self.server_cursor_hidden = false;
+                        self.apply_server_cursor();
                     }
                 }
             }
@@ -474,6 +570,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        self.toolbar.docked = self.docked();
         match event {
             WindowEvent::CloseRequested => {
                 if let Some(m) = self.modal.take() {
@@ -493,12 +590,15 @@ impl ApplicationHandler<UserEvent> for App {
                     self.redraw();
                 }
             }
-            WindowEvent::RedrawRequested => self.draw(),
+            WindowEvent::RedrawRequested => {
+                self.toolbar.docked = self.docked();
+                self.draw()
+            }
             WindowEvent::Resized(size) => {
                 self.sync_grab(); // leaving/entering full screen via the window manager
                 if self.dynamic_resize && size.width > 0 && size.height > 0 {
                     let w = (size.width.min(8192) & !1) as u16; // width must be even
-                    let h = size.height.min(8192) as u16;
+                    let h = size.height.saturating_sub(self.header_h() as u32).min(8192) as u16;
                     self.pending_resize = Some((Instant::now() + Duration::from_millis(400), w, h));
                 }
                 if let Some(w) = &self.window {
@@ -538,6 +638,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                self.update_cursor();
                 if self.modal.is_some() {
                     self.redraw();
                     return;
@@ -556,9 +657,14 @@ impl ApplicationHandler<UserEvent> for App {
                     if self.toolbar.visible() {
                         self.redraw(); // hover highlight cleared
                     }
+                } else if self.docked() {
+                    self.redraw(); // hover glyphs on the dots
+                    if self.bar_hit() != BarHit::None || self.resize_edge().is_some() {
+                        return;
+                    }
                 }
                 if let Some(fit) = self.fit() {
-                    let (x, y) = fit.to_remote(position.x, position.y);
+                    let (x, y) = fit.to_remote(position.x, position.y - f64::from(self.header_h()));
                     self.send_ops([Operation::MouseMove(MousePosition { x, y })]);
                 }
             }
@@ -573,8 +679,27 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                if state == ElementState::Pressed && button == MouseButton::Left {
+                    if let (Some(dir), Some(w)) = (self.resize_edge(), self.window.as_ref()) {
+                        let _ = w.drag_resize_window(dir);
+                        return;
+                    }
+                }
                 let hit = self.bar_hit();
                 if hit != BarHit::None {
+                    if state == ElementState::Pressed && button == MouseButton::Left && hit == BarHit::Bar && self.docked() {
+                        // empty part of the header: drag the window, double-click maximises
+                        let now = Instant::now();
+                        let double = self.last_header_click.map(|t| now.duration_since(t) < Duration::from_millis(400)).unwrap_or(false);
+                        self.last_header_click = Some(now);
+                        if let Some(w) = &self.window {
+                            if double {
+                                w.set_maximized(!w.is_maximized());
+                            } else {
+                                let _ = w.drag_window();
+                            }
+                        }
+                    }
                     if state == ElementState::Released && button == MouseButton::Left {
                         self.bar_action(hit, el);
                     }

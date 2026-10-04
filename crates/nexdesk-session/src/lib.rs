@@ -181,6 +181,7 @@ impl SessionManager {
         if !profile.domain.trim().is_empty() {
             cmd.arg("-d").arg(profile.domain.trim());
         }
+        cmd.arg("--perf").arg(profile.speed.cli());
         if !profile.clipboard {
             cmd.arg("--no-clipboard");
         }

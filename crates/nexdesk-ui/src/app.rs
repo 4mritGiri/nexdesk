@@ -17,7 +17,7 @@ use gpui::{
 use gpui_platform::application;
 use nexdesk_core::{
     credentials::Secret,
-    profiles::{file_stem_for, Profile},
+    profiles::{file_stem_for, Profile, Speed},
 };
 use nexdesk_session::SessionState;
 
@@ -62,6 +62,15 @@ pub struct NexDeskApp {
     pub editor: Option<Editor>,
     /// Index awaiting a second click on Delete (confirmation).
     pub pending_delete: Option<usize>,
+
+    /// Sidebar shows icons only.
+    pub sidebar_collapsed: bool,
+    /// Connections as tiles (true) or as a list (false).
+    pub grid_view: bool,
+    history: Vec<Screen>,
+    hist_pos: usize,
+    pub search_open: bool,
+    pub search_input: Entity<TextInput>,
 }
 
 /// State of the connection editor dialog.
@@ -76,6 +85,7 @@ pub struct Editor {
     height: Entity<TextInput>,
     clipboard: bool,
     fullscreen: bool,
+    speed: Speed,
     error: Option<String>,
 }
 
@@ -92,6 +102,9 @@ impl NexDeskApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let password_input = cx.new(|cx| TextInput::new(cx, true, "Password"));
+        let search_input = cx.new(|cx| TextInput::new(cx, false, "Search connections"));
+        // Re-render the list while typing in the search box.
+        cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
 
         Self {
             state: ManagerState::load(engine_path),
@@ -103,7 +116,54 @@ impl NexDeskApp {
             password_error: None,
             editor: None,
             pending_delete: None,
+            sidebar_collapsed: false,
+            grid_view: true,
+            history: vec![Screen::Connections],
+            hist_pos: 0,
+            search_open: false,
+            search_input,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Navigation (back / forward like a file manager)
+    // ------------------------------------------------------------------
+
+    fn navigate(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        if self.nav.screen != screen {
+            self.history.truncate(self.hist_pos + 1);
+            self.history.push(screen);
+            self.hist_pos = self.history.len() - 1;
+            self.nav.screen = screen;
+        }
+        cx.notify();
+    }
+
+    fn go_back(&mut self, cx: &mut Context<Self>) {
+        if self.hist_pos > 0 {
+            self.hist_pos -= 1;
+            self.nav.screen = self.history[self.hist_pos];
+            cx.notify();
+        }
+    }
+
+    fn go_forward(&mut self, cx: &mut Context<Self>) {
+        if self.hist_pos + 1 < self.history.len() {
+            self.hist_pos += 1;
+            self.nav.screen = self.history[self.hist_pos];
+            cx.notify();
+        }
+    }
+
+    fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = !self.search_open;
+        if self.search_open {
+            let fh = self.search_input.read(cx).focus_handle.clone();
+            window.focus(&fh, cx);
+        } else {
+            self.search_input.update(cx, |i, cx| i.set_value("", cx));
+        }
+        cx.notify();
     }
 
     // ------------------------------------------------------------------
@@ -153,6 +213,7 @@ impl NexDeskApp {
             height,
             clipboard: p.clipboard,
             fullscreen: p.fullscreen,
+            speed: p.speed,
             error: None,
         });
         window.focus(&first, cx);
@@ -169,6 +230,9 @@ impl NexDeskApp {
             match flag {
                 "clipboard" => ed.clipboard = !ed.clipboard,
                 "fullscreen" => ed.fullscreen = !ed.fullscreen,
+                "speed-lan" => ed.speed = Speed::Lan,
+                "speed-balanced" => ed.speed = Speed::Balanced,
+                "speed-slow" => ed.speed = Speed::Slow,
                 _ => {}
             }
         }
@@ -209,6 +273,7 @@ impl NexDeskApp {
             height,
             clipboard: ed.clipboard,
             fullscreen: ed.fullscreen,
+            speed: ed.speed,
         };
         profile.validate().map_err(str::to_string)?;
         if file_stem_for(&profile.name).is_none() {
@@ -445,9 +510,10 @@ impl Render for NexDeskApp {
 
         let status: SharedString = self.state.status.clone().into();
 
+        let filter = self.search_input.read(cx).value().trim().to_lowercase();
         let content = match self.nav.screen {
             Screen::Connections => {
-                connection_view(profiles, self.selected_profile, self.pending_delete, cx)
+                connection_view(profiles, self.selected_profile, self.pending_delete, self.grid_view, filter, cx)
                     .into_any_element()
             }
 
@@ -461,6 +527,16 @@ impl Render for NexDeskApp {
             Screen::Sessions => "Active Sessions",
             Screen::Settings => "Settings",
         };
+        let hv = HeaderState {
+            title,
+            can_back: self.hist_pos > 0,
+            can_forward: self.hist_pos + 1 < self.history.len(),
+            sidebar_collapsed: self.sidebar_collapsed,
+            grid_view: self.grid_view,
+            search_open: self.search_open,
+            search_input: self.search_input.clone(),
+            on_connections: self.nav.screen == Screen::Connections,
+        };
 
         let client = matches!(window.window_decorations(), Decorations::Client { .. });
         let rounded = client && !window.is_maximized();
@@ -469,7 +545,7 @@ impl Render for NexDeskApp {
             .flex_1()
             .flex()
             .min_h_0()
-            .child(sidebar_view(self.nav.screen, cx))
+            .child(sidebar_view(self.nav.screen, self.sidebar_collapsed, cx))
             .child(
                 div()
                     .flex_1()
@@ -503,7 +579,7 @@ impl Render for NexDeskApp {
             .flex_col()
             .overflow_hidden()
             .when(rounded, |d| d.rounded(px(12.)).border_1().border_color(border()))
-            .child(header_view(title, client, cx))
+            .child(header_view(hv, client, cx))
             .child(body);
 
         if let Some(ed) = self.editor.as_ref() {
@@ -578,15 +654,92 @@ fn dot(
         .on_click(cx.listener(move |_this, _e, window, _cx| action(window)))
 }
 
-fn header_view(title: &'static str, client: bool, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+/// Round-rect icon button used in the header (glyph from the system font).
+fn hbtn(
+    id: &'static str,
+    glyph: &'static str,
+    enabled: bool,
+    active: bool,
+    cx: &mut Context<NexDeskApp>,
+    action: fn(&mut NexDeskApp, &mut Window, &mut Context<NexDeskApp>),
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(34.))
+        .h(px(30.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.))
+        .text_color(if enabled { text() } else { rgb_dim() })
+        .bg(if active { panel_2() } else { panel() })
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .when(enabled, |d| {
+            d.cursor_pointer()
+                .hover(|s| s.bg(hover()))
+                .on_click(cx.listener(move |this, _e, window, cx| action(this, window, cx)))
+        })
+        .child(glyph)
+}
+
+fn rgb_dim() -> gpui::Rgba {
+    gpui::rgb(0x626262)
+}
+
+struct HeaderState {
+    title: &'static str,
+    can_back: bool,
+    can_forward: bool,
+    sidebar_collapsed: bool,
+    grid_view: bool,
+    search_open: bool,
+    search_input: Entity<TextInput>,
+    on_connections: bool,
+}
+
+fn header_view(h: HeaderState, client: bool, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+    let centre = if h.search_open {
+        div()
+            .flex_1()
+            .h(px(32.))
+            .px_4()
+            .rounded_full()
+            .bg(input_bg())
+            .border_1()
+            .border_color(accent())
+            .flex()
+            .items_center()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().w_full().child(h.search_input.clone()))
+            .into_any_element()
+    } else {
+        // path-bar pill: "NexDesk / Connections"
+        div()
+            .flex_1()
+            .h(px(32.))
+            .px_4()
+            .rounded_full()
+            .bg(panel_2())
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .text_sm()
+            .child(div().text_color(muted()).child("NexDesk"))
+            .child(div().text_color(rgb_dim()).child("/"))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(h.title))
+            .into_any_element()
+    };
+
     div()
         .id("header")
-        .h(px(48.))
+        .h(px(52.))
         .w_full()
         .flex_none()
         .bg(panel())
         .flex()
         .items_center()
+        .gap_3()
         .px_4()
         .window_control_area(WindowControlArea::Drag)
         .on_mouse_down(MouseButton::Left, |e, window, _| {
@@ -596,65 +749,70 @@ fn header_view(title: &'static str, client: bool, cx: &mut Context<NexDeskApp>) 
                 window.start_window_move();
             }
         })
+        // traffic lights
+        .child(
+            div().flex().items_center().gap(px(8.)).mr_1().when(client, |d| {
+                d.child(dot("dot-close", dot_close(), cx, |w| w.remove_window()))
+                    .child(dot("dot-min", dot_min(), cx, |w| w.minimize_window()))
+                    .child(dot("dot-max", dot_max(), cx, |w| w.zoom_window()))
+            }),
+        )
+        .child(hbtn("h-sidebar", "◧", true, !h.sidebar_collapsed, cx, |this, _w, cx| {
+            this.sidebar_collapsed = !this.sidebar_collapsed;
+            cx.notify();
+        }))
+        // back / forward
         .child(
             div()
-                .w(px(120.))
                 .flex()
-                .items_center()
-                .gap(px(8.))
-                .when(client, |d| {
-                    d.child(dot("dot-close", dot_close(), cx, |w| w.remove_window()))
-                        .child(dot("dot-min", dot_min(), cx, |w| w.minimize_window()))
-                        .child(dot("dot-max", dot_max(), cx, |w| w.zoom_window()))
-                }),
+                .rounded(px(9.))
+                .bg(panel())
+                .child(hbtn("h-back", "‹", h.can_back, false, cx, |this, _w, cx| this.go_back(cx)))
+                .child(hbtn("h-fwd", "›", h.can_forward, false, cx, |this, _w, cx| this.go_forward(cx))),
         )
-        .child(
-            div().flex_1().flex().justify_center().child(
-                div()
-                    .px_5()
-                    .h(px(30.))
-                    .flex()
-                    .items_center()
-                    .rounded_full()
-                    .bg(panel_2())
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(title),
-            ),
-        )
+        .child(centre)
+        .child(hbtn("h-search", "⌕", h.on_connections, h.search_open, cx, |this, w, cx| {
+            this.toggle_search(w, cx)
+        }))
         .child(
             div()
-                .w(px(120.))
                 .flex()
-                .justify_end()
-                .text_xs()
-                .text_color(muted())
-                .child("NexDesk"),
+                .rounded(px(9.))
+                .bg(panel())
+                .child(hbtn("h-grid", "▦", h.on_connections, h.on_connections && h.grid_view, cx, |this, _w, cx| {
+                    this.grid_view = true;
+                    cx.notify();
+                }))
+                .child(hbtn("h-list", "☰", h.on_connections, h.on_connections && !h.grid_view, cx, |this, _w, cx| {
+                    this.grid_view = false;
+                    cx.notify();
+                })),
         )
 }
 
 // ============================================================================
-// Sidebar
+// Sidebar (collapsible)
 // ============================================================================
 
-fn sidebar_view(active_screen: Screen, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+fn sidebar_view(active_screen: Screen, collapsed: bool, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
     div()
-        .w(px(220.))
+        .w(px(if collapsed { 60. } else { 220. }))
         .flex_none()
         .bg(sidebar())
         .p_2()
         .flex()
         .flex_col()
         .gap_1()
-        .child(sidebar_button("⇄", "Connections", active_screen == Screen::Connections, Screen::Connections, cx))
-        .child(sidebar_button("◉", "Sessions", active_screen == Screen::Sessions, Screen::Sessions, cx))
+        .child(sidebar_button("⇄", "Connections", collapsed, active_screen == Screen::Connections, Screen::Connections, cx))
+        .child(sidebar_button("◉", "Sessions", collapsed, active_screen == Screen::Sessions, Screen::Sessions, cx))
         .child(div().h(px(1.)).my_2().mx_2().bg(border()))
-        .child(sidebar_button("⚙", "Settings", active_screen == Screen::Settings, Screen::Settings, cx))
+        .child(sidebar_button("⚙", "Settings", collapsed, active_screen == Screen::Settings, Screen::Settings, cx))
 }
 
 fn sidebar_button(
     icon: &'static str,
     label: &'static str,
+    collapsed: bool,
     active: bool,
     screen: Screen,
     cx: &mut Context<NexDeskApp>,
@@ -666,18 +824,16 @@ fn sidebar_button(
         .px_3()
         .flex()
         .items_center()
+        .when(collapsed, |d| d.justify_center())
         .gap_3()
         .rounded(px(8.))
         .bg(if active { panel_2() } else { sidebar() })
         .text_color(text())
         .cursor_pointer()
         .when(!active, |d| d.hover(|s| s.bg(row_hover())))
-        .on_click(cx.listener(move |this, _event, _window, cx| {
-            this.nav.screen = screen;
-            cx.notify();
-        }))
-        .child(div().w(px(20.)).text_color(if active { accent_hover() } else { muted() }).child(icon))
-        .child(div().text_sm().child(label))
+        .on_click(cx.listener(move |this, _event, _window, cx| this.navigate(screen, cx)))
+        .child(div().w(px(20.)).flex().justify_center().text_color(if active { accent_hover() } else { muted() }).child(icon))
+        .when(!collapsed, |d| d.child(div().text_sm().child(label)))
 }
 
 // ============================================================================
@@ -688,11 +844,143 @@ fn connection_view(
     profiles: Vec<Profile>,
     selected_profile: Option<usize>,
     pending_delete: Option<usize>,
+    grid_view: bool,
+    filter: String,
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
-    let mut grid = div().flex().flex_wrap().gap_3();
+    let mut grid = div().flex().gap_3();
+    grid = if grid_view { grid.flex_wrap() } else { grid.flex_col().gap_1() };
 
-    if profiles.is_empty() {
+    let total = profiles.len();
+    let mut shown = 0;
+
+    for (index, profile) in profiles.into_iter().enumerate() {
+        // `index` stays the position in the full list so selection keeps working while filtering.
+        if !filter.is_empty()
+            && ![&profile.name, &profile.host, &profile.user]
+                .iter()
+                .any(|f| f.to_lowercase().contains(&filter))
+        {
+            continue;
+        }
+        shown += 1;
+        let selected = selected_profile == Some(index);
+
+        let on_click = cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+            if index < this.state.profiles.len() {
+                this.selected_profile = Some(index);
+                this.state.selected = Some(index);
+                this.state.status = format!("Selected {}", this.state.profiles[index].name);
+                if event.click_count() >= 2 {
+                    this.open_password_dialog(window, cx);
+                }
+            }
+            cx.notify();
+        });
+
+        if grid_view {
+            // Little monitor icon drawn from divs (no icon-font dependency).
+            let monitor = div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .w(px(64.))
+                        .h(px(44.))
+                        .rounded(px(7.))
+                        .bg(rgb_blue_dark())
+                        .border_2()
+                        .border_color(accent_hover())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(accent_hover())
+                        .text_xs()
+                        .child("RDP"),
+                )
+                .child(div().w(px(10.)).h(px(5.)).bg(accent_hover()))
+                .child(div().w(px(30.)).h(px(3.)).rounded_full().bg(accent_hover()));
+
+            grid = grid.child(
+                div()
+                    .id(SharedString::from(format!("profile-{index}")))
+                    .w(px(172.))
+                    .p_3()
+                    .rounded(px(12.))
+                    .bg(if selected { accent_soft() } else { bg() })
+                    .when(!selected, |d| d.hover(|s| s.bg(row_hover())))
+                    .cursor_pointer()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .on_click(on_click)
+                    .child(div().h(px(64.)).flex().items_center().child(monitor))
+                    .child(
+                        div()
+                            .max_w_full()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .overflow_hidden()
+                            .child(profile.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .max_w_full()
+                            .text_xs()
+                            .text_color(muted())
+                            .overflow_hidden()
+                            .child(format!("{} · {}", profile.host, profile.user)),
+                    )
+                    .child(div().text_xs().text_color(muted()).child(format!(
+                        "{}×{} · {}",
+                        profile.width,
+                        profile.height,
+                        profile.speed.label()
+                    ))),
+            );
+        } else {
+            grid = grid.child(
+                div()
+                    .id(SharedString::from(format!("profile-{index}")))
+                    .w_full()
+                    .h(px(52.))
+                    .px_3()
+                    .rounded(px(10.))
+                    .bg(if selected { accent_soft() } else { bg() })
+                    .when(!selected, |d| d.hover(|s| s.bg(row_hover())))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .on_click(on_click)
+                    .child(
+                        div()
+                            .w(px(34.))
+                            .h(px(24.))
+                            .rounded(px(5.))
+                            .bg(rgb_blue_dark())
+                            .border_1()
+                            .border_color(accent_hover()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .overflow_hidden()
+                            .child(profile.name.clone()),
+                    )
+                    .child(div().w(px(220.)).text_sm().text_color(muted()).overflow_hidden().child(profile.host.clone()))
+                    .child(div().w(px(120.)).text_sm().text_color(muted()).overflow_hidden().child(profile.user.clone()))
+                    .child(div().w(px(100.)).text_xs().text_color(muted()).child(format!("{}×{}", profile.width, profile.height)))
+                    .child(div().w(px(90.)).text_xs().text_color(muted()).child(profile.speed.label())),
+            );
+        }
+    }
+
+    if shown == 0 {
         grid = grid.child(
             div()
                 .w_full()
@@ -702,84 +990,11 @@ fn connection_view(
                 .text_color(muted())
                 .flex()
                 .justify_center()
-                .child("No connections yet. Press New to add one."),
-        );
-    }
-
-    for (index, profile) in profiles.into_iter().enumerate() {
-        let selected = selected_profile == Some(index);
-
-        // Little monitor icon drawn from divs (no icon-font dependency).
-        let monitor = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(
-                div()
-                    .w(px(64.))
-                    .h(px(44.))
-                    .rounded(px(7.))
-                    .bg(rgb_blue_dark())
-                    .border_2()
-                    .border_color(accent_hover())
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(accent_hover())
-                    .text_xs()
-                    .child("RDP"),
-            )
-            .child(div().w(px(10.)).h(px(5.)).bg(accent_hover()))
-            .child(div().w(px(30.)).h(px(3.)).rounded_full().bg(accent_hover()));
-
-        grid = grid.child(
-            div()
-                .id(SharedString::from(format!("profile-{index}")))
-                .w(px(172.))
-                .p_3()
-                .rounded(px(12.))
-                .bg(if selected { accent_soft() } else { bg() })
-                .when(!selected, |d| d.hover(|s| s.bg(row_hover())))
-                .cursor_pointer()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_2()
-                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    if index < this.state.profiles.len() {
-                        this.selected_profile = Some(index);
-                        this.state.selected = Some(index);
-                        this.state.status = format!("Selected {}", this.state.profiles[index].name);
-                        if event.click_count() >= 2 {
-                            this.open_password_dialog(window, cx);
-                        }
-                    }
-
-                    cx.notify();
-                }))
-                .child(div().h(px(64.)).flex().items_center().child(monitor))
-                .child(
-                    div()
-                        .max_w_full()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .overflow_hidden()
-                        .child(profile.name.clone()),
-                )
-                .child(
-                    div()
-                        .max_w_full()
-                        .text_xs()
-                        .text_color(muted())
-                        .overflow_hidden()
-                        .child(format!("{} · {}", profile.host, profile.user)),
-                )
-                .child(div().text_xs().text_color(muted()).child(format!(
-                    "{}×{}{}",
-                    profile.width,
-                    profile.height,
-                    if profile.fullscreen { " · full screen" } else { "" }
-                ))),
+                .child(if total == 0 {
+                    "No connections yet. Press New to add one."
+                } else {
+                    "No connection matches your search."
+                }),
         );
     }
 
@@ -1063,6 +1278,40 @@ fn checkbox_row(
         .child(div().text_sm().child(label))
 }
 
+/// Segmented control: LAN / Balanced / Slow network.
+fn speed_row(current: Speed, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+    let seg = |id: &'static str, label: &'static str, which: Speed, cx: &mut Context<NexDeskApp>| {
+        let on = current == which;
+        div()
+            .id(id)
+            .px_4()
+            .h(px(30.))
+            .flex()
+            .items_center()
+            .text_sm()
+            .rounded(px(7.))
+            .bg(if on { accent() } else { panel_2() })
+            .text_color(if on { on_accent() } else { text() })
+            .cursor_pointer()
+            .when(!on, |d| d.hover(|s| s.bg(hover())))
+            .on_click(cx.listener(move |this, _e, _w, cx| this.toggle_editor_flag(id, cx)))
+            .child(label)
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(div().w(px(120.)).text_sm().text_color(muted()).child("Connection speed"))
+        .child(
+            div()
+                .flex()
+                .gap_1()
+                .child(seg("speed-lan", "LAN", Speed::Lan, cx))
+                .child(seg("speed-balanced", "Balanced", Speed::Balanced, cx))
+                .child(seg("speed-slow", "Slow network", Speed::Slow, cx)),
+        )
+}
+
 fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
     let title = if ed.original.is_some() {
         "Edit connection"
@@ -1118,6 +1367,7 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                                 .child(ed.height.clone()),
                         ),
                 )
+                .child(speed_row(ed.speed, cx))
                 .child(
                     div()
                         .mt_1()

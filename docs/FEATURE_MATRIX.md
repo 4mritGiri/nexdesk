@@ -14,7 +14,9 @@ Feasibility column: **Easy** (days, client only) · **Medium** (1–3 weeks) · 
 | Area | Remmina | NexDesk | Notes |
 |---|---|---|---|
 | Saved connections (.rdp compatible) | yes | **Done** | New / Edit / Duplicate / Delete, `.rdp` import |
-| Manager UI in GNOME Files (libadwaita-dark) style | n/a | **Done (unverified)** | rounded window, red/yellow/green dots, icon sidebar, tile grid, double-click to connect. Compile-checked; not rendered in CI |
+| Manager UI in GNOME Files / macOS style | n/a | **Done (unverified)** | rounded window, red/yellow/green dots, header bar with sidebar toggle, back/forward, path pill, search, grid/list switch; collapsible icon sidebar; double-click to connect. Compile-checked only; not rendered here |
+| Session window header bar (same dots, drag, double-click maximise, edge resize, pointer cursors) | no | **Done (unverified)** | windowed mode draws its own 40 px header; `--native-frame` restores the system title bar. Full screen keeps the auto-hide pill |
+| Connection speed preset (LAN / Balanced / Slow network) | yes | **Done** | per connection, saved as mstsc `connection type`. Balanced: no wallpaper, menu animations, full-window drag. Slow: also no themes/cursor effects and 16-bit colour (about half the bitmap data) |
 | Process isolation per session | no | **Done** | engine crash cannot take down the manager |
 | Passwords never on disk, zeroized | keyring | **Done** | handed over by environment, not argv |
 | Full screen + `Ctrl+Alt+Break` | yes | **Done** | |
@@ -36,8 +38,8 @@ Feasibility column: **Easy** (days, client only) · **Medium** (1–3 weeks) · 
 | Instant screenshot to `~/Pictures` | Easy | **Planned P1** | copy last framebuffer to PNG, timestamp template |
 | Send Ctrl+Alt+Del / Win+L | Easy | **Planned P1** | synthesize scancodes, toolbar button |
 | Pause session / lock local input | Easy | **Planned P1** | stop applying frames, drop input |
-| Text-priority vs media-priority profile | Medium | **Planned P2** | RDP perf flags (font smoothing, wallpaper, animations), colour depth 16/32, bitmap codec choice. Real "H.264 media mode" depends on RDPEGFX, see below |
-| Colour depth / FPS slider | Medium | **Planned P2** | colour depth is negotiated at connect; FPS cap = client-side present throttle |
+| Text-priority vs media-priority profile | Medium | **Partly done**: speed presets exist; sharpness-vs-fps trade-off is **Planned P2** | RDP perf flags (font smoothing, wallpaper, animations), colour depth 16/32, bitmap codec choice. Real "H.264 media mode" depends on RDPEGFX, see below |
+| Colour depth / FPS slider | Medium | **Partly done**: 16-bit via Slow preset; slider and FPS cap **Planned P2** | colour depth is negotiated at connect; FPS cap = client-side present throttle |
 | Multi-monitor (span or switchable tabs) | Hard | **Planned P3** | DisplayControl multi-monitor layout + one window per monitor |
 | H.264 / H.265 (RDPEGFX) | Hard | **Blocked** | depends on IronRDP graphics-pipeline support; track upstream |
 | HiDPI / wgpu renderer | Hard | **Planned P3** | replace softbuffer path, keep software fallback |
@@ -91,6 +93,7 @@ Feasibility column: **Easy** (days, client only) · **Medium** (1–3 weeks) · 
 | Audio, printers, USB | Hard | **Planned P3/P4** | IronRDP `rdpsnd` first |
 | RD Gateway | Hard | **Blocked** | upstream gateway support |
 | NAT hole punching / relay (RustDesk style) | Infra | **Out of scope** | needs a signaling+relay server and a different (non-RDP-listener) agent on the target. Recommended instead: SSH jump host (P2) or WireGuard/Tailscale; revisit only if you want to operate infrastructure |
+| VPN control (bring up a NetworkManager VPN before RDP, wait until reachable, optionally bring down after) | Medium | **Planned P2** | `nmcli connection up/down`, polkit (no sudo), credentials stay in NetworkManager/keyring; never falls back to a direct connection if the VPN fails. Vendor-only clients (AnyConnect etc.) via the pre/post command (P1) |
 | VNC and SSH protocols | Hard | **Out of scope for now** | NexDesk is an RDP client; the profile format stays protocol-tagged so it can be added later |
 
 ## 6. Packaging and quality

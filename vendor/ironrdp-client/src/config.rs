@@ -565,6 +565,7 @@ pub struct ConfigBuilder {
     desktop_height: Option<u16>,
     desktop_scale_factor: Option<u32>,
     color_depth: Option<u32>,
+    performance_flags: Option<ironrdp_pdu::rdp::client_info::PerformanceFlags>,
     codecs: Vec<String>,
     autologon: Option<bool>,
     enable_server_pointer: Option<bool>,
@@ -698,6 +699,13 @@ impl ConfigBuilder {
     #[must_use]
     pub fn with_dig_product_id(mut self, id: impl Into<String>) -> Self {
         self.dig_product_id = Some(id.into());
+        self
+    }
+
+    /// NexDesk patch: choose which server-side visual effects are disabled (less data on slow links).
+    #[must_use]
+    pub fn with_performance_flags(mut self, flags: ironrdp_pdu::rdp::client_info::PerformanceFlags) -> Self {
+        self.performance_flags = Some(flags);
         self
     }
 
@@ -1085,7 +1093,7 @@ impl ConfigBuilder {
     )]
     pub fn build(self) -> anyhow::Result<Config> {
         use ironrdp_pdu::rdp::capability_sets::client_codecs_capabilities;
-        use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+        use ironrdp_pdu::rdp::client_info::TimezoneInfo;
 
         let missing = self.missing();
         if !missing.is_empty() {
@@ -1187,7 +1195,7 @@ impl ConfigBuilder {
             pointer_software_rendering: self.pointer_software_rendering.unwrap_or(false),
             multitransport_flags: None,
             compression_type,
-            performance_flags: PerformanceFlags::default(),
+            performance_flags: self.performance_flags.unwrap_or_default(),
             timezone_info: TimezoneInfo::default(),
             alternate_shell: self.alternate_shell.unwrap_or_default(),
             work_dir: self.work_dir.unwrap_or_default(),

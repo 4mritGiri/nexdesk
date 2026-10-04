@@ -65,3 +65,8 @@ The new session layer is deliberately a foundation: reconnect policy and OS keyr
 * Connection errors are shown inside the window instead of only on stderr.
 
 Local patches to IronRDP are in `vendor/` (see `vendor/README.md`).
+
+## Session window and speed presets
+* Windowed sessions have NexDesk's own header (red/yellow/green dots, title, drag to move, double-click to maximise, drag edges to resize); `--native-frame` uses the system title bar. Full screen shows the floating bar at the top edge.
+* `--perf lan|balanced|slow` (or the "Connection speed" choice in the connection editor) controls how much visual decoration the server sends; use *Slow network* over VPN/mobile links.
+* Manager: sidebar toggle button (icons only when collapsed), back/forward, search, grid/list view, double-click a connection to connect.

@@ -4,6 +4,7 @@ Order is chosen by: (1) fixes something users hit daily, (2) needs no upstream w
 Details and feasibility per feature are in `docs/FEATURE_MATRIX.md`.
 
 ## Done
+Manager header bar (sidebar toggle, back/forward, search, grid/list), session header bar, speed presets (LAN / Balanced / Slow network).
 Clipboard (text, images, files both ways), drag & drop, TLS verification + known hosts, in-session toolbar,
 Adwaita-dark restyle of manager and viewer.
 
@@ -19,7 +20,7 @@ Adwaita-dark restyle of manager and viewer.
 Exit criteria: all unit tests green; manual test pass on Ubuntu X11 and Wayland against a Windows 10/11 and a Server host.
 
 ## P2 – Management and resilience (3–4 weeks)
-Groups/search/quick connect/tabs, auto-reconnect, SSH tunnel, performance profiles (text vs media), colour depth and FPS cap,
+Groups/quick connect/tabs, auto-reconnect, SSH tunnel, **VPN control** (NetworkManager profile picker in the connection editor, status "VPN connecting → Connected → RDP", wait-for-reachability, optional bring-down after the session; not urgent), performance profiles (text vs media), colour depth and FPS cap,
 transfers manager with queue and collision dialog, clipboard history, pre-connection baseline check, GUI e2e harness.
 
 ## P3 – Heavy protocol work (6–10 weeks, parts depend on IronRDP)

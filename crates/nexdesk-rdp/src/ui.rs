@@ -160,6 +160,8 @@ pub enum BarHit {
 pub struct Toolbar {
     pub title: String,
     pub pinned: bool,
+    /// Docked = permanent full-width header (windowed mode) instead of the floating full-screen pill.
+    pub docked: bool,
     shown_until: Option<Instant>,
 }
 
@@ -167,7 +169,7 @@ const HIDE_AFTER: Duration = Duration::from_millis(1800);
 
 impl Toolbar {
     pub fn new(title: String) -> Self {
-        Self { title, pinned: false, shown_until: None }
+        Self { title, pinned: false, docked: false, shown_until: None }
     }
 
     /// Keep (or make) the bar visible for a little while.
@@ -194,6 +196,9 @@ impl Toolbar {
     /// (x, y, w, h) in physical pixels. `u` is the UI scale (1 = 96 dpi).
     pub fn rect(&self, win_w: i32, u: i32) -> (i32, i32, i32, i32) {
         let h = 40 * u;
+        if self.docked {
+            return (0, 0, win_w, h);
+        }
         let w = (440 * u).min(win_w);
         ((win_w - w) / 2, 0, w, h)
     }
@@ -218,6 +223,9 @@ impl Toolbar {
             return BarHit::None;
         }
         for (hit, cx, half) in self.buttons(win_w, u) {
+            if hit == BarHit::Pin && self.docked {
+                continue;
+            }
             if (px - cx).abs() <= half {
                 return hit;
             }
@@ -227,9 +235,14 @@ impl Toolbar {
 
     pub fn draw(&self, c: &mut Canvas, u: i32, hover: BarHit) {
         let (x, y, w, h) = self.rect(c.w as i32, u);
-        // hangs from the top edge: only the bottom corners are round
-        c.rrect_corners(x - u, y, w + 2 * u, h + u, 16 * u, EDGE, [false, false, true, true]);
-        c.rrect_corners(x, y, w, h, 15 * u, BAR, [false, false, true, true]);
+        if self.docked {
+            c.rect(x, y, w, h, BAR);
+            c.rect(x, y + h - u, w, u, EDGE);
+        } else {
+            // hangs from the top edge: only the bottom corners are round
+            c.rrect_corners(x - u, y, w + 2 * u, h + u, 16 * u, EDGE, [false, false, true, true]);
+            c.rrect_corners(x, y, w, h, 15 * u, BAR, [false, false, true, true]);
+        }
         let cy = y + h / 2;
         for (hit, cx, _) in self.buttons(c.w as i32, u) {
             let hot = hover == hit;
@@ -256,6 +269,7 @@ impl Toolbar {
                         }
                     }
                 }
+                _ if self.docked => {}
                 _ => {
                     // pin: round button, filled accent when pinned
                     if hot {
@@ -272,7 +286,7 @@ impl Toolbar {
         }
         let k = u.max(1);
         let left = x + 26 * u + 3 * 28 * u - 4 * u;
-        let right = x + w - 26 * u - 20 * u;
+        let right = if self.docked { x + w - 26 * u } else { x + w - 26 * u - 20 * u };
         let room = (right - left).max(0);
         let max_chars = (room / (8 * k)).max(0) as usize;
         let title = truncate(&self.title, max_chars);
@@ -499,6 +513,14 @@ mod preview {
             Toast { text: "2 file(s) ready: press Ctrl+V on the remote desktop".into(), until: Instant::now() }.draw(&mut c, 1);
         }
         save("bar.ppm", &buf);
+        let mut buf = vec![0x00_30_60_a0u32; w * h];
+        {
+            let mut c = Canvas { buf: &mut buf, w, h };
+            let mut t = Toolbar::new("nexdesk - 172.31.203.37".into());
+            t.docked = true;
+            t.draw(&mut c, 1, BarHit::Close);
+        }
+        save("docked.ppm", &buf);
         let mut buf = vec![BG; w * h];
         {
             let mut c = Canvas { buf: &mut buf, w, h };

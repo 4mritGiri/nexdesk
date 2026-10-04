@@ -5,6 +5,73 @@ use std::path::{Path, PathBuf};
 
 use crate::rdpfile::RdpFile;
 
+/// Connection speed preset (mstsc's "connection type"). Controls how much visual
+/// decoration the server renders and sends: less data = faster on slow links.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Speed {
+    /// Fast local network: everything on (wallpaper, animations, 32-bit colour).
+    Lan,
+    /// Default: no wallpaper, menu animations or full-window drag; 32-bit colour.
+    #[default]
+    Balanced,
+    /// Slow / mobile / VPN-over-internet: also no themes or cursor effects, 16-bit colour.
+    Slow,
+}
+
+impl Speed {
+    pub const ALL: [Speed; 3] = [Speed::Lan, Speed::Balanced, Speed::Slow];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Speed::Lan => "LAN",
+            Speed::Balanced => "Balanced",
+            Speed::Slow => "Slow network",
+        }
+    }
+
+    pub fn cli(self) -> &'static str {
+        match self {
+            Speed::Lan => "lan",
+            Speed::Balanced => "balanced",
+            Speed::Slow => "slow",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "lan" => Some(Speed::Lan),
+            "balanced" | "auto" => Some(Speed::Balanced),
+            "slow" | "wan" => Some(Speed::Slow),
+            _ => None,
+        }
+    }
+
+    /// mstsc `connection type:i:` value.
+    fn rdp_value(self) -> u8 {
+        match self {
+            Speed::Lan => 6,
+            Speed::Balanced => 7,
+            Speed::Slow => 2,
+        }
+    }
+
+    fn from_rdp_value(v: Option<i64>) -> Self {
+        match v {
+            Some(6) => Speed::Lan,
+            Some(1) | Some(2) | Some(3) => Speed::Slow,
+            _ => Speed::Balanced,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Speed::Lan => Speed::Balanced,
+            Speed::Balanced => Speed::Slow,
+            Speed::Slow => Speed::Lan,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Profile {
     pub name: String,
@@ -16,6 +83,7 @@ pub struct Profile {
     pub clipboard: bool,
     /// Start the session full screen (mstsc: `screen mode id:i:2`).
     pub fullscreen: bool,
+    pub speed: Speed,
 }
 
 impl Profile {
@@ -38,6 +106,7 @@ impl Default for Profile {
             height: 1080,
             clipboard: true,
             fullscreen: false,
+            speed: Speed::Balanced,
         }
     }
 }
@@ -60,6 +129,7 @@ impl Profile {
                 .map(|v| v != 0)
                 .unwrap_or(true),
             fullscreen: f.get_int("screen mode id") == Some(2),
+            speed: Speed::from_rdp_value(f.get_int("connection type")),
         }
     }
 
@@ -76,6 +146,7 @@ impl Profile {
         s.push_str(&format!("desktopwidth:i:{}\r\n", self.width));
         s.push_str(&format!("desktopheight:i:{}\r\n", self.height));
         s.push_str(&format!("redirectclipboard:i:{}\r\n", self.clipboard as u8));
+        s.push_str(&format!("connection type:i:{}\r\n", self.speed.rdp_value()));
         s.push_str(&format!(
             "screen mode id:i:{}\r\n",
             if self.fullscreen { 2 } else { 1 }
@@ -199,6 +270,7 @@ mod tests {
             height: 900,
             clipboard: false,
             fullscreen: true,
+            speed: Speed::Slow,
         }
     }
 

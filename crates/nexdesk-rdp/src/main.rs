@@ -37,6 +37,9 @@ OPTIONS:
   --no-drop-paste        after dropping files on the window, do not press Ctrl+V on the remote
   --tls <MODE>           server certificate checking: ask (default) | accept-new | strict | insecure
   --forget-host          delete the pinned certificate for this host, then continue
+  --perf <lan|balanced|slow>  speed preset (default: from the .rdp file, else balanced). balanced turns off
+                         wallpaper/menu animations/full-window drag; slow also turns off themes and uses 16-bit colour
+  --native-frame         use the system title bar instead of NexDesk's own header bar
   --x11 / --wayland      force the window system (default: automatic). File drops from the
                          local desktop need --x11 on Wayland (the winit toolkit lacks Wayland DnD)
   -h, --help             show this help
@@ -61,6 +64,8 @@ struct Args {
     tls: tls::Policy,
     forget_host: bool,
     backend: Option<Backend>,
+    speed: Option<nexdesk_core::profiles::Speed>,
+    native_frame: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,6 +90,8 @@ fn parse_args() -> Result<Option<Args>> {
         tls: std::env::var("NEXDESK_TLS").ok().and_then(|v| tls::Policy::parse(&v)).unwrap_or(tls::Policy::Ask),
         forget_host: false,
         backend: None,
+        speed: None,
+        native_frame: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -106,6 +113,14 @@ fn parse_args() -> Result<Option<Args>> {
             "--no-clipboard" => a.clipboard = false,
             "--no-drop-paste" => a.drop_paste = false,
             "--forget-host" => a.forget_host = true,
+            "--perf" => {
+                let v = val("--perf")?;
+                a.speed = Some(
+                    nexdesk_core::profiles::Speed::parse(&v)
+                        .with_context(|| format!("--perf: use lan, balanced or slow (got {v:?})"))?,
+                );
+            }
+            "--native-frame" => a.native_frame = true,
             "--x11" => a.backend = Some(Backend::X11),
             "--wayland" => a.backend = Some(Backend::Wayland),
             "--tls" => {
@@ -164,6 +179,11 @@ fn main() -> Result<()> {
         .domain
         .clone()
         .or_else(|| file.domain().map(str::to_owned));
+    let file_speed: Option<String> = file.get_int("connection type").map(|v| match v {
+        6 => "lan",
+        1 | 2 | 3 => "slow",
+        _ => "balanced",
+    }.to_string());
     let (fw, fh) = file.desktop_size().unwrap_or((1920, 1080));
     let (width, height) = (args.width.unwrap_or(fw), args.height.unwrap_or(fh));
 
@@ -189,6 +209,24 @@ fn main() -> Result<()> {
         });
     if let Some(d) = domain {
         builder = builder.with_domain(d);
+    }
+    {
+        use ironrdp_pdu::rdp::client_info::PerformanceFlags as P;
+        use nexdesk_core::profiles::Speed;
+        let speed = args.speed.unwrap_or_else(|| match &file_speed {
+            Some(v) => Speed::parse(v).unwrap_or_default(),
+            None => Speed::Balanced,
+        });
+        let balanced = P::DISABLE_WALLPAPER | P::DISABLE_FULLWINDOWDRAG | P::DISABLE_MENUANIMATIONS | P::ENABLE_FONT_SMOOTHING;
+        let flags = match speed {
+            Speed::Lan => P::ENABLE_FONT_SMOOTHING | P::ENABLE_DESKTOP_COMPOSITION,
+            Speed::Balanced => balanced,
+            Speed::Slow => balanced | P::DISABLE_THEMING | P::DISABLE_CURSOR_SHADOW | P::DISABLE_CURSORSETTINGS,
+        };
+        builder = builder.with_performance_flags(flags);
+        if speed == Speed::Slow {
+            builder = builder.with_color_depth(16);
+        }
     }
     let mut config = builder.build()?;
 
@@ -288,6 +326,7 @@ fn main() -> Result<()> {
             host_label: host.clone(),
             initial_size: (u32::from(width), u32::from(height)),
             dynamic_resize: args.dynamic_resize,
+            native_frame: args.native_frame,
             start_fullscreen: args.fullscreen || file.get_int("screen mode id") == Some(2),
             capture_keys: args.capture_keys,
             drop_paste: args.drop_paste,
