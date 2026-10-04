@@ -1,34 +1,103 @@
-# NexDesk vs Remmina: honest status
+# NexDesk feature matrix
 
-Legend: **Done** = written (not all compiled/tested yet) · **Next** = planned, order below · **Gap** = not started
+Status legend
+* **Done** – implemented and covered by tests or verified on a real machine.
+* **Done (unverified)** – implemented, compiles, not yet exercised against a real server / display.
+* **Planned P1/P2/P3/P4** – scheduled in `docs/ROADMAP.md` (phase number).
+* **Blocked** – needs something outside this repo (IronRDP feature, server component, infrastructure).
+* **Out of scope** – deliberately not built (reason given).
 
-| Area | Remmina | NexDesk |
-|---|---|---|
-| Saved connections (.rdp compatible) | yes | **Done**: list, New, Edit, Duplicate, Delete |
-| Full screen + `Ctrl+Alt+Break` toggle | yes | **Done** |
-| Super / Alt+Tab to remote (X11 + Wayland) | partial | **Done**, needs real-world testing |
-| Server cursor shapes | yes | **Done** |
-| Passwords never on disk, zeroized in memory | keyring option | **Done** (no keyring yet) |
-| Process isolation per session (crash-safe) | no | **Done** |
-| Clipboard text/images (Linux) | yes | **Done**: X11 + Wayland (via XWayland), needs real-server testing (docs/CLIPBOARD.md) |
-| Clipboard **files** both directions, folders | partial | **Done**: staged download + streamed upload |
-| Drag & drop files onto the session | yes | **Done** on X11/XWayland (`--x11`); native Wayland blocked by winit |
-| Full-screen connection bar (min/restore/close/pin) | yes | **Done** |
-| TLS certificate verification / known hosts | yes | **Done**: system trust store, else TOFU pinning + changed-cert warning, handshake signatures verified |
-| OS keyring (Secret Service) credentials | yes | **Next**: `CredentialStore` trait is ready |
-| Drive redirection | yes | **Next** |
-| Auto-reconnect | yes | **Next**: lifecycle states exist |
-| RD Gateway | yes | **Next**: depends on IronRDP gateway support |
-| Dynamic resize / multi-monitor | yes | **Gap** (`--dynamic-resize` flag is experimental) |
-| Audio, printers, smartcard, USB | yes | **Gap** |
-| Tabs / groups / search / quick connect | yes | **Gap** |
-| Kerberos / SSO | yes | **Gap** |
-| Admin policy file, audit log, signed packages | no | **Gap**: the enterprise differentiators |
+Feasibility column: **Easy** (days, client only) · **Medium** (1–3 weeks) · **Hard** (a month+, or protocol work) · **Infra** (needs a server we would have to run).
 
-## Suggested order
-1. TLS verification + known-hosts store
-2. Linux clipboard backend (text, then files)
-3. Keyring credentials
-4. Drive redirection, auto-reconnect
-5. Groups, search, quick connect, tabs
-6. Policy file (disable clipboard/drives fleet-wide), audit logging, .deb/Flatpak packaging
+## 1. What exists today
+
+| Area | Remmina | NexDesk | Notes |
+|---|---|---|---|
+| Saved connections (.rdp compatible) | yes | **Done** | New / Edit / Duplicate / Delete, `.rdp` import |
+| Manager UI in GNOME Files (libadwaita-dark) style | n/a | **Done (unverified)** | rounded window, red/yellow/green dots, icon sidebar, tile grid, double-click to connect. Compile-checked; not rendered in CI |
+| Process isolation per session | no | **Done** | engine crash cannot take down the manager |
+| Passwords never on disk, zeroized | keyring | **Done** | handed over by environment, not argv |
+| Full screen + `Ctrl+Alt+Break` | yes | **Done** | |
+| In-session floating toolbar (min / restore / close / pin) | yes | **Done** | Adwaita-style pill, auto-hide, pin |
+| Super / Alt+Tab to remote (X11 + Wayland) | partial | **Done (unverified)** | XInput2 grab / shortcuts-inhibit |
+| Server cursor shapes | yes | **Done** | |
+| Clipboard text + images | yes | **Done** | confirmed by user, both directions |
+| Clipboard files and folders, both directions | partial | **Done** | confirmed by user; staged download, streamed upload |
+| Drop files onto session window | yes | **Done** on X11/XWayland | native Wayland needs winit support; use `--x11` |
+| TLS verification, known hosts, changed-cert warning | yes | **Done** | system roots, else TOFU pinning; policies ask / accept-new / strict / insecure |
+| X11 and Wayland | both | **Done** | clipboard through XWayland on Wayland |
+
+## 2. Display and performance
+
+| Feature | Feasibility | Status | How |
+|---|---|---|---|
+| Dynamic resolution on window resize | Medium | **Planned P1** | IronRDP DisplayControl DVC (`--dynamic-resize` exists, experimental); debounce resizes, send `DISPLAYCONTROL_MONITOR_LAYOUT` |
+| Scaling toggle (1:1 with scrollbars / fit) | Easy | **Planned P1** | `nexdesk-core::scale` already maps coordinates |
+| Instant screenshot to `~/Pictures` | Easy | **Planned P1** | copy last framebuffer to PNG, timestamp template |
+| Send Ctrl+Alt+Del / Win+L | Easy | **Planned P1** | synthesize scancodes, toolbar button |
+| Pause session / lock local input | Easy | **Planned P1** | stop applying frames, drop input |
+| Text-priority vs media-priority profile | Medium | **Planned P2** | RDP perf flags (font smoothing, wallpaper, animations), colour depth 16/32, bitmap codec choice. Real "H.264 media mode" depends on RDPEGFX, see below |
+| Colour depth / FPS slider | Medium | **Planned P2** | colour depth is negotiated at connect; FPS cap = client-side present throttle |
+| Multi-monitor (span or switchable tabs) | Hard | **Planned P3** | DisplayControl multi-monitor layout + one window per monitor |
+| H.264 / H.265 (RDPEGFX) | Hard | **Blocked** | depends on IronRDP graphics-pipeline support; track upstream |
+| HiDPI / wgpu renderer | Hard | **Planned P3** | replace softbuffer path, keep software fallback |
+| Virtual display driver injection on headless Windows | Hard | **Out of scope** | RDP cannot install drivers. Honest alternative: DisplayControl resolution (P1) plus docs for IddCx virtual display / `Set-DisplayResolution` on the server |
+| Single-application streaming (RemoteApp / RAIL) | Hard | **Blocked** | needs RAIL virtual channel, not in IronRDP; server must publish the app |
+
+## 3. Files, clipboard, transfers
+
+| Feature | Feasibility | Status | How |
+|---|---|---|---|
+| Transfer progress in toolbar (bar, speed, 2 px strip when hidden, done toast) | Medium | **Planned P1** | engine already knows sizes/bytes; add `TransferEvent` to the sink, draw in `ui.rs` |
+| Transfers manager (list, pause/resume/cancel, priority, open folder) | Medium | **Planned P2** | queue in `nexdesk-clipboard`; CLIPRDR gives single outstanding paste, so queue is serial by protocol |
+| Resume after network drop | Hard | **Planned P3** | CLIPRDR has no resume; only possible for *downloads* via ranged `FileContentsRequest` plus a `.state` file; uploads restart. Custom resume protocol is not possible over stock RDP |
+| Collision dialog (overwrite / keep both / skip / newer) | Medium | **Planned P2** | applies to Windows→Linux staging; for Linux→Windows Explorer itself asks |
+| Clipboard history (last 5 items) | Medium | **Planned P2** | ring buffer in engine, picker in toolbar |
+| Compression (zstd/lz4) | Hard | **Out of scope** | CLIPRDR payload format is fixed by the server; nothing to negotiate. RDP transport compression is separate and already negotiated |
+| Drive redirection (RDPDR) | Hard | **Planned P3** | needs IronRDP `rdpdr` backend; Linux folder shared as `\\tsclient\name` |
+| Mount remote folder in Nautilus | Hard | **Out of scope** | would need FUSE plus an SMB/RDPDR bridge; use drive redirection instead |
+| Drag file *out of* remote onto Linux file manager | Hard | **Out of scope** | not in the RDP protocol; copy + paste works |
+| Large-clipboard freeze fix | Easy | **Done** | clipboard engine is its own actor thread, UI never blocks |
+
+## 4. Security and credentials
+
+| Feature | Feasibility | Status | How |
+|---|---|---|---|
+| Encrypted vault, master password (Argon2id + XChaCha20-Poly1305 / AES-256-GCM) | Medium | **Planned P1** | new `nexdesk-vault` crate behind existing `CredentialStore` trait; random salt and nonce per write, atomic file replace, `0600` |
+| Recovery key (24 words) + verify 3 words | Medium | **Planned P1** | second wrapped copy of the data key; PDF export is a nice-to-have, printable text first |
+| First-launch wizard (vault vs system keyring) | Easy | **Planned P1** | UI only |
+| GNOME Keyring / KWallet (Secret Service) | Medium | **Planned P1** | `secret-service` crate; per-app attribute scoping, warn about the "any unlocked-session app can read" limitation |
+| Plaintext-never rule | Easy | **Done** | passwords not in profiles or `.rdp` files |
+| Auto-lock after idle / on session lock | Easy | **Planned P1** | zeroize key on timeout |
+| Zero-trust profile toggle (block clipboard, files, drives) | Easy | **Planned P1** | engine refuses to build the backend; enforced client-side. Admin policy file in P4 |
+| TLS only / refuse RDP-security fallback | Easy | **Planned P1** | require TLS or CredSSP, never legacy RDP encryption; setting `Require NLA` |
+| Pre-connection baseline check | Medium | **Planned P2** | cert validity/expiry/key size, TLS version, NLA offered; port scan is out of scope (legal and unreliable) |
+| PAM / polkit unlock of vault | Medium | **Planned P3** | polkit action, fingerprint if the system provides it |
+| Audit log (connect, disconnect, clipboard/file events, no content) | Medium | **Planned P4** | append-only JSON lines, optional syslog/journald |
+| Admin policy file (fleet-wide disable features) | Medium | **Planned P4** | `/etc/nexdesk/policy.toml` overrides profile |
+| Kerberos / SSO | Hard | **Planned P4** | IronRDP sspi support |
+| Smartcard | Hard | **Blocked** | upstream |
+
+## 5. Workflow and connectivity
+
+| Feature | Feasibility | Status | How |
+|---|---|---|---|
+| Pre/post-connection command | Easy | **Planned P1** | per-profile; run via argv (no shell) unless the user opts into shell mode; timeout; show output on failure. Treat profile files as untrusted: require confirm when imported |
+| SSH tunnel / jump host | Medium | **Planned P2** | spawn `ssh -L` or embed `russh`; connect to the local port; certificate name still checked against the real host |
+| Groups, search, quick connect, tabs | Medium | **Planned P2** | folder tree in sidebar, inline connect/edit icons on hover |
+| Auto-reconnect | Medium | **Planned P2** | lifecycle states exist; backoff, re-prompt on credential failure |
+| Persistent layout / per-workspace window geometry | Easy | **Planned P2** | store in profile |
+| Session recording (webm/mp4) | Hard | **Planned P3** | frame tap → `ffmpeg` pipe if installed; opt-in per profile, large privacy warning, never records the password prompt window of the client |
+| Audio, printers, USB | Hard | **Planned P3/P4** | IronRDP `rdpsnd` first |
+| RD Gateway | Hard | **Blocked** | upstream gateway support |
+| NAT hole punching / relay (RustDesk style) | Infra | **Out of scope** | needs a signaling+relay server and a different (non-RDP-listener) agent on the target. Recommended instead: SSH jump host (P2) or WireGuard/Tailscale; revisit only if you want to operate infrastructure |
+| VNC and SSH protocols | Hard | **Out of scope for now** | NexDesk is an RDP client; the profile format stays protocol-tagged so it can be added later |
+
+## 6. Packaging and quality
+
+| Item | Status |
+|---|---|
+| Unit + integration tests (clipboard engine, X11 transport, TLS policy, overlay UI) | **Done** |
+| GUI end-to-end test harness (Xvfb + scripted RDP server) | **Planned P2** |
+| `.deb` and Flatpak | **Planned P4** (Flatpak needs portal-based file access, review clipboard staging path) |
+| Signed releases, SBOM, `cargo audit` in CI | **Planned P4** |

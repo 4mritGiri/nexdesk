@@ -9,8 +9,8 @@ use crate::{
 use gpui::{
     div, fill, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem, Context,
     CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    FontWeight, GlobalElementId, KeyBinding, LayoutId, PaintQuad, Pixels, Point, Render,
-    MouseButton, ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, WindowBounds,
+    FontWeight, GlobalElementId, KeyBinding, LayoutId, PaintQuad, Pixels, Point, Render, ResizeEdge,
+    MouseButton, Decorations, WindowBackgroundAppearance, WindowControlArea, WindowDecorations, ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, WindowBounds,
     WindowOptions,
 };
 
@@ -437,7 +437,7 @@ impl NexDeskApp {
 // ============================================================================
 
 impl Render for NexDeskApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.state.sessions.remove_finished();
 
         let profiles = self.state.profiles.clone();
@@ -456,41 +456,60 @@ impl Render for NexDeskApp {
             Screen::Settings => settings_view().into_any_element(),
         };
 
-        let main = div()
+        let title = match self.nav.screen {
+            Screen::Connections => "Connections",
+            Screen::Sessions => "Active Sessions",
+            Screen::Settings => "Settings",
+        };
+
+        let client = matches!(window.window_decorations(), Decorations::Client { .. });
+        let rounded = client && !window.is_maximized();
+
+        let body = div()
+            .flex_1()
+            .flex()
+            .min_h_0()
+            .child(sidebar_view(self.nav.screen, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id("content-scroll")
+                            .flex_1()
+                            .p_6()
+                            .overflow_y_scroll()
+                            .child(content),
+                    )
+                    .child(
+                        div()
+                            .h(px(30.))
+                            .px_4()
+                            .flex()
+                            .items_center()
+                            .text_xs()
+                            .text_color(muted())
+                            .child(status),
+                    ),
+            );
+
+        let mut main = div()
             .size_full()
             .bg(bg())
             .text_color(text())
             .flex()
             .flex_col()
-            .child(header_view())
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .child(sidebar_view(self.nav.screen, cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .p_6()
-                            .flex()
-                            .flex_col()
-                            .gap_4()
-                            .child(div().text_2xl().font_weight(FontWeight::BOLD).child(
-                                match self.nav.screen {
-                                    Screen::Connections => "Connections",
-                                    Screen::Sessions => "Active Sessions",
-                                    Screen::Settings => "Settings",
-                                },
-                            ))
-                            .child(content)
-                            .child(div().mt_auto().text_sm().text_color(muted()).child(status)),
-                    ),
-            );
+            .overflow_hidden()
+            .when(rounded, |d| d.rounded(px(12.)).border_1().border_color(border()))
+            .child(header_view(title, client, cx))
+            .child(body);
 
         if let Some(ed) = self.editor.as_ref() {
-            main.child(editor_dialog(ed, cx))
+            main = main.child(editor_dialog(ed, cx));
         } else if self.password_dialog {
-            main.child(password_dialog(
+            main = main.child(password_dialog(
                 self.selected_profile
                     .and_then(|i| self.state.profiles.get(i))
                     .map(|p| p.name.clone())
@@ -498,39 +517,119 @@ impl Render for NexDeskApp {
                 self.password_input.clone(),
                 self.password_error.clone(),
                 cx,
-            ))
-        } else {
-            main
+            ));
         }
+
+        // Client-side decorations need their own resize handles.
+        div()
+            .size_full()
+            .relative()
+            .child(main)
+            .when(client && !window.is_maximized(), |d| d.children(resize_handles()))
     }
 }
 
+fn resize_handles() -> Vec<gpui::AnyElement> {
+    use gpui::CursorStyle as C;
+    use ResizeEdge as E;
+    const T: f32 = 5.;
+    const K: f32 = 12.;
+    let mk = |id: &'static str, edge: E, cursor: C| {
+        div()
+            .id(id)
+            .absolute()
+            .cursor(cursor)
+            .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                window.start_window_resize(edge)
+            })
+    };
+    vec![
+        mk("rz-t", E::Top, C::ResizeUpDown).top_0().left(px(K)).right(px(K)).h(px(T)).into_any_element(),
+        mk("rz-b", E::Bottom, C::ResizeUpDown).bottom_0().left(px(K)).right(px(K)).h(px(T)).into_any_element(),
+        mk("rz-l", E::Left, C::ResizeLeftRight).left_0().top(px(K)).bottom(px(K)).w(px(T)).into_any_element(),
+        mk("rz-r", E::Right, C::ResizeLeftRight).right_0().top(px(K)).bottom(px(K)).w(px(T)).into_any_element(),
+        mk("rz-tl", E::TopLeft, C::ResizeUpLeftDownRight).top_0().left_0().size(px(K)).into_any_element(),
+        mk("rz-tr", E::TopRight, C::ResizeUpRightDownLeft).top_0().right_0().size(px(K)).into_any_element(),
+        mk("rz-bl", E::BottomLeft, C::ResizeUpRightDownLeft).bottom_0().left_0().size(px(K)).into_any_element(),
+        mk("rz-br", E::BottomRight, C::ResizeUpLeftDownRight).bottom_0().right_0().size(px(K)).into_any_element(),
+    ]
+}
+
 // ============================================================================
-// Header
+// Header bar (window dots on the left, title in the middle)
 // ============================================================================
 
-fn header_view() -> impl IntoElement {
+fn dot(
+    id: &'static str,
+    color: gpui::Rgba,
+    cx: &mut Context<NexDeskApp>,
+    action: fn(&mut Window),
+) -> impl IntoElement {
     div()
-        .h(px(56.))
+        .id(id)
+        .size(px(14.))
+        .rounded_full()
+        .bg(color)
+        .cursor_pointer()
+        .opacity(0.92)
+        .hover(|s| s.opacity(1.0))
+        // Do not let the click start a window drag.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |_this, _e, window, _cx| action(window)))
+}
+
+fn header_view(title: &'static str, client: bool, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+    div()
+        .id("header")
+        .h(px(48.))
         .w_full()
+        .flex_none()
         .bg(panel())
-        .border_b_1()
-        .border_color(border())
-        .px_5()
         .flex()
         .items_center()
+        .px_4()
+        .window_control_area(WindowControlArea::Drag)
+        .on_mouse_down(MouseButton::Left, |e, window, _| {
+            if e.click_count == 2 {
+                window.zoom_window();
+            } else {
+                window.start_window_move();
+            }
+        })
         .child(
             div()
-                .text_xl()
-                .font_weight(FontWeight::BOLD)
-                .child("NexDesk"),
+                .w(px(120.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .when(client, |d| {
+                    d.child(dot("dot-close", dot_close(), cx, |w| w.remove_window()))
+                        .child(dot("dot-min", dot_min(), cx, |w| w.minimize_window()))
+                        .child(dot("dot-max", dot_max(), cx, |w| w.zoom_window()))
+                }),
+        )
+        .child(
+            div().flex_1().flex().justify_center().child(
+                div()
+                    .px_5()
+                    .h(px(30.))
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .bg(panel_2())
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title),
+            ),
         )
         .child(
             div()
-                .ml_4()
-                .text_sm()
+                .w(px(120.))
+                .flex()
+                .justify_end()
+                .text_xs()
                 .text_color(muted())
-                .child("Enterprise Remote Desktop"),
+                .child("NexDesk"),
         )
 }
 
@@ -540,35 +639,21 @@ fn header_view() -> impl IntoElement {
 
 fn sidebar_view(active_screen: Screen, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
     div()
-        .w(px(230.))
-        .bg(panel())
-        .border_r_1()
-        .border_color(border())
-        .p_3()
+        .w(px(220.))
+        .flex_none()
+        .bg(sidebar())
+        .p_2()
         .flex()
         .flex_col()
         .gap_1()
-        .child(sidebar_button(
-            "Connections",
-            active_screen == Screen::Connections,
-            Screen::Connections,
-            cx,
-        ))
-        .child(sidebar_button(
-            "Sessions",
-            active_screen == Screen::Sessions,
-            Screen::Sessions,
-            cx,
-        ))
-        .child(sidebar_button(
-            "Settings",
-            active_screen == Screen::Settings,
-            Screen::Settings,
-            cx,
-        ))
+        .child(sidebar_button("⇄", "Connections", active_screen == Screen::Connections, Screen::Connections, cx))
+        .child(sidebar_button("◉", "Sessions", active_screen == Screen::Sessions, Screen::Sessions, cx))
+        .child(div().h(px(1.)).my_2().mx_2().bg(border()))
+        .child(sidebar_button("⚙", "Settings", active_screen == Screen::Settings, Screen::Settings, cx))
 }
 
 fn sidebar_button(
+    icon: &'static str,
     label: &'static str,
     active: bool,
     screen: Screen,
@@ -577,17 +662,22 @@ fn sidebar_button(
     div()
         .id(label)
         .w_full()
+        .h(px(38.))
         .px_3()
-        .py_2()
-        .rounded_md()
-        .bg(if active { panel_2() } else { panel() })
-        .text_color(if active { text() } else { muted() })
+        .flex()
+        .items_center()
+        .gap_3()
+        .rounded(px(8.))
+        .bg(if active { panel_2() } else { sidebar() })
+        .text_color(text())
         .cursor_pointer()
+        .when(!active, |d| d.hover(|s| s.bg(row_hover())))
         .on_click(cx.listener(move |this, _event, _window, cx| {
             this.nav.screen = screen;
             cx.notify();
         }))
-        .child(label)
+        .child(div().w(px(20.)).text_color(if active { accent_hover() } else { muted() }).child(icon))
+        .child(div().text_sm().child(label))
 }
 
 // ============================================================================
@@ -600,17 +690,18 @@ fn connection_view(
     pending_delete: Option<usize>,
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
-    let mut list = div().flex().flex_col().gap_2();
+    let mut grid = div().flex().flex_wrap().gap_3();
 
     if profiles.is_empty() {
-        list = list.child(
+        grid = grid.child(
             div()
-                .p_5()
-                .rounded_md()
+                .w_full()
+                .p_8()
+                .rounded(px(12.))
                 .bg(panel())
-                .border_1()
-                .border_color(border())
                 .text_color(muted())
+                .flex()
+                .justify_center()
                 .child("No connections yet. Press New to add one."),
         );
     }
@@ -618,61 +709,83 @@ fn connection_view(
     for (index, profile) in profiles.into_iter().enumerate() {
         let selected = selected_profile == Some(index);
 
-        list = list.child(
+        // Little monitor icon drawn from divs (no icon-font dependency).
+        let monitor = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(
+                div()
+                    .w(px(64.))
+                    .h(px(44.))
+                    .rounded(px(7.))
+                    .bg(rgb_blue_dark())
+                    .border_2()
+                    .border_color(accent_hover())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(accent_hover())
+                    .text_xs()
+                    .child("RDP"),
+            )
+            .child(div().w(px(10.)).h(px(5.)).bg(accent_hover()))
+            .child(div().w(px(30.)).h(px(3.)).rounded_full().bg(accent_hover()));
+
+        grid = grid.child(
             div()
                 .id(SharedString::from(format!("profile-{index}")))
-                .w_full()
+                .w(px(172.))
                 .p_3()
-                .rounded_md()
-                .border_1()
-                .border_color(if selected { accent() } else { border() })
-                .bg(if selected { panel_2() } else { panel() })
+                .rounded(px(12.))
+                .bg(if selected { accent_soft() } else { bg() })
+                .when(!selected, |d| d.hover(|s| s.bg(row_hover())))
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _event, _window, cx| {
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     if index < this.state.profiles.len() {
                         this.selected_profile = Some(index);
                         this.state.selected = Some(index);
                         this.state.status = format!("Selected {}", this.state.profiles[index].name);
+                        if event.click_count() >= 2 {
+                            this.open_password_dialog(window, cx);
+                        }
                     }
 
                     cx.notify();
                 }))
+                .child(div().h(px(64.)).flex().items_center().child(monitor))
                 .child(
                     div()
-                        .font_weight(FontWeight::BOLD)
+                        .max_w_full()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .overflow_hidden()
                         .child(profile.name.clone()),
                 )
                 .child(
                     div()
-                        .mt_1()
-                        .text_sm()
+                        .max_w_full()
+                        .text_xs()
                         .text_color(muted())
-                        .child(format!("{}  •  {}", profile.host, profile.user)),
+                        .overflow_hidden()
+                        .child(format!("{} · {}", profile.host, profile.user)),
                 )
-                .child(div().mt_1().text_xs().text_color(muted()).child(format!(
-                    "{} × {}  •  Clipboard {}{}",
+                .child(div().text_xs().text_color(muted()).child(format!(
+                    "{}×{}{}",
                     profile.width,
                     profile.height,
-                    if profile.clipboard {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    },
-                    if profile.fullscreen {
-                        "  •  Full screen"
-                    } else {
-                        ""
-                    }
+                    if profile.fullscreen { " · full screen" } else { "" }
                 ))),
         );
     }
 
     let has_selection = selected_profile.is_some();
-    let delete_label = if pending_delete.is_some() && pending_delete == selected_profile {
-        "Confirm delete"
-    } else {
-        "Delete"
-    };
+    let confirming = pending_delete.is_some() && pending_delete == selected_profile;
+    let delete_label = if confirming { "Confirm delete" } else { "Delete" };
 
     div()
         .flex()
@@ -684,25 +797,22 @@ fn connection_view(
                 .items_center()
                 .gap_2()
                 .child(action_button("Connect", has_selection, cx))
-                .child(toolbar_button("New", true, NexDeskApp::open_editor_new, cx))
-                .child(toolbar_button("Edit", has_selection, NexDeskApp::open_editor_edit, cx))
-                .child(toolbar_button(
-                    "Duplicate",
-                    has_selection,
-                    NexDeskApp::duplicate_selected,
-                    cx,
-                ))
-                .child(toolbar_button(
-                    delete_label,
-                    has_selection,
-                    NexDeskApp::delete_selected,
-                    cx,
-                )),
+                .child(toolbar_button("New", true, false, NexDeskApp::open_editor_new, cx))
+                .child(toolbar_button("Edit", has_selection, false, NexDeskApp::open_editor_edit, cx))
+                .child(toolbar_button("Duplicate", has_selection, false, NexDeskApp::duplicate_selected, cx))
+                .child(toolbar_button(delete_label, has_selection, confirming, NexDeskApp::delete_selected, cx)),
         )
-        .child(div().text_sm().text_color(muted()).child(
-            "Passwords are never stored in .rdp files; you are asked each time you connect.",
-        ))
-        .child(list)
+        .child(
+            div()
+                .text_sm()
+                .text_color(muted())
+                .child("Double-click a connection to open it. Passwords are never stored in .rdp files."),
+        )
+        .child(grid)
+}
+
+fn rgb_blue_dark() -> gpui::Rgba {
+    gpui::rgb(0x1b3350)
 }
 
 // ============================================================================
@@ -717,10 +827,8 @@ fn session_view(
         return div().flex().flex_col().gap_2().child(
             div()
                 .p_5()
-                .rounded_md()
+                .rounded(px(12.))
                 .bg(panel())
-                .border_1()
-                .border_color(border())
                 .text_color(muted())
                 .child("No active sessions."),
         );
@@ -740,10 +848,8 @@ fn session_view(
 
         let card = div()
             .p_4()
-            .rounded_md()
+            .rounded(px(12.))
             .bg(panel())
-            .border_1()
-            .border_color(border())
             .flex()
             .items_center()
             .child(
@@ -777,8 +883,9 @@ fn session_view(
                         .id(SharedString::from(format!("disconnect-{id}")))
                         .px_3()
                         .py_2()
-                        .rounded_md()
+                        .rounded(px(8.))
                         .bg(panel_2())
+                        .hover(|s| s.bg(hover()))
                         .text_color(text())
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -807,10 +914,8 @@ fn settings_view() -> impl IntoElement {
         .child(
             div()
                 .p_4()
-                .rounded_md()
+                .rounded(px(12.))
                 .bg(panel())
-                .border_1()
-                .border_color(border())
                 .child(div().font_weight(FontWeight::BOLD).child("Session policy"))
                 .child(
                     div()
@@ -823,10 +928,8 @@ fn settings_view() -> impl IntoElement {
         .child(
             div()
                 .p_4()
-                .rounded_md()
+                .rounded(px(12.))
                 .bg(panel())
-                .border_1()
-                .border_color(border())
                 .child(
                     div()
                         .font_weight(FontWeight::BOLD)
@@ -855,7 +958,7 @@ fn password_dialog(
     div()
         .absolute()
         .inset_0()
-        .bg(rgba(0x000000b8))
+        .bg(scrim())
         .flex()
         .items_center()
         .justify_center()
@@ -863,7 +966,7 @@ fn password_dialog(
             div()
                 .w(px(440.))
                 .p_6()
-                .rounded_lg()
+                .rounded(px(16.))
                 .bg(panel())
                 .border_1()
                 .border_color(border())
@@ -886,15 +989,15 @@ fn password_dialog(
                 .child(
                     div()
                         .p_3()
-                        .rounded_md()
-                        .border_1()
+                        .rounded(px(8.))
+                        .border_2()
                         .border_color(accent())
-                        .bg(bg())
+                        .bg(input_bg())
                         .line_height(px(24.))
                         .child(password_input),
                 )
                 .when_some(error, |element, error| {
-                    element.child(div().text_sm().text_color(gpui::rgb(0xff7777)).child(error))
+                    element.child(div().text_sm().text_color(danger()).child(error))
                 })
                 .child(
                     div()
@@ -921,10 +1024,8 @@ fn field_row(label: &'static str, input: Entity<TextInput>) -> impl IntoElement 
             div()
                 .flex_1()
                 .p_2()
-                .rounded_md()
-                .border_1()
-                .border_color(border())
-                .bg(bg())
+                .rounded(px(8.))
+                .bg(input_bg())
                 .child(input),
         )
 }
@@ -948,15 +1049,15 @@ fn checkbox_row(
             div()
                 .w(px(18.))
                 .h(px(18.))
-                .rounded_sm()
+                .rounded(px(5.))
                 .border_1()
-                .border_color(if checked { accent() } else { border() })
-                .bg(if checked { accent() } else { bg() })
+                .border_color(if checked { accent() } else { hover() })
+                .bg(if checked { accent() } else { input_bg() })
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_xs()
-                .text_color(bg())
+                .text_color(on_accent())
                 .child(if checked { "✓" } else { "" }),
         )
         .child(div().text_sm().child(label))
@@ -972,7 +1073,7 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
     div()
         .absolute()
         .inset_0()
-        .bg(rgba(0x000000b8))
+        .bg(scrim())
         .flex()
         .items_center()
         .justify_center()
@@ -980,7 +1081,7 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
             div()
                 .w(px(580.))
                 .p_6()
-                .rounded_lg()
+                .rounded(px(16.))
                 .bg(panel())
                 .border_1()
                 .border_color(border())
@@ -1003,10 +1104,8 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                             div()
                                 .w(px(110.))
                                 .p_2()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(border())
-                                .bg(bg())
+                                .rounded(px(8.))
+                                .bg(input_bg())
                                 .child(ed.width.clone()),
                         )
                         .child(div().text_color(muted()).child("×"))
@@ -1014,10 +1113,8 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                             div()
                                 .w(px(110.))
                                 .p_2()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(border())
-                                .bg(bg())
+                                .rounded(px(8.))
+                                .bg(input_bg())
                                 .child(ed.height.clone()),
                         ),
                 )
@@ -1031,7 +1128,7 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                         .child(checkbox_row("fullscreen", "Start in full screen", ed.fullscreen, cx)),
                 )
                 .when_some(ed.error.clone(), |element, error| {
-                    element.child(div().text_sm().text_color(gpui::rgb(0xff7777)).child(error))
+                    element.child(div().text_sm().text_color(danger()).child(error))
                 })
                 .child(
                     div()
@@ -1044,8 +1141,9 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                                 .id("editor-cancel")
                                 .px_4()
                                 .py_2()
-                                .rounded_md()
+                                .rounded(px(8.))
                                 .bg(panel_2())
+                                .hover(|s| s.bg(hover()))
                                 .text_color(text())
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _event, _window, cx| {
@@ -1058,9 +1156,10 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                                 .id("editor-save")
                                 .px_4()
                                 .py_2()
-                                .rounded_md()
+                                .rounded(px(8.))
                                 .bg(accent())
-                                .text_color(bg())
+                                .hover(|s| s.bg(accent_hover()))
+                                .text_color(on_accent())
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.save_editor(cx);
@@ -1078,22 +1177,33 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
 fn toolbar_button(
     label: &'static str,
     enabled: bool,
+    destructive: bool,
     action: fn(&mut NexDeskApp, &mut Window, &mut Context<NexDeskApp>),
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("toolbar-{label}")))
         .px_4()
-        .py_2()
-        .rounded_md()
+        .h(px(34.))
+        .flex()
+        .items_center()
+        .rounded(px(8.))
+        .text_sm()
         .bg(panel_2())
-        .text_color(if enabled { text() } else { muted() })
+        .text_color(if !enabled {
+            muted()
+        } else if destructive {
+            danger()
+        } else {
+            text()
+        })
         .when(enabled, |element| {
-            element.cursor_pointer().on_click(cx.listener(
-                move |this, _event, window, cx| {
+            element
+                .cursor_pointer()
+                .hover(|s| s.bg(hover()))
+                .on_click(cx.listener(move |this, _event, window, cx| {
                     action(this, window, cx);
-                },
-            ))
+                }))
         })
         .child(label)
 }
@@ -1105,16 +1215,22 @@ fn action_button(
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("action-{label}")))
-        .px_4()
-        .py_2()
-        .rounded_md()
+        .px_5()
+        .h(px(34.))
+        .flex()
+        .items_center()
+        .rounded(px(8.))
+        .text_sm()
+        .font_weight(FontWeight::SEMIBOLD)
         .bg(if enabled { accent() } else { panel_2() })
-        .text_color(if enabled { bg() } else { muted() })
-        .cursor_pointer()
+        .text_color(if enabled { on_accent() } else { muted() })
         .when(enabled, |element| {
-            element.on_click(cx.listener(|this, _event, window, cx| {
-                this.open_password_dialog(window, cx);
-            }))
+            element
+                .cursor_pointer()
+                .hover(|s| s.bg(accent_hover()))
+                .on_click(cx.listener(|this, _event, window, cx| {
+                    this.open_password_dialog(window, cx);
+                }))
         })
         .child(label)
 }
@@ -1126,12 +1242,15 @@ fn dialog_button(
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("dialog-{label}")))
-        .px_4()
-        .py_2()
-        .rounded_md()
+        .px_5()
+        .h(px(36.))
+        .flex()
+        .items_center()
+        .rounded(px(8.))
         .bg(if primary { accent() } else { panel_2() })
-        .text_color(if primary { bg() } else { text() })
+        .text_color(if primary { on_accent() } else { text() })
         .cursor_pointer()
+        .hover(|s| s.bg(if primary { accent_hover() } else { hover() }))
         .when(primary || label == "Cancel", |element| {
             element.on_click(cx.listener(move |this, _event, window, cx| match label {
                 "Cancel" => {
@@ -1836,6 +1955,10 @@ pub fn run(engine_path: std::path::PathBuf) {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: None,
+                window_decorations: Some(WindowDecorations::Client),
+                window_background: WindowBackgroundAppearance::Transparent,
+                window_min_size: Some(size(px(760.), px(480.))),
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| NexDeskApp::new(engine_path.clone(), window, cx)),

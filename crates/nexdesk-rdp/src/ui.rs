@@ -4,15 +4,29 @@
 //! plus an 8x8 bitmap font, which keeps the viewer dependency-light.
 use std::time::{Duration, Instant};
 
-pub const BG: u32 = 0x00_1c_21_28;
-pub const BAR: u32 = 0x00_20_26_30;
-pub const BAR_HOVER: u32 = 0x00_36_3f_4d;
-pub const CLOSE_HOVER: u32 = 0x00_c4_2b_1c;
-pub const FG: u32 = 0x00_f2_f4_f7;
-pub const DIM: u32 = 0x00_9a_a5_b4;
-pub const ACCENT: u32 = 0x00_3b_82_f6;
-pub const WARN: u32 = 0x00_f5_9e_0b;
-pub const DANGER: u32 = 0x00_ef_44_44;
+// GNOME / libadwaita dark palette (matches the Files app look).
+pub const BG: u32 = 0x00_1e_1e_1e;
+pub const BAR: u32 = 0x00_2b_2b_2b;
+pub const BAR_HOVER: u32 = 0x00_3d_3d_3d;
+pub const FG: u32 = 0x00_f0_f0_f0;
+pub const DIM: u32 = 0x00_9a_99_96;
+pub const ACCENT: u32 = 0x00_35_84_e4;
+pub const ACCENT_HI: u32 = 0x00_62_a0_ea;
+pub const WARN: u32 = 0x00_f5_c2_11;
+pub const DANGER: u32 = 0x00_ff_7b_63;
+pub const EDGE: u32 = 0x00_44_44_44;
+const RED: u32 = 0x00_ff_5f_57;
+const YELLOW: u32 = 0x00_fe_bc_2e;
+const GREEN: u32 = 0x00_28_c8_40;
+const DOT_OFF: u32 = 0x00_55_55_55;
+
+fn mix(a: u32, b: u32, t: f32) -> u32 {
+    let ch = |s: u32| {
+        let (x, y) = (((a >> s) & 0xff) as f32, ((b >> s) & 0xff) as f32);
+        ((x + (y - x) * t).round() as u32) & 0xff
+    };
+    ch(16) << 16 | ch(8) << 8 | ch(0)
+}
 
 pub struct Canvas<'a> {
     pub buf: &'a mut [u32],
@@ -29,6 +43,54 @@ impl Canvas<'_> {
         for yy in y0..y1 {
             self.buf[yy * self.w + x0..yy * self.w + x1.max(x0)].fill(color);
         }
+    }
+
+    /// Rounded rectangle with anti-aliased corners. `corners` = which corners are round
+    /// (top-left, top-right, bottom-right, bottom-left).
+    pub fn rrect_corners(&mut self, x: i32, y: i32, w: i32, h: i32, r: i32, color: u32, corners: [bool; 4]) {
+        let r = r.min(w / 2).min(h / 2).max(0);
+        let x0 = x.max(0);
+        let y0 = y.max(0);
+        let x1 = (x + w).min(self.w as i32);
+        let y1 = (y + h).min(self.h as i32);
+        for yy in y0..y1 {
+            for xx in x0..x1 {
+                let (lx, ly) = (xx - x, yy - y);
+                // Which corner circle (if any) is this pixel in?
+                let cx = if lx < r { Some((r, 0usize, 3usize)) } else if lx >= w - r { Some((w - r, 1, 2)) } else { None };
+                let cy = if ly < r { Some(r) } else if ly >= h - r { Some(h - r) } else { None };
+                let mut cov = 1.0f32;
+                if let (Some((ccx, top_idx, bot_idx)), Some(ccy)) = (cx, cy) {
+                    let corner = if ly < r { top_idx } else { bot_idx };
+                    if corners[corner] {
+                        let dx = xx as f32 + 0.5 - (x + ccx) as f32;
+                        let dy = yy as f32 + 0.5 - (y + ccy) as f32;
+                        let d = (dx * dx + dy * dy).sqrt();
+                        cov = (r as f32 - d + 0.5).clamp(0.0, 1.0);
+                    }
+                }
+                if cov >= 0.999 {
+                    self.buf[yy as usize * self.w + xx as usize] = color;
+                } else if cov > 0.0 {
+                    let i = yy as usize * self.w + xx as usize;
+                    self.buf[i] = mix(self.buf[i], color, cov);
+                }
+            }
+        }
+    }
+
+    pub fn rrect(&mut self, x: i32, y: i32, w: i32, h: i32, r: i32, color: u32) {
+        self.rrect_corners(x, y, w, h, r, color, [true; 4]);
+    }
+
+    pub fn circle(&mut self, cx: i32, cy: i32, r: i32, color: u32) {
+        self.rrect(cx - r, cy - r, 2 * r, 2 * r, r, color);
+    }
+
+    /// Rounded rectangle outline.
+    pub fn rframe(&mut self, x: i32, y: i32, w: i32, h: i32, r: i32, t: i32, border: u32, fill: u32) {
+        self.rrect(x, y, w, h, r, border);
+        self.rrect(x + t, y + t, w - 2 * t, h - 2 * t, (r - t).max(0), fill);
     }
 
     pub fn frame(&mut self, x: i32, y: i32, w: i32, h: i32, t: i32, color: u32) {
@@ -93,6 +155,8 @@ pub enum BarHit {
     Close,
 }
 
+/// Floating pill at the top centre of the full-screen session, styled like the GNOME Files
+/// header: traffic-light window buttons on the left, host name, pin on the right.
 pub struct Toolbar {
     pub title: String,
     pub pinned: bool,
@@ -129,20 +193,21 @@ impl Toolbar {
 
     /// (x, y, w, h) in physical pixels. `u` is the UI scale (1 = 96 dpi).
     pub fn rect(&self, win_w: i32, u: i32) -> (i32, i32, i32, i32) {
-        let h = 34 * u;
-        let w = (460 * u).min(win_w);
+        let h = 40 * u;
+        let w = (440 * u).min(win_w);
         ((win_w - w) / 2, 0, w, h)
     }
 
+    /// Hit areas as (kind, centre-x, half-width).
     fn buttons(&self, win_w: i32, u: i32) -> [(BarHit, i32, i32); 4] {
-        let (x, _, w, h) = self.rect(win_w, u);
-        let bw = 46 * u;
-        let right = x + w;
+        let (x, _, w, _) = self.rect(win_w, u);
+        let step = 28 * u;
+        let c0 = x + 26 * u;
         [
-            (BarHit::Pin, x, h),
-            (BarHit::Minimize, right - 3 * bw, bw),
-            (BarHit::Restore, right - 2 * bw, bw),
-            (BarHit::Close, right - bw, bw),
+            (BarHit::Close, c0, 14 * u),
+            (BarHit::Minimize, c0 + step, 14 * u),
+            (BarHit::Restore, c0 + 2 * step, 14 * u),
+            (BarHit::Pin, x + w - 26 * u, 16 * u),
         ]
     }
 
@@ -152,8 +217,8 @@ impl Toolbar {
         if px < x || px >= x + w || py < y || py >= y + h {
             return BarHit::None;
         }
-        for (hit, bx, bw) in self.buttons(win_w, u) {
-            if px >= bx && px < bx + bw {
+        for (hit, cx, half) in self.buttons(win_w, u) {
+            if (px - cx).abs() <= half {
                 return hit;
             }
         }
@@ -162,42 +227,57 @@ impl Toolbar {
 
     pub fn draw(&self, c: &mut Canvas, u: i32, hover: BarHit) {
         let (x, y, w, h) = self.rect(c.w as i32, u);
-        c.rect(x, y, w, h, BAR);
-        c.rect(x, y + h - u, w, u, ACCENT);
-        for (hit, bx, bw) in self.buttons(c.w as i32, u) {
-            if hover == hit {
-                c.rect(bx, y, bw, h - u, if hit == BarHit::Close { CLOSE_HOVER } else { BAR_HOVER });
-            }
-            let (cx, cy) = (bx + bw / 2, y + (h - u) / 2);
-            let s = 6 * u;
+        // hangs from the top edge: only the bottom corners are round
+        c.rrect_corners(x - u, y, w + 2 * u, h + u, 16 * u, EDGE, [false, false, true, true]);
+        c.rrect_corners(x, y, w, h, 15 * u, BAR, [false, false, true, true]);
+        let cy = y + h / 2;
+        for (hit, cx, _) in self.buttons(c.w as i32, u) {
+            let hot = hover == hit;
             match hit {
-                BarHit::Pin => {
-                    // pushpin: filled when pinned, outline otherwise
-                    let (px, py) = (cx - 5 * u, cy - 5 * u);
-                    if self.pinned {
-                        c.rect(px, py, 10 * u, 10 * u, ACCENT);
-                    } else {
-                        c.frame(px, py, 10 * u, 10 * u, u.max(1), FG);
+                BarHit::Close | BarHit::Minimize | BarHit::Restore => {
+                    let (col, glyph_col) = match hit {
+                        BarHit::Close => (RED, 0x00_5c_10_0c),
+                        BarHit::Minimize => (YELLOW, 0x00_6b_4b_00),
+                        _ => (GREEN, 0x00_0b_55_16),
+                    };
+                    c.circle(cx, cy, 7 * u, if hover == BarHit::Bar || hover == BarHit::None { col } else { col });
+                    if hot {
+                        let g = 3 * u;
+                        let t = u.max(1);
+                        match hit {
+                            BarHit::Close => {
+                                c.line(cx - g, cy - g, cx + g, cy + g, t, glyph_col);
+                                c.line(cx - g, cy + g, cx + g, cy - g, t, glyph_col);
+                            }
+                            BarHit::Minimize => c.rect(cx - g, cy - t / 2, 2 * g, t, glyph_col),
+                            _ => {
+                                c.frame(cx - g, cy - g, 2 * g, 2 * g, t, glyph_col);
+                            }
+                        }
                     }
                 }
-                BarHit::Minimize => c.rect(cx - s, cy + 2 * u, 2 * s, u.max(1) * 2, FG),
-                BarHit::Restore => {
-                    c.frame(cx - s + 2 * u, cy - s, 2 * s - 2 * u, 2 * s - 2 * u, u.max(1), FG);
-                    c.frame(cx - s, cy - s + 2 * u, 2 * s - 2 * u, 2 * s - 2 * u, u.max(1), FG);
+                _ => {
+                    // pin: round button, filled accent when pinned
+                    if hot {
+                        c.circle(cx, cy, 13 * u, BAR_HOVER);
+                    }
+                    if self.pinned {
+                        c.circle(cx, cy, 6 * u, ACCENT_HI);
+                    } else {
+                        c.circle(cx, cy, 6 * u, DOT_OFF);
+                        c.circle(cx, cy, 4 * u, if hot { BAR_HOVER } else { BAR });
+                    }
                 }
-                BarHit::Close => {
-                    c.line(cx - s, cy - s, cx + s, cy + s, u.max(1) + 1, FG);
-                    c.line(cx - s, cy + s, cx + s, cy - s, u.max(1) + 1, FG);
-                }
-                _ => {}
             }
         }
-        let tx = x + 36 * u + 4 * u;
-        let room = (w - 36 * u - 3 * 46 * u - 12 * u).max(0);
-        let k = 2 * u.min(2) / 2 * 1;
-        let k = k.max(1);
+        let k = u.max(1);
+        let left = x + 26 * u + 3 * 28 * u - 4 * u;
+        let right = x + w - 26 * u - 20 * u;
+        let room = (right - left).max(0);
         let max_chars = (room / (8 * k)).max(0) as usize;
-        c.text(tx, y + (h - 8 * k) / 2 - u, &truncate(&self.title, max_chars), k, FG);
+        let title = truncate(&self.title, max_chars);
+        let tw = text_width(&title, k);
+        c.text(left + (room - tw) / 2, cy - 4 * k, &title, k, FG);
     }
 }
 
@@ -261,23 +341,28 @@ impl Modal {
     pub fn draw(&self, c: &mut Canvas, u: i32, hover: ModalHit) {
         // dim everything behind the dialog
         for p in c.buf.iter_mut() {
-            let (r, g, b) = ((*p >> 16) & 0xff, (*p >> 8) & 0xff, *p & 0xff);
-            *p = ((r / 3) << 16) | ((g / 3) << 8) | (b / 3);
+            *p = mix(*p, 0, 0.62);
         }
         let (x, y, w, h) = self.geometry(c.w as i32, c.h as i32, u);
-        c.rect(x, y, w, h, BG);
-        c.frame(x, y, w, h, u, self.accent);
-        c.rect(x, y, w, 6 * u, self.accent);
-        c.text(x + 20 * u, y + 22 * u, &self.heading, 2 * u, FG);
+        c.rrect(x - u, y - u, w + 2 * u, h + 2 * u, 15 * u, EDGE);
+        c.rrect(x, y, w, h, 14 * u, BAR);
+        c.text(x + 22 * u, y + 24 * u, &self.heading, 2 * u, if self.accent == DANGER { DANGER } else { FG });
         for (i, (line, color)) in self.lines.iter().enumerate() {
-            c.text(x + 20 * u, y + (58 + 14 * i as i32) * u, line, u.max(1), *color);
+            c.text(x + 22 * u, y + (62 + 14 * i as i32) * u, line, u.max(1), *color);
         }
         let (a, r) = self.button_rects(c.w as i32, c.h as i32, u);
+        let danger = self.accent == DANGER;
         let mut button = |rect: (i32, i32, i32, i32), label: &str, primary: bool, hot: bool| {
-            let bg = if primary { if hot { 0x00_60_a5_fa } else { ACCENT } } else if hot { BAR_HOVER } else { BAR };
-            c.rect(rect.0, rect.1, rect.2, rect.3, bg);
+            let bg = match (primary, danger, hot) {
+                (true, true, _) => if hot { 0x00_f6_61_51 } else { 0x00_c0_1c_28 },
+                (true, false, true) => ACCENT_HI,
+                (true, false, false) => ACCENT,
+                (false, _, true) => 0x00_4a_4a_4a,
+                (false, _, false) => 0x00_3a_3a_3a,
+            };
+            c.rrect(rect.0, rect.1, rect.2, rect.3, 9 * u, bg);
             let tw = text_width(label, u.max(1));
-            c.text(rect.0 + (rect.2 - tw) / 2, rect.1 + (rect.3 - 8 * u.max(1)) / 2, label, u.max(1), FG);
+            c.text(rect.0 + (rect.2 - tw) / 2, rect.1 + (rect.3 - 8 * u.max(1)) / 2, label, u.max(1), 0x00_ff_ff_ff);
         };
         if let (Some(rect), Some(label)) = (a, self.accept.as_deref()) {
             button(rect, label, true, hover == ModalHit::Accept);
@@ -302,12 +387,12 @@ impl Toast {
     pub fn draw(&self, c: &mut Canvas, u: i32) {
         let k = u.max(1) * 2;
         let tw = text_width(&self.text, k);
-        let (w, h) = (tw + 28 * u, 16 * k + 8 * u);
+        let (w, h) = (tw + 36 * u, 16 * k + 6 * u);
         let x = (c.w as i32 - w) / 2;
         let y = c.h as i32 - h - 40 * u;
-        c.rect(x, y, w, h, BAR);
-        c.frame(x, y, w, h, u.max(1), ACCENT);
-        c.text(x + 14 * u, y + (h - 8 * k) / 2, &self.text, k, FG);
+        c.rrect(x - u, y - u, w + 2 * u, h + 2 * u, h / 2 + u, EDGE);
+        c.rrect(x, y, w, h, h / 2, BAR);
+        c.text(x + 18 * u, y + (h - 8 * k) / 2, &self.text, k, FG);
     }
 }
 
@@ -319,10 +404,11 @@ mod tests {
     fn toolbar_hit_testing() {
         let t = Toolbar::new("host".into());
         let (x, _, w, h) = t.rect(1920, 1);
-        assert_eq!(t.hit(1920, 1, (x + w - 10) as f64, 5.0), BarHit::Close);
-        assert_eq!(t.hit(1920, 1, (x + w - 60) as f64, 5.0), BarHit::Restore);
-        assert_eq!(t.hit(1920, 1, (x + w - 110) as f64, 5.0), BarHit::Minimize);
-        assert_eq!(t.hit(1920, 1, (x + 10) as f64, 5.0), BarHit::Pin);
+        // traffic lights on the left (close, minimise, restore), pin on the right
+        assert_eq!(t.hit(1920, 1, (x + 26) as f64, 20.0), BarHit::Close);
+        assert_eq!(t.hit(1920, 1, (x + 54) as f64, 20.0), BarHit::Minimize);
+        assert_eq!(t.hit(1920, 1, (x + 82) as f64, 20.0), BarHit::Restore);
+        assert_eq!(t.hit(1920, 1, (x + w - 26) as f64, 20.0), BarHit::Pin);
         assert_eq!(t.hit(1920, 1, (x + w / 2) as f64, 5.0), BarHit::Bar);
         assert_eq!(t.hit(1920, 1, (x + w / 2) as f64, (h + 3) as f64), BarHit::None);
         assert_eq!(t.hit(1920, 1, 3.0, 5.0), BarHit::None);
