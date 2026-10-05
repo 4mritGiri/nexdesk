@@ -1,8 +1,33 @@
+use nexdesk_core::logs::Kind;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Connections,
+    Devices,
+    AddressBooks,
     Sessions,
+    Logs(Kind),
     Settings,
+}
+
+impl Screen {
+    pub fn title(self) -> &'static str {
+        match self {
+            Screen::Connections => "Connections",
+            Screen::Devices => "Devices",
+            Screen::AddressBooks => "Address Books",
+            Screen::Sessions => "Active Sessions",
+            Screen::Logs(Kind::Connection) => "Logs / Connection",
+            Screen::Logs(Kind::File) => "Logs / File",
+            Screen::Logs(Kind::Alarm) => "Logs / Alarm",
+            Screen::Logs(Kind::Console) => "Logs / Console",
+            Screen::Settings => "Settings",
+        }
+    }
+
+    pub fn searchable(self) -> bool {
+        !matches!(self, Screen::Sessions | Screen::Settings | Screen::AddressBooks)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

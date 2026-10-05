@@ -329,15 +329,20 @@ impl Engine {
                 if table.is_empty() {
                     tracing::warn!("nothing to offer: no usable files in the dropped selection");
                 } else {
+                    nexdesk_core::logs::file(nexdesk_core::logs::Level::Info, "Local -> remote", paths.len(), 0, "Offered", "");
                     self.offer_table(table);
                 }
             }
             EngineMsg::DownloadDone { gen, result } => {
                 if gen == self.gen {
                     self.files = match result {
-                        Ok(paths) => FilesState::Done(paths),
+                        Ok(paths) => {
+                            nexdesk_core::logs::file(nexdesk_core::logs::Level::Info, "Remote -> local", paths.len(), 0, "Downloaded", "");
+                            FilesState::Done(paths)
+                        }
                         Err(e) => {
                             tracing::warn!("file download failed: {e}");
+                            nexdesk_core::logs::file(nexdesk_core::logs::Level::Error, "Remote -> local", 0, 0, &format!("Failed: {e}"), "");
                             FilesState::Failed
                         }
                     };
@@ -579,6 +584,7 @@ impl Engine {
         let job = self.inflight.take();
         if matches!(&job, Some(j) if j.gen == self.gen && j.kind == PasteKind::FileList) {
             let total: u64 = files.iter().map(|f| f.file_size.unwrap_or(0)).sum();
+            nexdesk_core::logs::file(nexdesk_core::logs::Level::Info, "Remote -> local (copied on remote)", files.len(), total, "Offered", "");
             self.files = FilesState::Listed { files, lock };
             if total <= self.cfg.prefetch_limit {
                 self.start_download();

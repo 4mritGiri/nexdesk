@@ -4,6 +4,7 @@ Order is chosen by: (1) fixes something users hit daily, (2) needs no upstream w
 Details and feasibility per feature are in `docs/FEATURE_MATRIX.md`.
 
 ## Done
+Sidebar: Devices, Address Books, Logs (Connection, File, Alarm, Console). Follow-ups: live log tail without Refresh, export logs (CSV), per-transfer rows with byte counts and speed, online/latency probe on Devices, address-book import/export, tags.
 Manager header bar (sidebar toggle, back/forward, search, grid/list), session header bar, speed presets (LAN / Balanced / Slow network).
 Clipboard (text, images, files both ways), drag & drop, TLS verification + known hosts, in-session toolbar,
 Adwaita-dark restyle of manager and viewer.

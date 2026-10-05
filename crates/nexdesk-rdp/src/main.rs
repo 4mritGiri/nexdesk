@@ -175,6 +175,8 @@ fn main() -> Result<()> {
         .clone()
         .or_else(|| file.username().map(str::to_owned))
         .context("no username given: use -u or put it in the .rdp file")?;
+    let user_for_log = user.clone();
+    nexdesk_core::logs::set_context_host(&host);
     let domain = args
         .domain
         .clone()
@@ -261,6 +263,9 @@ fn main() -> Result<()> {
     let event_loop = builder.build()?;
     let proxy = event_loop.create_proxy();
 
+    if args.tls == tls::Policy::Insecure {
+        nexdesk_core::logs::alarm(nexdesk_core::logs::Level::Warn, "Certificate verification disabled (--tls insecure)", &host, "");
+    }
     if args.tls != tls::Policy::Insecure {
         let prompt_proxy = proxy.clone();
         let prompt: tls::Prompt = std::sync::Arc::new(move |info| {
@@ -327,6 +332,8 @@ fn main() -> Result<()> {
             initial_size: (u32::from(width), u32::from(height)),
             dynamic_resize: args.dynamic_resize,
             native_frame: args.native_frame,
+            log_profile: std::env::var("NEXDESK_PROFILE").unwrap_or_else(|_| host.clone()),
+            log_user: user_for_log,
             start_fullscreen: args.fullscreen || file.get_int("screen mode id") == Some(2),
             capture_keys: args.capture_keys,
             drop_paste: args.drop_paste,

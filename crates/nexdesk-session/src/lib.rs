@@ -98,6 +98,7 @@ pub struct Session {
     pub state: SessionState,
     pub created_at: Instant,
     pub last_error: Option<String>,
+    started_wall: Option<Instant>,
     child: Option<Child>,
     password: Option<Secret>,
     engine_path: PathBuf,
@@ -163,6 +164,7 @@ impl SessionManager {
             state: SessionState::Created,
             created_at: Instant::now(),
             last_error: None,
+            started_wall: None,
             child: None,
             password: Some(password),
             engine_path: g.engine_path.clone(),
@@ -185,19 +187,50 @@ impl SessionManager {
         if !profile.clipboard {
             cmd.arg("--no-clipboard");
         }
-        if profile.fullscreen {
+        let prefs = nexdesk_core::settings::Settings::load();
+        if profile.fullscreen || prefs.start_fullscreen {
             cmd.arg("--fullscreen");
+        }
+        cmd.arg("--tls").arg(prefs.tls.cli());
+        if !prefs.key_capture {
+            cmd.arg("--no-key-capture");
+        }
+        if !prefs.drop_paste {
+            cmd.arg("--no-drop-paste");
+        }
+        if prefs.native_frame {
+            cmd.arg("--native-frame");
         }
         // Environment handoff avoids command-line exposure. The manager never logs this value.
         if let Some(secret) = &session.password {
             cmd.env("NEXDESK_PASSWORD", secret.expose());
         }
+        cmd.env("NEXDESK_PROFILE", profile.name.trim());
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
 
         match cmd.spawn() {
-            Ok(child) => {
+            Ok(mut child) => {
+                // Engine output becomes the Console log (and never blocks on a full pipe).
+                if let Some(err) = child.stderr.take() {
+                    let name = format!("session {id}");
+                    std::thread::spawn(move || {
+                        use std::io::BufRead;
+                        for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
+                            let level = if line.contains("ERROR") || line.contains("error") {
+                                nexdesk_core::logs::Level::Error
+                            } else if line.contains("WARN") || line.contains("warn") {
+                                nexdesk_core::logs::Level::Warn
+                            } else {
+                                nexdesk_core::logs::Level::Info
+                            };
+                            nexdesk_core::logs::console(level, &name, line.trim_end());
+                        }
+                    });
+                }
+                nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Started", &profile.name, &profile.host, &profile.user, &format!("engine pid {}", child.id()));
+                session.started_wall = Some(Instant::now());
                 session.child = Some(child);
                 self.metrics
                     .started
@@ -209,6 +242,7 @@ impl SessionManager {
             }
             Err(e) => {
                 session.last_error = Some(e.to_string());
+                nexdesk_core::logs::connection(nexdesk_core::logs::Level::Error, "Failed", &profile.name, &profile.host, &profile.user, &format!("cannot start engine: {e}"));
                 session.state = SessionState::Failed;
                 self.metrics
                     .failed
@@ -224,10 +258,20 @@ impl SessionManager {
 
     pub fn disconnect(&self, id: u64) -> Result<SessionEvent, SessionError> {
         let mut g = self.inner.lock().expect("session manager poisoned");
-        let s = g.sessions.get_mut(&id).ok_or(SessionError::NotFound(id))?;
-        s.child.take().map(|mut c| {
+        let s = g.sessions.remove(&id).ok_or(SessionError::NotFound(id))?;
+        let mut s = s;
+        if let Some(mut c) = s.child.take() {
             let _ = c.kill();
-        });
+            let _ = c.wait();
+        }
+        nexdesk_core::logs::connection(
+            nexdesk_core::logs::Level::Info,
+            "Disconnected",
+            &s.profile.name,
+            &s.profile.host,
+            &s.profile.user,
+            &format!("closed from manager after {}s", s.started_wall.map(|t| t.elapsed().as_secs()).unwrap_or(0)),
+        );
         Ok(SessionEvent::Disconnected {
             id,
             reason: DisconnectReason::UserRequested,
@@ -239,8 +283,17 @@ impl SessionManager {
         g.sessions.retain(|_, s| {
             if let Some(child) = s.child.as_mut() {
                 match child.try_wait() {
-                    Ok(Some(_)) => {
+                    Ok(Some(status)) => {
                         s.state = SessionState::Disconnected;
+                        let ok = status.success();
+                        nexdesk_core::logs::connection(
+                            if ok { nexdesk_core::logs::Level::Info } else { nexdesk_core::logs::Level::Error },
+                            "Ended",
+                            &s.profile.name,
+                            &s.profile.host,
+                            &s.profile.user,
+                            &format!("engine {} after {}s", status, s.started_wall.map(|t| t.elapsed().as_secs()).unwrap_or(0)),
+                        );
                         false
                     }
                     Ok(None) => true,
@@ -266,6 +319,7 @@ mod tests {
             state: SessionState::Created,
             created_at: Instant::now(),
             last_error: None,
+            started_wall: None,
             child: None,
             password: None,
             engine_path: PathBuf::from("nexdesk-rdp"),
@@ -279,5 +333,35 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn engine_output_and_exit_reach_the_logs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("nexdesk-sess-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("XDG_DATA_HOME", &dir);
+        let engine = dir.join("fake-engine.sh");
+        std::fs::write(&engine, "#!/bin/sh\necho 'ERROR boom happened' >&2\nexit 3\n").unwrap();
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let m = SessionManager::new(engine);
+        let p = Profile { name: "Bank".into(), host: "10.0.0.5".into(), user: "bob".into(), ..Profile::default() };
+        m.start(p, Secret::new("pw".to_string())).unwrap();
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(100));
+            m.remove_finished();
+            if m.list().is_empty() {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(300)); // stderr reader thread
+        let conn = nexdesk_core::logs::read_tail(nexdesk_core::logs::Kind::Connection, 10);
+        let events: Vec<&str> = conn.iter().map(|e| e.fields[0].as_str()).collect();
+        assert!(events.contains(&"Started") && events.contains(&"Ended"), "{events:?}");
+        let con = nexdesk_core::logs::read_tail(nexdesk_core::logs::Kind::Console, 10);
+        assert!(con.iter().any(|e| e.fields[1].contains("boom") && e.level == nexdesk_core::logs::Level::Error));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -116,12 +116,14 @@ impl ServerCertVerifier for PolicyVerifier {
             Lookup::Unknown => {
                 match self.policy {
                     Policy::Strict => {
+                        nexdesk_core::logs::alarm(nexdesk_core::logs::Level::Error, "Untrusted certificate refused", &self.key, &format!("strict mode, fingerprint {fp}"));
                         return Err(Error::General(format!(
                             "server certificate {fp} is not trusted (strict mode; connect once with --tls ask to pin it)"
                         )))
                     }
                     Policy::AcceptNew => {
                         tracing::warn!("pinning new server certificate for {}: {fp}", self.key);
+                        nexdesk_core::logs::alarm(nexdesk_core::logs::Level::Warn, "New certificate pinned (accept-new)", &self.key, &fp);
                         let _ = store.set(&self.key, &fp);
                         return Ok(ServerCertVerified::assertion());
                     }
@@ -131,6 +133,7 @@ impl ServerCertVerifier for PolicyVerifier {
             }
             Lookup::Mismatch { pinned } => {
                 if self.policy != Policy::Ask {
+                    nexdesk_core::logs::alarm(nexdesk_core::logs::Level::Error, "SERVER CERTIFICATE CHANGED - connection refused", &self.key, &format!("pinned {pinned}, got {fp}"));
                     return Err(Error::General(format!(
                         "SERVER CERTIFICATE CHANGED for {} (pinned {pinned}, got {fp}). Possible man-in-the-middle attack. \
                          If the server was reinstalled, run with --forget-host or use --tls ask.",
@@ -142,9 +145,22 @@ impl ServerCertVerifier for PolicyVerifier {
         };
         let info = CertInfo { host: self.key.clone(), subject: Self::describe(end_entity), fingerprint: fp.clone(), pinned };
         drop(store); // the prompt can take minutes; do not hold the lock
+        let changed = info.pinned.is_some();
         if !(self.prompt)(info) {
+            nexdesk_core::logs::alarm(
+                nexdesk_core::logs::Level::Warn,
+                if changed { "Changed certificate rejected by user" } else { "Unknown certificate rejected by user" },
+                &self.key,
+                &fp,
+            );
             return Err(Error::General("server certificate rejected by the user".into()));
         }
+        nexdesk_core::logs::alarm(
+            if changed { nexdesk_core::logs::Level::Error } else { nexdesk_core::logs::Level::Warn },
+            if changed { "CHANGED certificate trusted by user" } else { "Unknown certificate trusted by user" },
+            &self.key,
+            &fp,
+        );
         if let Ok(mut s) = self.store.lock() {
             if let Err(e) = s.set(&self.key, &fp) {
                 tracing::warn!("could not save pinned certificate: {e}");

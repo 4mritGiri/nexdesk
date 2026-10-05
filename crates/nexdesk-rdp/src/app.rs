@@ -42,6 +42,9 @@ pub struct Options {
     pub drop_paste: bool,
     /// Use the system title bar instead of NexDesk's own header bar.
     pub native_frame: bool,
+    /// Names for the activity log.
+    pub log_profile: String,
+    pub log_user: String,
 }
 
 struct Frame {
@@ -76,6 +79,9 @@ pub struct App {
     drop_deadline: Option<Instant>,
     paste_at: Option<Instant>,
     native_frame: bool,
+    log_profile: String,
+    log_user: String,
+    connected_logged: bool,
     server_cursor: Cursor,
     server_cursor_hidden: bool,
     cursor_overridden: bool,
@@ -116,6 +122,9 @@ impl App {
             drop_deadline: None,
             paste_at: None,
             native_frame: o.native_frame,
+            log_profile: o.log_profile,
+            log_user: o.log_user,
+            connected_logged: false,
             server_cursor: Cursor::Icon(CursorIcon::Default),
             server_cursor_hidden: false,
             cursor_overridden: false,
@@ -296,6 +305,7 @@ impl App {
     }
 
     fn close_session(&mut self, el: &ActiveEventLoop) {
+        nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Disconnected", &self.log_profile, &self.toolbar.title, &self.log_user, "closed by user");
         let _ = self.input_tx.send(RdpInputEvent::Close);
         el.exit();
     }
@@ -503,6 +513,10 @@ impl ApplicationHandler<UserEvent> for App {
                 width,
                 height,
             } => {
+                if !self.connected_logged {
+                    self.connected_logged = true;
+                    nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Connected", &self.log_profile, &self.toolbar.title, &self.log_user, "");
+                }
                 self.frame = Some(Frame {
                     buf: buffer,
                     w: u32::from(width.get()),
@@ -551,14 +565,19 @@ impl ApplicationHandler<UserEvent> for App {
             RdpOutputEvent::PointerPosition { .. } => {}
             RdpOutputEvent::ConnectionFailure(e) => {
                 let msg = format!("connection failed: {e}");
+                nexdesk_core::logs::connection(nexdesk_core::logs::Level::Error, "Failed", &self.log_profile, &self.toolbar.title, &self.log_user, &msg);
                 self.failure = Some(msg.clone());
                 self.show_error(el, "Connection failed", &msg);
             }
             RdpOutputEvent::Terminated(res) => {
                 match res {
-                    Ok(reason) => eprintln!("session ended: {reason:?}"),
+                    Ok(reason) => {
+                        eprintln!("session ended: {reason:?}");
+                        nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Disconnected", &self.log_profile, &self.toolbar.title, &self.log_user, &format!("{reason:?}"));
+                    }
                     Err(e) => {
                         let msg = format!("session error: {e}");
+                        nexdesk_core::logs::connection(nexdesk_core::logs::Level::Error, "Failed", &self.log_profile, &self.toolbar.title, &self.log_user, &msg);
                         self.failure = Some(msg.clone());
                         self.show_error(el, "Session ended", &msg);
                         return;

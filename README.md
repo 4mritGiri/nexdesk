@@ -70,3 +70,11 @@ Local patches to IronRDP are in `vendor/` (see `vendor/README.md`).
 * Windowed sessions have NexDesk's own header (red/yellow/green dots, title, drag to move, double-click to maximise, drag edges to resize); `--native-frame` uses the system title bar. Full screen shows the floating bar at the top edge.
 * `--perf lan|balanced|slow` (or the "Connection speed" choice in the connection editor) controls how much visual decoration the server sends; use *Slow network* over VPN/mobile links.
 * Manager: sidebar toggle button (icons only when collapsed), back/forward, search, grid/list view, double-click a connection to connect.
+
+## Devices, Address Books, Logs
+* **Devices**: one row per computer with last activity, session count and certificate status; *Forget key* re-asks about the certificate on the next connection.
+* **Address Books**: group connections (create a book, click `+ name` to add, Remove, Delete book).
+* **Logs**: Connection, File, Alarm and Console pages under the sidebar's Logs group, stored in `~/.local/share/nexdesk/logs/`. Passwords and file contents are never written.
+
+## Themes and preferences
+Header "⋯" menu > Preferences (or sidebar > Settings): theme (Midnight / Graphite / Light), sidebar and view defaults, default connection speed, session window options, certificate policy. Stored in `~/.config/nexdesk/settings`.

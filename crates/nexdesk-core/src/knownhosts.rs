@@ -84,6 +84,10 @@ impl KnownHosts {
         self.save()
     }
 
+    pub fn is_pinned(&self, key: &str) -> bool {
+        self.entries.iter().any(|(h, _)| h == key)
+    }
+
     pub fn forget(&mut self, key: &str) -> io::Result<bool> {
         let before = self.entries.len();
         self.entries.retain(|(h, _)| h != key);

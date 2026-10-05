@@ -17,6 +17,9 @@ use gpui::{
 use gpui_platform::application;
 use nexdesk_core::{
     credentials::Secret,
+    books::AddressBooks,
+    settings::{Settings, Theme, TlsMode},
+    logs::{self, Kind as LogKind, Level as LogLevel},
     profiles::{file_stem_for, Profile, Speed},
 };
 use nexdesk_session::SessionState;
@@ -71,6 +74,26 @@ pub struct NexDeskApp {
     hist_pos: usize,
     pub search_open: bool,
     pub search_input: Entity<TextInput>,
+
+    // logs / devices / address books
+    pub logs_open: bool,
+    log_entries: Vec<logs::Entry>,
+    conn_log: Vec<logs::Entry>,
+    log_loaded: Option<std::time::Instant>,
+    confirm_clear: bool,
+    books: AddressBooks,
+    book_sel: Option<usize>,
+    book_input: Entity<TextInput>,
+
+    pub prefs: Settings,
+    menu_open: bool,
+    info_dialog: Option<InfoDialog>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InfoDialog {
+    Shortcuts,
+    About,
 }
 
 /// State of the connection editor dialog.
@@ -102,10 +125,13 @@ impl NexDeskApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let password_input = cx.new(|cx| TextInput::new(cx, true, "Password"));
-        let search_input = cx.new(|cx| TextInput::new(cx, false, "Search connections"));
+        let search_input = cx.new(|cx| TextInput::new(cx, false, "Search"));
+        let book_input = cx.new(|cx| TextInput::new(cx, false, "New address book"));
         // Re-render the list while typing in the search box.
         cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
 
+        let prefs = Settings::load();
+        crate::theme::set_theme(prefs.theme);
         Self {
             state: ManagerState::load(engine_path),
             nav: Navigation::default(),
@@ -116,13 +142,48 @@ impl NexDeskApp {
             password_error: None,
             editor: None,
             pending_delete: None,
-            sidebar_collapsed: false,
-            grid_view: true,
+            sidebar_collapsed: prefs.sidebar_collapsed,
+            grid_view: prefs.grid_view,
             history: vec![Screen::Connections],
             hist_pos: 0,
             search_open: false,
             search_input,
+            logs_open: true,
+            log_entries: Vec::new(),
+            conn_log: Vec::new(),
+            log_loaded: None,
+            confirm_clear: false,
+            books: nexdesk_core::books::default_path()
+                .map(|p| AddressBooks::load(&p))
+                .unwrap_or_else(AddressBooks::in_memory),
+            book_sel: None,
+            book_input,
+            prefs,
+            menu_open: false,
+            info_dialog: None,
         }
+    }
+
+    /// Change a preference, save it and apply it immediately.
+    fn update_settings(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Settings)) {
+        f(&mut self.prefs);
+        crate::theme::set_theme(self.prefs.theme);
+        if let Err(e) = self.prefs.save() {
+            self.state.status = format!("Could not save preferences: {e}");
+        }
+        cx.notify();
+    }
+
+    fn refresh_logs(&mut self) {
+        self.conn_log = logs::read_tail(LogKind::Connection, 2000);
+        if let Screen::Logs(kind) = self.nav.screen {
+            self.log_entries = if kind == LogKind::Connection {
+                self.conn_log.iter().take(500).cloned().collect()
+            } else {
+                logs::read_tail(kind, 500)
+            };
+        }
+        self.log_loaded = Some(std::time::Instant::now());
     }
 
     // ------------------------------------------------------------------
@@ -136,6 +197,8 @@ impl NexDeskApp {
             self.hist_pos = self.history.len() - 1;
             self.nav.screen = screen;
         }
+        self.confirm_clear = false;
+        self.refresh_logs();
         cx.notify();
     }
 
@@ -178,6 +241,10 @@ impl NexDeskApp {
 
     fn open_editor_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_editor(None, window, cx);
+        let speed = self.prefs.default_speed;
+        if let Some(ed) = self.editor.as_mut() {
+            ed.speed = speed;
+        }
     }
 
     fn open_editor_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -312,6 +379,11 @@ impl NexDeskApp {
             .and_then(|p| self.persist_profile(&p).map(|list| (p, list)));
         match result {
             Ok((profile, list)) => {
+                if let Some(old) = self.editor.as_ref().and_then(|e| e.original.clone()) {
+                    if old != profile.name {
+                        self.books.rename_connection(&old, Some(&profile.name));
+                    }
+                }
                 self.selected_profile = list.iter().position(|p| p.name == profile.name);
                 self.state.selected = self.selected_profile;
                 self.state.profiles = list;
@@ -372,6 +444,7 @@ impl NexDeskApp {
         };
         match result {
             Ok(list) => {
+                self.books.rename_connection(&profile.name, None);
                 self.state.profiles = list;
                 self.selected_profile = None;
                 self.state.selected = None;
@@ -519,14 +592,28 @@ impl Render for NexDeskApp {
 
             Screen::Sessions => session_view(sessions, cx).into_any_element(),
 
-            Screen::Settings => settings_view().into_any_element(),
+            Screen::Devices => devices_view(&self.state.profiles, &self.conn_log, &filter, cx).into_any_element(),
+
+            Screen::AddressBooks => books_view(
+                &self.books,
+                self.book_sel,
+                &self.state.profiles,
+                self.book_input.clone(),
+                cx,
+            )
+            .into_any_element(),
+
+            Screen::Logs(kind) => logs_view(kind, &self.log_entries, &filter, self.confirm_clear, cx).into_any_element(),
+
+            Screen::Settings => settings_view(&self.prefs, cx).into_any_element(),
         };
 
-        let title = match self.nav.screen {
-            Screen::Connections => "Connections",
-            Screen::Sessions => "Active Sessions",
-            Screen::Settings => "Settings",
-        };
+        if matches!(self.nav.screen, Screen::Logs(_) | Screen::Devices)
+            && self.log_loaded.map(|t| t.elapsed().as_secs() >= 3).unwrap_or(true)
+        {
+            self.refresh_logs();
+        }
+        let title = self.nav.screen.title();
         let hv = HeaderState {
             title,
             can_back: self.hist_pos > 0,
@@ -536,6 +623,8 @@ impl Render for NexDeskApp {
             search_open: self.search_open,
             search_input: self.search_input.clone(),
             on_connections: self.nav.screen == Screen::Connections,
+            searchable: self.nav.screen.searchable(),
+            menu_open: self.menu_open,
         };
 
         let client = matches!(window.window_decorations(), Decorations::Client { .. });
@@ -545,16 +634,18 @@ impl Render for NexDeskApp {
             .flex_1()
             .flex()
             .min_h_0()
-            .child(sidebar_view(self.nav.screen, self.sidebar_collapsed, cx))
+            .child(sidebar_view(self.nav.screen, self.sidebar_collapsed, self.logs_open, cx))
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .child(
                         div()
                             .id("content-scroll")
                             .flex_1()
+                            .min_w_0()
                             .p_6()
                             .overflow_y_scroll()
                             .child(content),
@@ -573,7 +664,7 @@ impl Render for NexDeskApp {
 
         let mut main = div()
             .size_full()
-            .bg(bg())
+            .bg(window_bg())
             .text_color(text())
             .flex()
             .flex_col()
@@ -594,6 +685,13 @@ impl Render for NexDeskApp {
                 self.password_error.clone(),
                 cx,
             ));
+        }
+
+        if self.menu_open {
+            main = main.child(menu_popover(cx));
+        }
+        if let Some(d) = self.info_dialog {
+            main = main.child(info_dialog(d, cx));
         }
 
         // Client-side decorations need their own resize handles.
@@ -671,7 +769,6 @@ fn hbtn(
         .items_center()
         .justify_center()
         .rounded(px(8.))
-        .text_color(if enabled { text() } else { rgb_dim() })
         .bg(if active { panel_2() } else { panel() })
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .when(enabled, |d| {
@@ -679,11 +776,20 @@ fn hbtn(
                 .hover(|s| s.bg(hover()))
                 .on_click(cx.listener(move |this, _e, window, cx| action(this, window, cx)))
         })
-        .child(glyph)
+        .child(ico(glyph, 18., if !enabled { dim() } else if active { accent_hover() } else { icon() }))
+}
+
+/// Vector icon from `assets/icons`, tinted with `color`.
+fn ico(name: &str, size: f32, color: gpui::Rgba) -> impl IntoElement {
+    gpui::svg()
+        .path(SharedString::from(format!("icons/{name}.svg")))
+        .size(px(size))
+        .flex_none()
+        .text_color(color)
 }
 
 fn rgb_dim() -> gpui::Rgba {
-    gpui::rgb(0x626262)
+    dim()
 }
 
 struct HeaderState {
@@ -695,6 +801,8 @@ struct HeaderState {
     search_open: bool,
     search_input: Entity<TextInput>,
     on_connections: bool,
+    searchable: bool,
+    menu_open: bool,
 }
 
 fn header_view(h: HeaderState, client: bool, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
@@ -757,9 +865,10 @@ fn header_view(h: HeaderState, client: bool, cx: &mut Context<NexDeskApp>) -> im
                     .child(dot("dot-max", dot_max(), cx, |w| w.zoom_window()))
             }),
         )
-        .child(hbtn("h-sidebar", "◧", true, !h.sidebar_collapsed, cx, |this, _w, cx| {
-            this.sidebar_collapsed = !this.sidebar_collapsed;
-            cx.notify();
+        .child(hbtn("h-sidebar", "sidebar", true, !h.sidebar_collapsed, cx, |this, _w, cx| {
+            let v = !this.sidebar_collapsed;
+            this.sidebar_collapsed = v;
+            this.update_settings(cx, |s| s.sidebar_collapsed = v);
         }))
         // back / forward
         .child(
@@ -767,11 +876,11 @@ fn header_view(h: HeaderState, client: bool, cx: &mut Context<NexDeskApp>) -> im
                 .flex()
                 .rounded(px(9.))
                 .bg(panel())
-                .child(hbtn("h-back", "‹", h.can_back, false, cx, |this, _w, cx| this.go_back(cx)))
-                .child(hbtn("h-fwd", "›", h.can_forward, false, cx, |this, _w, cx| this.go_forward(cx))),
+                .child(hbtn("h-back", "back", h.can_back, false, cx, |this, _w, cx| this.go_back(cx)))
+                .child(hbtn("h-fwd", "forward", h.can_forward, false, cx, |this, _w, cx| this.go_forward(cx))),
         )
         .child(centre)
-        .child(hbtn("h-search", "⌕", h.on_connections, h.search_open, cx, |this, w, cx| {
+        .child(hbtn("h-search", "search", h.searchable, h.search_open, cx, |this, w, cx| {
             this.toggle_search(w, cx)
         }))
         .child(
@@ -779,23 +888,32 @@ fn header_view(h: HeaderState, client: bool, cx: &mut Context<NexDeskApp>) -> im
                 .flex()
                 .rounded(px(9.))
                 .bg(panel())
-                .child(hbtn("h-grid", "▦", h.on_connections, h.on_connections && h.grid_view, cx, |this, _w, cx| {
+                .child(hbtn("h-grid", "grid", h.on_connections, h.on_connections && h.grid_view, cx, |this, _w, cx| {
                     this.grid_view = true;
-                    cx.notify();
+                    this.update_settings(cx, |s| s.grid_view = true);
                 }))
-                .child(hbtn("h-list", "☰", h.on_connections, h.on_connections && !h.grid_view, cx, |this, _w, cx| {
+                .child(hbtn("h-list", "list", h.on_connections, h.on_connections && !h.grid_view, cx, |this, _w, cx| {
                     this.grid_view = false;
-                    cx.notify();
+                    this.update_settings(cx, |s| s.grid_view = false);
                 })),
         )
+        .child(hbtn("h-menu", "menu", true, h.menu_open, cx, |this, _w, cx| {
+            this.menu_open = !this.menu_open;
+            cx.notify();
+        }))
 }
 
 // ============================================================================
 // Sidebar (collapsible)
 // ============================================================================
 
-fn sidebar_view(active_screen: Screen, collapsed: bool, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+fn sidebar_view(active: Screen, collapsed: bool, logs_open: bool, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+    let in_logs = matches!(active, Screen::Logs(_));
+    let sub = |icon: &'static str, kind: LogKind, cx: &mut Context<NexDeskApp>| {
+        sidebar_button(icon, kind.label(), collapsed, active == Screen::Logs(kind), Screen::Logs(kind), !collapsed, cx)
+    };
     div()
+        .id("sidebar")
         .w(px(if collapsed { 60. } else { 220. }))
         .flex_none()
         .bg(sidebar())
@@ -803,10 +921,44 @@ fn sidebar_view(active_screen: Screen, collapsed: bool, cx: &mut Context<NexDesk
         .flex()
         .flex_col()
         .gap_1()
-        .child(sidebar_button("⇄", "Connections", collapsed, active_screen == Screen::Connections, Screen::Connections, cx))
-        .child(sidebar_button("◉", "Sessions", collapsed, active_screen == Screen::Sessions, Screen::Sessions, cx))
+        .overflow_y_scroll()
+        .child(sidebar_button("connections", "Connections", collapsed, active == Screen::Connections, Screen::Connections, false, cx))
+        .child(sidebar_button("devices", "Devices", collapsed, active == Screen::Devices, Screen::Devices, false, cx))
+        .child(sidebar_button("book", "Address Books", collapsed, active == Screen::AddressBooks, Screen::AddressBooks, false, cx))
+        .child(sidebar_button("sessions", "Sessions", collapsed, active == Screen::Sessions, Screen::Sessions, false, cx))
         .child(div().h(px(1.)).my_2().mx_2().bg(border()))
-        .child(sidebar_button("⚙", "Settings", collapsed, active_screen == Screen::Settings, Screen::Settings, cx))
+        // Logs group: header expands/collapses the four sub-pages (icons only when the sidebar is collapsed)
+        .when(!collapsed, |d| {
+            d.child(
+                div()
+                    .id("logs-group")
+                    .w_full()
+                    .h(px(34.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded(px(8.))
+                    .text_color(if in_logs { text() } else { icon() })
+                    .cursor_pointer()
+                    .hover(|s| s.bg(row_hover()))
+                    .on_click(cx.listener(|this, _e, _w, cx| {
+                        this.logs_open = !this.logs_open;
+                        cx.notify();
+                    }))
+                    .child(div().w(px(22.)).flex().justify_center().child(ico("logs", 18., if in_logs { accent_hover() } else { icon() })))
+                    .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child("Logs"))
+                    .child(ico(if logs_open { "chevron-down" } else { "chevron-right" }, 14., dim())),
+            )
+        })
+        .when(collapsed || logs_open || in_logs, |d| {
+            d.child(sub("log-connection", LogKind::Connection, cx))
+                .child(sub("log-file", LogKind::File, cx))
+                .child(sub("log-alarm", LogKind::Alarm, cx))
+                .child(sub("log-console", LogKind::Console, cx))
+        })
+        .child(div().h(px(1.)).my_2().mx_2().bg(border()))
+        .child(sidebar_button("settings", "Settings", collapsed, active == Screen::Settings, Screen::Settings, false, cx))
 }
 
 fn sidebar_button(
@@ -815,13 +967,15 @@ fn sidebar_button(
     collapsed: bool,
     active: bool,
     screen: Screen,
+    indent: bool,
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
     div()
-        .id(label)
+        .id(SharedString::from(format!("nav-{screen:?}")))
         .w_full()
         .h(px(38.))
         .px_3()
+        .when(indent, |d| d.pl(px(28.)))
         .flex()
         .items_center()
         .when(collapsed, |d| d.justify_center())
@@ -832,7 +986,7 @@ fn sidebar_button(
         .cursor_pointer()
         .when(!active, |d| d.hover(|s| s.bg(row_hover())))
         .on_click(cx.listener(move |this, _event, _window, cx| this.navigate(screen, cx)))
-        .child(div().w(px(20.)).flex().justify_center().text_color(if active { accent_hover() } else { muted() }).child(icon))
+        .child(div().w(px(22.)).flex().justify_center().child(ico(icon, 18., if active { accent_hover() } else { crate::theme::icon() })))
         .when(!collapsed, |d| d.child(div().text_sm().child(label)))
 }
 
@@ -1027,7 +1181,459 @@ fn connection_view(
 }
 
 fn rgb_blue_dark() -> gpui::Rgba {
-    gpui::rgb(0x1b3350)
+    blue_dark()
+}
+
+// ============================================================================
+// Devices
+// ============================================================================
+
+fn devices_view(
+    profiles: &[Profile],
+    conn_log: &[logs::Entry],
+    filter: &str,
+    cx: &mut Context<NexDeskApp>,
+) -> impl IntoElement {
+    let known = nexdesk_core::knownhosts::default_path()
+        .map(|p| nexdesk_core::knownhosts::KnownHosts::load(&p))
+        .unwrap_or_else(nexdesk_core::knownhosts::KnownHosts::in_memory);
+
+    // One row per computer (several saved connections may point at the same host).
+    let mut seen: Vec<String> = Vec::new();
+    let mut list = div().w_full().flex().flex_col().gap_2();
+    let mut shown = 0;
+    for (index, p) in profiles.iter().enumerate() {
+        let host_lc = p.host.trim().to_lowercase();
+        if seen.contains(&host_lc) {
+            continue;
+        }
+        seen.push(host_lc.clone());
+        if !filter.is_empty() && ![&p.name, &p.host, &p.user].iter().any(|f| f.to_lowercase().contains(filter)) {
+            continue;
+        }
+        shown += 1;
+        let (name, port) = match p.host.trim().rsplit_once(':') {
+            Some((h, port)) if port.parse::<u16>().is_ok() => (h.to_string(), port.parse::<u16>().unwrap_or(3389)),
+            _ => (p.host.trim().to_string(), 3389),
+        };
+        let key = nexdesk_core::knownhosts::host_key(&name, port);
+        let pinned = known.is_pinned(&key);
+        let st = logs::device_stats(conn_log, p.host.trim());
+        let last = if st.last_ts_ms == 0 {
+            "Never connected".to_string()
+        } else {
+            format!("{} · {}", logs::format_time(st.last_ts_ms), st.last_event)
+        };
+        let key2 = key.clone();
+        list = list.child(
+            div()
+                .id(SharedString::from(format!("dev-{index}")))
+                .w_full()
+                .h(px(64.))
+                .px_4()
+                .rounded(px(12.))
+                .bg(panel())
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(10.))
+                        .rounded_full()
+                        .bg(if st.last_event == "Failed" { danger() } else if st.sessions > 0 { dot_max() } else { rgb_dim() }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(p.host.clone()))
+                        .child(div().text_xs().text_color(muted()).child(format!("{} · {}", p.name, p.user))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_xs()
+                        .text_color(muted())
+                        .child(div().child(last))
+                        .child(div().child(format!("{} session(s)", st.sessions))),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .px_3()
+                        .py_1()
+                        .rounded_full()
+                        .text_xs()
+                        .bg(if pinned { accent_soft() } else { panel_2() })
+                        .text_color(if pinned { text() } else { muted() })
+                        .child(if pinned { "Pinned" } else { "Unverified" }),
+                )
+                .child(toolbar_button_dyn(
+                    format!("dev-connect-{index}"),
+                    "Connect",
+                    true,
+                    cx.listener(move |this, _e, window, cx| {
+                        this.selected_profile = Some(index);
+                        this.state.selected = Some(index);
+                        this.open_password_dialog(window, cx);
+                    }),
+                ))
+                .when(pinned, |d| {
+                    d.child(toolbar_button_dyn(
+                        format!("dev-forget-{index}"),
+                        "Forget key",
+                        true,
+                        cx.listener(move |this, _e, _w, cx| {
+                            if let Some(path) = nexdesk_core::knownhosts::default_path() {
+                                let mut k = nexdesk_core::knownhosts::KnownHosts::load(&path);
+                                let _ = k.forget(&key2);
+                                logs::alarm(LogLevel::Info, "Pinned certificate forgotten", &key2, "removed by user from Devices");
+                            }
+                            this.state.status = "Pinned certificate removed. You will be asked again on the next connection.".into();
+                            cx.notify();
+                        }),
+                    ))
+                }),
+        );
+    }
+    if shown == 0 {
+        list = list.child(empty_card("No devices yet. Computers appear here once you save a connection."));
+    }
+    div().w_full().flex().flex_col().gap_3().child(div().text_sm().text_color(muted()).child("Computers you have connections to, with last activity and certificate status.")).child(list)
+}
+
+fn empty_card(msg: &'static str) -> impl IntoElement {
+    div().w_full().p_8().rounded(px(12.)).bg(panel()).text_color(muted()).flex().justify_center().child(msg)
+}
+
+/// Small pill button with a runtime id and an arbitrary click handler.
+fn toolbar_button_dyn(
+    id: String,
+    label: &'static str,
+    enabled: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(id))
+        .flex_none()
+        .px_3()
+        .h(px(30.))
+        .flex()
+        .items_center()
+        .rounded(px(8.))
+        .text_sm()
+        .bg(panel_2())
+        .text_color(if enabled { text() } else { muted() })
+        .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(hover())).on_click(on_click))
+        .child(label)
+}
+
+// ============================================================================
+// Address books
+// ============================================================================
+
+fn books_view(
+    books: &AddressBooks,
+    sel: Option<usize>,
+    profiles: &[Profile],
+    book_input: Entity<TextInput>,
+    cx: &mut Context<NexDeskApp>,
+) -> impl IntoElement {
+    let mut left = div().flex().flex_col().gap_1().w(px(240.)).flex_none();
+    for (i, b) in books.books.iter().enumerate() {
+        let on = sel == Some(i);
+        left = left.child(
+            div()
+                .id(SharedString::from(format!("book-{i}")))
+                .h(px(38.))
+                .px_3()
+                .rounded(px(8.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .bg(if on { accent_soft() } else { bg() })
+                .when(!on, |d| d.hover(|s| s.bg(row_hover())))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _e, _w, cx| {
+                    this.book_sel = Some(i);
+                    cx.notify();
+                }))
+                .child(div().text_sm().overflow_hidden().child(b.name.clone()))
+                .child(div().text_xs().text_color(muted()).child(b.members.len().to_string())),
+        );
+    }
+    if books.books.is_empty() {
+        left = left.child(div().text_sm().text_color(muted()).p_2().child("No address books yet."));
+    }
+    left = left.child(
+        div()
+            .mt_2()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().p_2().rounded(px(8.)).bg(input_bg()).child(book_input))
+            .child(toolbar_button_dyn(
+                "book-create".into(),
+                "Create address book",
+                true,
+                cx.listener(|this, _e, _w, cx| {
+                    let name = this.book_input.read(cx).value().to_string();
+                    match this.books.create(&name) {
+                        Ok(()) => {
+                            this.book_sel = this.books.books.iter().position(|b| b.name.eq_ignore_ascii_case(name.trim()));
+                            this.book_input.update(cx, |i, cx| i.set_value("", cx));
+                            this.state.status = format!("Created address book \"{}\"", name.trim());
+                        }
+                        Err(e) => this.state.status = e.to_string(),
+                    }
+                    cx.notify();
+                }),
+            )),
+    );
+
+    let mut right = div().flex_1().flex().flex_col().gap_3();
+    match sel.and_then(|i| books.books.get(i).map(|b| (i, b))) {
+        None => {
+            right = right.child(empty_card("Select or create an address book."));
+        }
+        Some((bi, book)) => {
+            let book_name = book.name.clone();
+            let bn_delete = book_name.clone();
+            right = right.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_lg().font_weight(FontWeight::BOLD).child(book_name.clone()))
+                    .child(toolbar_button_dyn(
+                        "book-delete".into(),
+                        "Delete book",
+                        true,
+                        cx.listener(move |this, _e, _w, cx| {
+                            this.books.delete(&bn_delete);
+                            this.book_sel = None;
+                            cx.notify();
+                        }),
+                    )),
+            );
+            let mut rows = div().flex().flex_col().gap_1();
+            let mut any = false;
+            for m in &book.members {
+                let Some(pi) = profiles.iter().position(|p| &p.name == m) else { continue };
+                any = true;
+                let p = &profiles[pi];
+                let (b1, m1) = (book_name.clone(), m.clone());
+                rows = rows.child(
+                    div()
+                        .h(px(48.))
+                        .px_4()
+                        .rounded(px(10.))
+                        .bg(panel())
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(p.name.clone()))
+                        .child(div().w(px(220.)).text_xs().text_color(muted()).child(format!("{} · {}", p.host, p.user)))
+                        .child(toolbar_button_dyn(
+                            format!("bk-connect-{bi}-{pi}"),
+                            "Connect",
+                            true,
+                            cx.listener(move |this, _e, window, cx| {
+                                this.selected_profile = Some(pi);
+                                this.state.selected = Some(pi);
+                                this.open_password_dialog(window, cx);
+                            }),
+                        ))
+                        .child(toolbar_button_dyn(
+                            format!("bk-remove-{bi}-{pi}"),
+                            "Remove",
+                            true,
+                            cx.listener(move |this, _e, _w, cx| {
+                                this.books.remove(&b1, &m1);
+                                cx.notify();
+                            }),
+                        )),
+                );
+            }
+            if !any {
+                rows = rows.child(empty_card("This book is empty. Add connections below."));
+            }
+            right = right.child(rows);
+
+            // connections that are not in this book yet
+            let mut chips = div().flex().flex_wrap().gap_2();
+            let mut addable = 0;
+            for (pi, p) in profiles.iter().enumerate() {
+                if book.members.iter().any(|m| m == &p.name) {
+                    continue;
+                }
+                addable += 1;
+                let (b2, n2) = (book_name.clone(), p.name.clone());
+                chips = chips.child(
+                    div()
+                        .id(SharedString::from(format!("bk-add-{bi}-{pi}")))
+                        .px_3()
+                        .h(px(30.))
+                        .flex()
+                        .items_center()
+                        .rounded_full()
+                        .bg(panel_2())
+                        .text_sm()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(hover()))
+                        .on_click(cx.listener(move |this, _e, _w, cx| {
+                            let _ = this.books.add(&b2, &n2);
+                            cx.notify();
+                        }))
+                        .child(format!("+ {}", p.name)),
+                );
+            }
+            if addable > 0 {
+                right = right
+                    .child(div().mt_2().text_sm().text_color(muted()).child("Add a connection"))
+                    .child(chips);
+            }
+        }
+    }
+    div().flex().gap_6().child(left).child(right)
+}
+
+// ============================================================================
+// Logs
+// ============================================================================
+
+fn col_width(kind: LogKind, i: usize) -> Option<f32> {
+    // None = takes the remaining width
+    match (kind, i) {
+        (LogKind::Connection, 0) => Some(110.),
+        (LogKind::Connection, 1) => Some(170.),
+        (LogKind::Connection, 2) => Some(190.),
+        (LogKind::Connection, 3) => Some(110.),
+        (LogKind::File, 0) => Some(240.),
+        (LogKind::File, 1) => Some(60.),
+        (LogKind::File, 2) => Some(80.),
+        (LogKind::File, 3) => Some(220.),
+        (LogKind::Alarm, 0) => Some(360.),
+        (LogKind::Alarm, 1) => Some(200.),
+        (LogKind::Console, 0) => Some(100.),
+        _ => None,
+    }
+}
+
+fn logs_view(
+    kind: LogKind,
+    entries: &[logs::Entry],
+    filter: &str,
+    confirm_clear: bool,
+    cx: &mut Context<NexDeskApp>,
+) -> impl IntoElement {
+    let cols = kind.columns();
+    let cell = |i: usize, content: String, color: gpui::Rgba| {
+        let d = div().text_xs().text_color(color).overflow_hidden().px_1();
+        match col_width(kind, i) {
+            Some(w) => d.w(px(w)).flex_none().child(content),
+            None => d.flex_1().child(content),
+        }
+    };
+
+    let mut head = div().h(px(30.)).px_3().flex().items_center().text_xs().text_color(muted()).font_weight(FontWeight::SEMIBOLD);
+    head = head.child(div().w(px(150.)).flex_none().px_1().child("Time"));
+    for (i, c) in cols.iter().enumerate() {
+        let d = div().px_1().overflow_hidden();
+        head = head.child(match col_width(kind, i) {
+            Some(w) => d.w(px(w)).flex_none().child(*c),
+            None => d.flex_1().child(*c),
+        });
+    }
+
+    let mut body = div().flex().flex_col().rounded(px(12.)).bg(panel()).overflow_hidden();
+    body = body.child(head).child(div().h(px(1.)).bg(border()));
+    let mut shown = 0;
+    for e in entries {
+        if !filter.is_empty() && !e.fields.iter().any(|f| f.to_lowercase().contains(filter)) {
+            continue;
+        }
+        shown += 1;
+        let (color, tint) = match e.level {
+            LogLevel::Error => (danger(), gpui::rgba(0xff7b6318)),
+            LogLevel::Warn => (warn(), gpui::rgba(0xf5c21112)),
+            LogLevel::Info => (text(), gpui::rgba(0x00000000)),
+        };
+        let mut row = div()
+            .min_h(px(28.))
+            .px_3()
+            .py_1()
+            .flex()
+            .items_start()
+            .bg(tint)
+            .hover(|s| s.bg(row_hover()))
+            .child(cell_time(logs::format_time(e.ts_ms)));
+        for i in 0..cols.len() {
+            let v = e.fields.get(i).cloned().unwrap_or_default();
+            let mut c = cell(i, v, if i == 0 { color } else { text() });
+            if kind == LogKind::Console && i == 1 {
+                c = c.font_family("Monospace");
+            }
+            row = row.child(c);
+        }
+        body = body.child(row);
+    }
+    if shown == 0 {
+        body = body.child(div().p_8().flex().justify_center().text_sm().text_color(muted()).child(match kind {
+            LogKind::Connection => "No connection events yet.",
+            LogKind::File => "No file transfers yet. Copy files between this computer and a remote desktop.",
+            LogKind::Alarm => "No alarms. Certificate and security events appear here.",
+            LogKind::Console => "No console output yet.",
+        }));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(toolbar_button_dyn(
+                    "logs-refresh".into(),
+                    "Refresh",
+                    true,
+                    cx.listener(|this, _e, _w, cx| {
+                        this.refresh_logs();
+                        cx.notify();
+                    }),
+                ))
+                .child(toolbar_button_dyn(
+                    "logs-clear".into(),
+                    if confirm_clear { "Confirm clear" } else { "Clear" },
+                    true,
+                    cx.listener(move |this, _e, _w, cx| {
+                        if let Screen::Logs(k) = this.nav.screen {
+                            if this.confirm_clear {
+                                logs::clear(k);
+                                this.confirm_clear = false;
+                                this.state.status = format!("{} log cleared.", k.label());
+                            } else {
+                                this.confirm_clear = true;
+                            }
+                            this.refresh_logs();
+                        }
+                        cx.notify();
+                    }),
+                ))
+                .child(div().ml_2().text_xs().text_color(muted()).child(format!("{shown} entries (newest first, last 500). Passwords and file contents are never logged."))),
+        )
+        .child(body)
+}
+
+fn cell_time(t: String) -> impl IntoElement {
+    div().w(px(150.)).flex_none().px_1().text_xs().text_color(muted()).child(t)
 }
 
 // ============================================================================
@@ -1121,40 +1727,241 @@ fn session_view(
 // Settings
 // ============================================================================
 
-fn settings_view() -> impl IntoElement {
+fn switch(id: &'static str, on: bool, cx: &mut Context<NexDeskApp>, f: fn(&mut Settings, bool)) -> impl IntoElement {
     div()
+        .id(id)
+        .flex_none()
+        .w(px(44.))
+        .h(px(24.))
+        .rounded_full()
+        .p(px(2.))
+        .flex()
+        .when(on, |d| d.justify_end())
+        .bg(if on { accent() } else { hover() })
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _e, _w, cx| this.update_settings(cx, |s| f(s, !on))))
+        .child(div().size(px(20.)).rounded_full().bg(gpui::rgb(0xffffff)))
+}
+
+fn seg_btn(id: String, label: &'static str, on: bool, cx: &mut Context<NexDeskApp>, f: impl Fn(&mut Settings) + 'static) -> impl IntoElement {
+    div()
+        .id(SharedString::from(id))
+        .px_3()
+        .h(px(30.))
+        .flex()
+        .items_center()
+        .text_sm()
+        .rounded(px(7.))
+        .bg(if on { accent() } else { panel_2() })
+        .text_color(if on { on_accent() } else { text() })
+        .cursor_pointer()
+        .when(!on, |d| d.hover(|s| s.bg(hover())))
+        .on_click(cx.listener(move |this, _e, _w, cx| this.update_settings(cx, |s| f(s))))
+        .child(label)
+}
+
+fn pref_row(title: &'static str, desc: &'static str, control: impl IntoElement) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_h(px(60.))
+        .px_4()
+        .py_2()
+        .flex()
+        .items_center()
+        .gap_4()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_sm().child(title))
+                .child(div().text_xs().text_color(muted()).child(desc)),
+        )
+        .child(control)
+}
+
+fn pref_group(title: &'static str, rows: Vec<gpui::AnyElement>) -> impl IntoElement {
+    let mut card = div().w_full().rounded(px(12.)).bg(panel()).overflow_hidden().flex().flex_col();
+    let n = rows.len();
+    for (i, r) in rows.into_iter().enumerate() {
+        card = card.child(r);
+        if i + 1 < n {
+            card = card.child(div().h(px(1.)).mx_4().bg(border()));
+        }
+    }
+    div()
+        .w_full()
         .flex()
         .flex_col()
-        .gap_3()
+        .gap_2()
+        .child(div().px_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(muted()).child(title))
+        .child(card)
+}
+
+fn settings_view(p: &Settings, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+    let theme_ctl = div().flex().gap_1().children(Theme::ALL.map(|t| {
+        seg_btn(format!("pref-theme-{}", t.label()), t.label(), p.theme == t, cx, move |s| s.theme = t).into_any_element()
+    }));
+    let speed_ctl = div().flex().gap_1().children(Speed::ALL.map(|v| {
+        seg_btn(format!("pref-speed-{}", v.label()), v.label(), p.default_speed == v, cx, move |s| s.default_speed = v).into_any_element()
+    }));
+    let tls_ctl = div().flex().gap_1().children(TlsMode::ALL.map(|m| {
+        seg_btn(format!("pref-tls-{}", m.label()), m.label(), p.tls == m, cx, move |s| s.tls = m).into_any_element()
+    }));
+
+    div()
+        .w_full()
+        .max_w(px(820.))
+        .flex()
+        .flex_col()
+        .gap_5()
+        .child(pref_group(
+            "APPEARANCE",
+            vec![
+                pref_row("Theme", "Graphite is neutral dark, Midnight is darker, Light is for bright rooms.", theme_ctl).into_any_element(),
+                pref_row("Start with the sidebar collapsed", "Icons only; toggle any time with the button in the header.", switch("pref-sidebar", p.sidebar_collapsed, cx, |s, v| s.sidebar_collapsed = v)).into_any_element(),
+            ],
+        ))
+        .child(pref_group(
+            "NEW CONNECTIONS",
+            vec![pref_row("Default connection speed", "Slow network turns off wallpaper, themes and uses 16-bit colour.", speed_ctl).into_any_element()],
+        ))
+        .child(pref_group(
+            "SESSION WINDOW",
+            vec![
+                pref_row("Open sessions in full screen", "Applies to every connection.", switch("pref-fs", p.start_fullscreen, cx, |s, v| s.start_fullscreen = v)).into_any_element(),
+                pref_row("Send Super and Alt+Tab to the remote", "In full screen, shortcuts go to the remote computer instead of this desktop.", switch("pref-keys", p.key_capture, cx, |s, v| s.key_capture = v)).into_any_element(),
+                pref_row("Paste automatically after dropping files", "Presses Ctrl+V on the remote after you drop files on the session window.", switch("pref-drop", p.drop_paste, cx, |s, v| s.drop_paste = v)).into_any_element(),
+                pref_row("Use the system title bar", "Turn on if the custom header bar misbehaves with your window manager.", switch("pref-frame", p.native_frame, cx, |s, v| s.native_frame = v)).into_any_element(),
+            ],
+        ))
+        .child(pref_group(
+            "SECURITY",
+            vec![
+                pref_row("Server certificates", "Ask: confirm unknown and changed certificates. Accept new: pin silently, still refuse changes. Strict: only already-trusted servers.", tls_ctl).into_any_element(),
+                pref_row("Passwords", "Never saved. They are passed to the session through a private environment variable.", div().text_xs().text_color(muted()).child("Always")).into_any_element(),
+            ],
+        ))
+        .child(div().text_xs().text_color(muted()).child("Preferences are saved in ~/.config/nexdesk/settings and apply to the next session you start."))
+}
+
+// ---- header "⋯" menu and its dialogs
+
+fn menu_item(id: &'static str, label: &'static str, shortcut: &'static str, cx: &mut Context<NexDeskApp>, f: fn(&mut NexDeskApp, &mut Context<NexDeskApp>)) -> impl IntoElement {
+    div()
+        .id(id)
+        .h(px(34.))
+        .px_3()
+        .rounded(px(8.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .text_sm()
+        .cursor_pointer()
+        .hover(|s| s.bg(row_hover()))
+        .on_click(cx.listener(move |this, _e, _w, cx| {
+            this.menu_open = false;
+            f(this, cx);
+            cx.notify();
+        }))
+        .child(label)
+        .child(div().text_xs().text_color(muted()).child(shortcut))
+}
+
+fn menu_popover(cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+    div()
+        .id("menu-backdrop")
+        .absolute()
+        .inset_0()
+        .on_click(cx.listener(|this, _e, _w, cx| {
+            this.menu_open = false;
+            cx.notify();
+        }))
         .child(
             div()
-                .p_4()
+                .absolute()
+                .top(px(54.))
+                .right(px(12.))
+                .w(px(250.))
+                .p_1()
                 .rounded(px(12.))
-                .bg(panel())
-                .child(div().font_weight(FontWeight::BOLD).child("Session policy"))
-                .child(
-                    div()
-                        .mt_1()
-                        .text_sm()
-                        .text_color(muted())
-                        .child("RDP sessions run outside the manager UI process."),
-                ),
+                .bg(popover())
+                .border_1()
+                .border_color(border())
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .child(menu_item("m-prefs", "Preferences", "", cx, |this, cx| this.navigate(Screen::Settings, cx)))
+                .child(menu_item("m-keys", "Keyboard Shortcuts", "", cx, |this, _| this.info_dialog = Some(InfoDialog::Shortcuts)))
+                .child(div().h(px(1.)).my_1().mx_2().bg(border()))
+                .child(menu_item("m-about", "About NexDesk", "", cx, |this, _| this.info_dialog = Some(InfoDialog::About))),
         )
+}
+
+fn info_dialog(d: InfoDialog, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+    let (title, rows): (&str, Vec<(&str, &str)>) = match d {
+        InfoDialog::Shortcuts => (
+            "Keyboard Shortcuts",
+            vec![
+                ("Ctrl+Alt+Break", "Toggle full screen in a session"),
+                ("Ctrl+Alt+End", "Send Ctrl+Alt+Del to the remote computer"),
+                ("Mouse to the top edge", "Show the toolbar in full screen"),
+                ("Super / Alt+Tab", "Go to the remote computer while in full screen"),
+                ("Double-click a connection", "Connect"),
+                ("Ctrl+C / Ctrl+V", "Copy and paste text, images and files both ways"),
+            ],
+        ),
+        InfoDialog::About => (
+            "About NexDesk",
+            vec![
+                ("Version", env!("CARGO_PKG_VERSION")),
+                ("Protocol engine", "IronRDP (Rust)"),
+                ("Interface", "GPUI"),
+                ("Data", "~/.config/nexdesk and ~/.local/share/nexdesk"),
+            ],
+        ),
+    };
+    let mut body = div().flex().flex_col().gap_2();
+    for (k, v) in rows {
+        body = body.child(
+            div()
+                .flex()
+                .gap_4()
+                .child(div().w(px(180.)).flex_none().text_sm().font_weight(FontWeight::SEMIBOLD).child(k))
+                .child(div().flex_1().text_sm().text_color(muted()).child(v)),
+        );
+    }
+    div()
+        .absolute()
+        .inset_0()
+        .bg(scrim())
+        .flex()
+        .items_center()
+        .justify_center()
         .child(
             div()
-                .p_4()
-                .rounded(px(12.))
-                .bg(panel())
+                .w(px(560.))
+                .p_6()
+                .rounded(px(16.))
+                .bg(popover())
+                .border_1()
+                .border_color(border())
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(div().text_xl().font_weight(FontWeight::BOLD).child(title))
+                .child(body)
                 .child(
-                    div()
-                        .font_weight(FontWeight::BOLD)
-                        .child("Credential policy"),
-                )
-                .child(div().mt_1().text_sm().text_color(muted()).child(
-                    "Passwords are supplied to the engine through \
-                             a transient environment boundary and are never \
-                             written to connection profiles.",
-                )),
+                    div().flex().justify_end().child(toolbar_button_dyn(
+                        "info-close".into(),
+                        "Close",
+                        true,
+                        cx.listener(|this, _e, _w, cx| {
+                            this.info_dialog = None;
+                            cx.notify();
+                        }),
+                    )),
+                ),
         )
 }
 
@@ -2172,7 +2979,7 @@ impl Render for TextInput {
 // ============================================================================
 
 pub fn run(engine_path: std::path::PathBuf) {
-    application().run(move |cx: &mut App| {
+    application().with_assets(crate::assets::Assets).run(move |cx: &mut App| {
         cx.bind_keys([
             KeyBinding::new("backspace", InputBackspace, Some("NexDeskTextInput")),
             KeyBinding::new("delete", InputDelete, Some("NexDeskTextInput")),

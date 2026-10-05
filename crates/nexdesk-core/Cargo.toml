@@ -7,3 +7,4 @@ license.workspace = true
 
 [dependencies]
 zeroize = { version = "1", features = ["zeroize_derive"] }
+libc = "0.2"
