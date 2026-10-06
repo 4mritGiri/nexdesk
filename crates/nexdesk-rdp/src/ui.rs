@@ -153,23 +153,36 @@ pub enum BarHit {
     Minimize,
     Restore,
     Close,
+    /// Send Ctrl+Alt+Del to the remote machine.
+    Cad,
+    /// Save a PNG of the remote screen.
+    Shot,
+    /// Toggle fit-to-window / 1:1.
+    Scale,
+    /// Freeze the view and block input.
+    Pause,
 }
 
 /// Floating pill at the top centre of the full-screen session, styled like the GNOME Files
-/// header: traffic-light window buttons on the left, host name, pin on the right.
+/// header: traffic-light window buttons on the left, host name, session tools on the right.
 pub struct Toolbar {
     pub title: String,
     pub pinned: bool,
     /// Docked = permanent full-width header (windowed mode) instead of the floating full-screen pill.
     pub docked: bool,
+    /// View is frozen and input is not forwarded.
+    pub paused: bool,
+    /// 1:1 (pannable) view instead of fit-to-window.
+    pub actual: bool,
     shown_until: Option<Instant>,
 }
 
 const HIDE_AFTER: Duration = Duration::from_millis(1800);
+const TOOL_STEP: i32 = 32;
 
 impl Toolbar {
     pub fn new(title: String) -> Self {
-        Self { title, pinned: false, docked: false, shown_until: None }
+        Self { title, pinned: false, docked: false, paused: false, actual: false, shown_until: None }
     }
 
     /// Keep (or make) the bar visible for a little while.
@@ -199,21 +212,30 @@ impl Toolbar {
         if self.docked {
             return (0, 0, win_w, h);
         }
-        let w = (440 * u).min(win_w);
+        let w = (540 * u).min(win_w);
         ((win_w - w) / 2, 0, w, h)
     }
 
-    /// Hit areas as (kind, centre-x, half-width).
-    fn buttons(&self, win_w: i32, u: i32) -> [(BarHit, i32, i32); 4] {
+    /// Hit areas as (kind, centre-x, half-width), left to right.
+    fn buttons(&self, win_w: i32, u: i32) -> Vec<(BarHit, i32, i32)> {
         let (x, _, w, _) = self.rect(win_w, u);
         let step = 28 * u;
         let c0 = x + 26 * u;
-        [
+        let mut v = vec![
             (BarHit::Close, c0, 14 * u),
             (BarHit::Minimize, c0 + step, 14 * u),
             (BarHit::Restore, c0 + 2 * step, 14 * u),
-            (BarHit::Pin, x + w - 26 * u, 16 * u),
-        ]
+        ];
+        // Session tools sit on the right; the pin (floating bar only) is the last one.
+        let last = if self.docked { x + w - 22 * u } else { x + w - 26 * u - TOOL_STEP * u };
+        let tools = [BarHit::Cad, BarHit::Shot, BarHit::Scale, BarHit::Pause];
+        for (i, hit) in tools.iter().enumerate() {
+            v.push((*hit, last - (3 - i as i32) * TOOL_STEP * u, TOOL_STEP / 2 * u - u));
+        }
+        if !self.docked {
+            v.push((BarHit::Pin, x + w - 26 * u, 16 * u));
+        }
+        v
     }
 
     pub fn hit(&self, win_w: i32, u: i32, px: f64, py: f64) -> BarHit {
@@ -223,14 +245,26 @@ impl Toolbar {
             return BarHit::None;
         }
         for (hit, cx, half) in self.buttons(win_w, u) {
-            if hit == BarHit::Pin && self.docked {
-                continue;
-            }
             if (px - cx).abs() <= half {
                 return hit;
             }
         }
         BarHit::Bar
+    }
+
+    /// Short hover text for a button.
+    pub fn tip(&self, hit: BarHit) -> Option<&'static str> {
+        Some(match hit {
+            BarHit::Close => "Disconnect",
+            BarHit::Minimize => "Minimize",
+            BarHit::Restore => "Toggle full screen",
+            BarHit::Pin => if self.pinned { "Unpin bar" } else { "Pin bar" },
+            BarHit::Cad => "Send Ctrl+Alt+Del",
+            BarHit::Shot => "Save screenshot",
+            BarHit::Scale => if self.actual { "Fit to window" } else { "Actual size (1:1)" },
+            BarHit::Pause => if self.paused { "Resume" } else { "Pause" },
+            BarHit::None | BarHit::Bar => return None,
+        })
     }
 
     pub fn draw(&self, c: &mut Canvas, u: i32, hover: BarHit) {
@@ -244,7 +278,8 @@ impl Toolbar {
             c.rrect_corners(x, y, w, h, 15 * u, BAR, [false, false, true, true]);
         }
         let cy = y + h / 2;
-        for (hit, cx, _) in self.buttons(c.w as i32, u) {
+        let buttons = self.buttons(c.w as i32, u);
+        for &(hit, cx, _) in &buttons {
             let hot = hover == hit;
             match hit {
                 BarHit::Close | BarHit::Minimize | BarHit::Restore => {
@@ -253,7 +288,7 @@ impl Toolbar {
                         BarHit::Minimize => (YELLOW, 0x00_6b_4b_00),
                         _ => (GREEN, 0x00_0b_55_16),
                     };
-                    c.circle(cx, cy, 7 * u, if hover == BarHit::Bar || hover == BarHit::None { col } else { col });
+                    c.circle(cx, cy, 7 * u, col);
                     if hot {
                         let g = 3 * u;
                         let t = u.max(1);
@@ -269,9 +304,8 @@ impl Toolbar {
                         }
                     }
                 }
-                _ if self.docked => {}
-                _ => {
-                    // pin: round button, filled accent when pinned
+                BarHit::Pin => {
+                    // round button, filled accent when pinned
                     if hot {
                         c.circle(cx, cy, 13 * u, BAR_HOVER);
                     }
@@ -282,16 +316,100 @@ impl Toolbar {
                         c.circle(cx, cy, 4 * u, if hot { BAR_HOVER } else { BAR });
                     }
                 }
+                _ => {
+                    let on = match hit {
+                        BarHit::Scale => self.actual,
+                        BarHit::Pause => self.paused,
+                        _ => false,
+                    };
+                    if hot {
+                        c.rrect(cx - 14 * u, cy - 14 * u, 28 * u, 28 * u, 8 * u, BAR_HOVER);
+                    } else if on {
+                        c.rrect(cx - 14 * u, cy - 14 * u, 28 * u, 28 * u, 8 * u, mix(BAR, ACCENT, 0.35));
+                    }
+                    let col = if on { ACCENT_HI } else if hot { FG } else { DIM };
+                    draw_tool_icon(c, hit, cx, cy, u, col, self.actual, self.paused);
+                }
             }
         }
         let k = u.max(1);
         let left = x + 26 * u + 3 * 28 * u - 4 * u;
-        let right = if self.docked { x + w - 26 * u } else { x + w - 26 * u - 20 * u };
+        let tools_left = buttons
+            .iter()
+            .filter(|b| matches!(b.0, BarHit::Cad | BarHit::Shot | BarHit::Scale | BarHit::Pause | BarHit::Pin))
+            .map(|b| b.1 - b.2)
+            .min()
+            .unwrap_or(x + w);
+        let right = tools_left - 6 * u;
         let room = (right - left).max(0);
         let max_chars = (room / (8 * k)).max(0) as usize;
-        let title = truncate(&self.title, max_chars);
+        let mut label = self.title.clone();
+        if self.paused {
+            label = format!("{} (paused)", label);
+        }
+        let title = truncate(&label, max_chars);
         let tw = text_width(&title, k);
-        c.text(left + (room - tw) / 2, cy - 4 * k, &title, k, FG);
+        c.text(left + (room - tw) / 2, cy - 4 * k, &title, k, if self.paused { WARN } else { FG });
+
+        // Tooltip under the hovered button.
+        if let Some(tip) = self.tip(hover) {
+            if let Some(&(_, cx, _)) = buttons.iter().find(|b| b.0 == hover) {
+                let tw = text_width(tip, k);
+                let (bw, bh) = (tw + 16 * u, 22 * u);
+                let bx = (cx - bw / 2).clamp(2 * u, (c.w as i32 - bw - 2 * u).max(2 * u));
+                let by = y + h + 6 * u;
+                c.rrect(bx - u, by - u, bw + 2 * u, bh + 2 * u, 7 * u, EDGE);
+                c.rrect(bx, by, bw, bh, 6 * u, BG);
+                c.text(bx + 8 * u, by + (bh - 8 * k) / 2, tip, k, FG);
+            }
+        }
+    }
+}
+
+/// Simple glyphs for the session tools, built from rectangles/lines so they stay crisp at any scale.
+fn draw_tool_icon(c: &mut Canvas, hit: BarHit, cx: i32, cy: i32, u: i32, col: u32, actual: bool, paused: bool) {
+    let t = u.max(1);
+    match hit {
+        BarHit::Cad => {
+            let k = u.max(1);
+            let tw = text_width("DEL", k);
+            c.text(cx - tw / 2, cy - 4 * k, "DEL", k, col);
+        }
+        BarHit::Shot => {
+            // camera: body, viewfinder bump and lens
+            c.rrect(cx - 8 * u, cy - 5 * u, 16 * u, 11 * u, 2 * u, col);
+            c.rect(cx - 3 * u, cy - 7 * u, 6 * u, 3 * u, col);
+            c.circle(cx, cy + u, 3 * u + u / 2, BAR);
+            c.circle(cx, cy + u, 2 * u, col);
+        }
+        BarHit::Scale => {
+            if actual {
+                // currently 1:1 -> show the "shrink to fit" glyph
+                c.frame(cx - 8 * u, cy - 6 * u, 16 * u, 12 * u, t, col);
+                c.rect(cx - 3 * u, cy - 2 * u, 6 * u, 4 * u, col);
+            } else {
+                // corner brackets = "expand to actual size"
+                let l = 4 * u;
+                for (sx, sy) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
+                    let (px, py) = (cx + sx * 8 * u, cy + sy * 6 * u);
+                    c.rect(px.min(px - sx * l), py - t / 2, l, t, col);
+                    c.rect(px - t / 2, py.min(py - sy * l), t, l, col);
+                }
+            }
+        }
+        BarHit::Pause => {
+            if paused {
+                // play triangle
+                for i in 0..(10 * u) {
+                    let half = (10 * u - i) * 6 * u / (10 * u);
+                    c.rect(cx - 4 * u + i / 1, cy - half, 1, 2 * half.max(1), col);
+                }
+            } else {
+                c.rrect(cx - 5 * u, cy - 6 * u, 3 * u + u / 2, 12 * u, u, col);
+                c.rrect(cx + u + u / 2, cy - 6 * u, 3 * u + u / 2, 12 * u, u, col);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -429,6 +547,28 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_session_tools_hit() {
+        let mut t = Toolbar::new("host".into());
+        let (x, _, w, _) = t.rect(1920, 1);
+        let last = x + w - 26 - 32;
+        assert_eq!(t.hit(1920, 1, last as f64, 20.0), BarHit::Pause);
+        assert_eq!(t.hit(1920, 1, (last - 32) as f64, 20.0), BarHit::Scale);
+        assert_eq!(t.hit(1920, 1, (last - 64) as f64, 20.0), BarHit::Shot);
+        assert_eq!(t.hit(1920, 1, (last - 96) as f64, 20.0), BarHit::Cad);
+        // docked header: tools move to the far right, no pin
+        t.docked = true;
+        let last = 1920 - 22;
+        assert_eq!(t.hit(1920, 1, last as f64, 20.0), BarHit::Pause);
+        assert_eq!(t.hit(1920, 1, (last - 96) as f64, 20.0), BarHit::Cad);
+        assert_ne!(t.hit(1920, 1, 1920.0 - 5.0, 20.0), BarHit::Pin);
+        // hover text follows state
+        assert_eq!(t.tip(BarHit::Pause), Some("Pause"));
+        t.paused = true;
+        assert_eq!(t.tip(BarHit::Pause), Some("Resume"));
+        assert_eq!(t.tip(BarHit::Bar), None);
+    }
+
+    #[test]
     fn toolbar_autohide_and_pin() {
         let mut t = Toolbar::new("h".into());
         assert!(!t.visible());
@@ -450,6 +590,13 @@ mod tests {
         c.line(-10, -10, 300, 300, 3, 3);
         let t = Toolbar::new("a very long host name that cannot possibly fit in this tiny window".into());
         t.draw(&mut c, 2, BarHit::Close);
+        let mut t2 = Toolbar::new("x".into());
+        t2.paused = true;
+        t2.actual = true;
+        for hit in [BarHit::Cad, BarHit::Shot, BarHit::Scale, BarHit::Pause, BarHit::Pin] {
+            t2.draw(&mut c, 2, hit);
+            t2.docked = !t2.docked;
+        }
         let m = Modal {
             heading: "Heading".into(),
             lines: vec![("line".into(), FG)],

@@ -4626,6 +4626,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "font8x8",
+ "image",
  "ironrdp-client",
  "ironrdp-input",
  "ironrdp-pdu",

@@ -101,6 +101,8 @@ pub struct NexDeskApp {
     vault_new_key: Option<String>,
     save_pw: bool,
     confirm_wipe: bool,
+    /// Network scan for computers with RDP enabled (Devices page).
+    scan: Option<nexdesk_core::discover::Scan>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -135,6 +137,8 @@ pub struct Editor {
     host: Entity<TextInput>,
     user: Entity<TextInput>,
     domain: Entity<TextInput>,
+    pre_cmd: Entity<TextInput>,
+    post_cmd: Entity<TextInput>,
     width: Entity<TextInput>,
     height: Entity<TextInput>,
     clipboard: bool,
@@ -205,6 +209,7 @@ impl NexDeskApp {
             vault_new_key: None,
             save_pw: false,
             confirm_wipe: false,
+            scan: None,
         };
         if vault_exists {
             me.open_vault_dialog(VaultDlg::Unlock, _window, cx);
@@ -465,6 +470,14 @@ impl NexDeskApp {
         }
     }
 
+    /// New connection with the host already filled in (from the network scan).
+    fn add_discovered(&mut self, host: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_editor_new(window, cx);
+        if let Some(ed) = self.editor.as_ref() {
+            ed.host.update(cx, |i, cx| i.set_value(&host, cx));
+        }
+    }
+
     fn open_editor_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected_profile_cloned() {
             Some(p) => self.open_editor(Some(p), window, cx),
@@ -484,6 +497,8 @@ impl NexDeskApp {
         let host = make_input(cx, "host or host:port", &p.host);
         let user = make_input(cx, "User name", &p.user);
         let domain = make_input(cx, "Domain (optional)", &p.domain);
+        let pre_cmd = make_input(cx, "e.g. nmcli con up \"Work VPN\"  (optional)", &p.pre_command);
+        let post_cmd = make_input(cx, "e.g. nmcli con down \"Work VPN\"  (optional)", &p.post_command);
         let width = make_input(cx, "1920", &p.width.to_string());
         let height = make_input(cx, "1080", &p.height.to_string());
         let first = host.read(cx).focus_handle.clone();
@@ -494,6 +509,8 @@ impl NexDeskApp {
             host,
             user,
             domain,
+            pre_cmd,
+            post_cmd,
             width,
             height,
             clipboard: p.clipboard,
@@ -559,6 +576,8 @@ impl NexDeskApp {
             clipboard: ed.clipboard,
             fullscreen: ed.fullscreen,
             speed: ed.speed,
+            pre_command: ed.pre_cmd.read(cx).value().trim().to_string(),
+            post_command: ed.post_cmd.read(cx).value().trim().to_string(),
         };
         profile.validate().map_err(str::to_string)?;
         if file_stem_for(&profile.name).is_none() {
@@ -814,6 +833,9 @@ impl Render for NexDeskApp {
             (Some(v), Some(p)) => v.has(&p.name),
             _ => false,
         };
+        if self.scan.as_ref().map(|s| !s.is_done()).unwrap_or(false) {
+            window.request_animation_frame(); // keep repainting while the scan runs
+        }
         let content = match self.nav.screen {
             Screen::Connections => {
                 connection_view(profiles, self.selected_profile, self.pending_delete, self.grid_view, filter, has_saved_pw, cx)
@@ -822,7 +844,7 @@ impl Render for NexDeskApp {
 
             Screen::Sessions => session_view(sessions, cx).into_any_element(),
 
-            Screen::Devices => devices_view(&self.state.profiles, &self.conn_log, &filter, cx).into_any_element(),
+            Screen::Devices => devices_view(&self.state.profiles, &self.conn_log, &filter, self.scan.as_ref(), cx).into_any_element(),
 
             Screen::AddressBooks => books_view(
                 &self.books,
@@ -1436,6 +1458,7 @@ fn devices_view(
     profiles: &[Profile],
     conn_log: &[logs::Entry],
     filter: &str,
+    scan: Option<&nexdesk_core::discover::Scan>,
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
     let known = nexdesk_core::knownhosts::default_path()
@@ -1547,7 +1570,127 @@ fn devices_view(
     if shown == 0 {
         list = list.child(empty_card("No devices yet. Computers appear here once you save a connection."));
     }
-    div().w_full().flex().flex_col().gap_3().child(div().text_sm().text_color(muted()).child("Computers you have connections to, with last activity and certificate status.")).child(list)
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(nearby_card(scan, profiles, cx))
+        .child(div().text_sm().text_color(muted()).child("Computers you have connections to, with last activity and certificate status."))
+        .child(list)
+}
+
+/// "Computers on this network with Remote Desktop enabled", found by probing port 3389.
+fn nearby_card(
+    scan: Option<&nexdesk_core::discover::Scan>,
+    profiles: &[Profile],
+    cx: &mut Context<NexDeskApp>,
+) -> impl IntoElement {
+    let running = scan.map(|s| !s.is_done()).unwrap_or(false);
+    let status = match scan {
+        None => "Look for computers on your network that accept Remote Desktop connections (port 3389).".to_string(),
+        Some(s) if running => {
+            let (a, b) = s.progress();
+            format!("Scanning your network... {a}/{b}")
+        }
+        Some(s) if s.total == 0 => "No network connection found.".to_string(),
+        Some(s) => format!("Scan finished: {} computer(s) with Remote Desktop found.", s.results().len()),
+    };
+    let mut card = div()
+        .w_full()
+        .p_4()
+        .rounded(px(12.))
+        .bg(panel())
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Nearby computers"))
+                        .child(div().text_xs().text_color(muted()).child(status)),
+                )
+                .child(toolbar_button_dyn(
+                    "scan-network".into(),
+                    if running { "Scanning..." } else if scan.is_some() { "Scan again" } else { "Scan network" },
+                    !running,
+                    cx.listener(|this, _e, _w, cx| {
+                        this.scan = Some(nexdesk_core::discover::Scan::start());
+                        nexdesk_core::logs::console(LogLevel::Info, "discover", "network scan started (TCP 3389, local subnet)");
+                        cx.notify();
+                    }),
+                )),
+        );
+    if let Some(s) = scan {
+        for (i, f) in s.results().into_iter().enumerate() {
+            let ip = f.ip.to_string();
+            let saved = profiles.iter().position(|p| {
+                let h = p.host.trim();
+                h == ip || h.strip_suffix(":3389") == Some(ip.as_str()) || f.name.as_deref().map(|n| n.eq_ignore_ascii_case(h)).unwrap_or(false)
+            });
+            let title = f.name.clone().unwrap_or_else(|| ip.clone());
+            let sub = match (&f.name, f.is_self) {
+                (_, true) => format!("{ip} · this computer"),
+                (Some(_), _) => ip.clone(),
+                _ => "no name published".to_string(),
+            };
+            let host = ip.clone();
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("nearby-{i}")))
+                    .w_full()
+                    .h(px(48.))
+                    .px_3()
+                    .rounded(px(8.))
+                    .bg(panel_2())
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_none().size(px(8.)).rounded_full().bg(dot_max()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(div().text_sm().child(title))
+                            .child(div().text_xs().text_color(muted()).child(sub)),
+                    )
+                    .child(match saved {
+                        Some(idx) => toolbar_button_dyn(
+                            format!("nearby-connect-{i}"),
+                            "Connect",
+                            true,
+                            cx.listener(move |this, _e, window, cx| {
+                                this.selected_profile = Some(idx);
+                                this.state.selected = Some(idx);
+                                this.open_password_dialog(window, cx);
+                            }),
+                        )
+                        .into_any_element(),
+                        None => toolbar_button_dyn(
+                            format!("nearby-add-{i}"),
+                            "Add connection",
+                            true,
+                            cx.listener(move |this, _e, window, cx| this.add_discovered(host.clone(), window, cx)),
+                        )
+                        .into_any_element(),
+                    }),
+            );
+        }
+        if !running && s.total > 0 && s.results().is_empty() {
+            card = card.child(div().text_xs().text_color(muted()).child(
+                "Nothing found. The other computer must be on, awake and on this network, with Remote Desktop enabled (Windows Pro/Enterprise/Server, not Home) and port 3389 allowed in its firewall.",
+            ));
+        }
+    }
+    card
 }
 
 fn empty_card(msg: &'static str) -> impl IntoElement {
@@ -2634,6 +2777,8 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                 .child(field_row("User name", ed.user.clone()))
                 .child(field_row("Domain", ed.domain.clone()))
                 .child(field_row("Display name", ed.name.clone()))
+                .child(field_row("Before connect", ed.pre_cmd.clone()))
+                .child(field_row("After disconnect", ed.post_cmd.clone()))
                 .child(
                     div()
                         .flex()
@@ -3500,6 +3645,7 @@ pub fn run(engine_path: std::path::PathBuf) {
                 window_decorations: Some(WindowDecorations::Client),
                 window_background: WindowBackgroundAppearance::Transparent,
                 window_min_size: Some(size(px(760.), px(480.))),
+                app_id: Some("nexdesk".into()),
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| NexDeskApp::new(engine_path.clone(), window, cx)),

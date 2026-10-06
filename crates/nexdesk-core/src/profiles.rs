@@ -84,6 +84,10 @@ pub struct Profile {
     /// Start the session full screen (mstsc: `screen mode id:i:2`).
     pub fullscreen: bool,
     pub speed: Speed,
+    /// Program (plus arguments, no shell) run before connecting; a failure aborts the connection.
+    pub pre_command: String,
+    /// Program run after the session ends.
+    pub post_command: String,
 }
 
 impl Profile {
@@ -107,6 +111,8 @@ impl Default for Profile {
             clipboard: true,
             fullscreen: false,
             speed: Speed::Balanced,
+            pre_command: String::new(),
+            post_command: String::new(),
         }
     }
 }
@@ -130,7 +136,18 @@ impl Profile {
                 .unwrap_or(true),
             fullscreen: f.get_int("screen mode id") == Some(2),
             speed: Speed::from_rdp_value(f.get_int("connection type")),
+            // Never taken from a file that may come from somebody else; see `from_rdp_trusted`.
+            pre_command: String::new(),
+            post_command: String::new(),
         }
+    }
+
+    /// Like `from_rdp`, but also reads the NexDesk command hooks. Only for NexDesk's own store.
+    pub fn from_rdp_trusted(name: &str, f: &RdpFile) -> Self {
+        let mut p = Self::from_rdp(name, f);
+        p.pre_command = f.get_str("nexdesk pre command").unwrap_or("").to_string();
+        p.post_command = f.get_str("nexdesk post command").unwrap_or("").to_string();
+        p
     }
 
     pub fn to_rdp_text(&self) -> String {
@@ -151,6 +168,12 @@ impl Profile {
             "screen mode id:i:{}\r\n",
             if self.fullscreen { 2 } else { 1 }
         ));
+        if !self.pre_command.trim().is_empty() {
+            s.push_str(&format!("nexdesk pre command:s:{}\r\n", clean(self.pre_command.trim())));
+        }
+        if !self.post_command.trim().is_empty() {
+            s.push_str(&format!("nexdesk post command:s:{}\r\n", clean(self.post_command.trim())));
+        }
         s
     }
 
@@ -164,6 +187,8 @@ impl Profile {
         if self.width < 200 || self.height < 200 {
             return Err("Desktop size is too small (minimum 200x200)");
         }
+        crate::hooks::validate(&self.pre_command).map_err(|_| "Before-connect command is not valid (check quotes)")?;
+        crate::hooks::validate(&self.post_command).map_err(|_| "After-disconnect command is not valid (check quotes)")?;
         Ok(())
     }
 }
@@ -249,7 +274,7 @@ impl Store {
             ) else {
                 continue;
             };
-            out.push(Profile::from_rdp(stem, &RdpFile::parse(&text)));
+            out.push(Profile::from_rdp_trusted(stem, &RdpFile::parse(&text)));
         }
         out.sort_by_key(|p| p.name.to_lowercase());
         out
@@ -271,13 +296,29 @@ mod tests {
             clipboard: false,
             fullscreen: true,
             speed: Speed::Slow,
+            pre_command: "nmcli con up \"Work VPN\"".into(),
+            post_command: "nmcli con down id Work".into(),
         }
+    }
+
+    #[test]
+    fn imported_files_cannot_smuggle_commands() {
+        let p = sample();
+        let text = p.to_rdp_text();
+        assert!(text.contains("nexdesk pre command:s:"));
+        let imported = Profile::from_rdp("x", &RdpFile::parse(&text));
+        assert!(imported.pre_command.is_empty() && imported.post_command.is_empty());
+        let bad = Profile { pre_command: "echo 'open".into(), ..sample() };
+        assert!(bad.validate().is_err());
+        // newlines cannot add extra keys
+        let nl = Profile { pre_command: "a\r\nfull address:s:evil".into(), ..sample() };
+        assert_eq!(Profile::from_rdp_trusted("n", &RdpFile::parse(&nl.to_rdp_text())).host, p.host);
     }
 
     #[test]
     fn roundtrip_through_rdp_text() {
         let p = sample();
-        let back = Profile::from_rdp("Jump Server", &RdpFile::parse(&p.to_rdp_text()));
+        let back = Profile::from_rdp_trusted("Jump Server", &RdpFile::parse(&p.to_rdp_text()));
         assert_eq!(p, back);
     }
 

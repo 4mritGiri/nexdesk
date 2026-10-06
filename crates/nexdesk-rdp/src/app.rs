@@ -8,7 +8,7 @@ use ironrdp_client::rdp::{RdpInputEvent, RdpOutputEvent};
 use ironrdp_input::{
     Database, MouseButton as RdpButton, MousePosition, Operation, Scancode, WheelRotations,
 };
-use nexdesk_core::scale::{blit_fit, Fit};
+use nexdesk_core::scale::{Actual, Fit, View};
 use tokio::sync::mpsc::UnboundedSender;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -18,7 +18,7 @@ use std::sync::mpsc::Sender;
 use nexdesk_clipboard::ClipboardHandle;
 use crate::tls::CertInfo;
 use crate::ui::{self, BarHit, Canvas, Modal, ModalHit, Toast, Toolbar};
-use winit::event_loop::{ActiveEventLoop, ControlFlow};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Cursor, CursorIcon, CustomCursor, Fullscreen, ResizeDirection, Window, WindowId};
 
@@ -29,6 +29,8 @@ pub enum UserEvent {
     Rdp(RdpOutputEvent),
     /// The TLS verifier needs the user to decide about an unknown/changed server certificate.
     CertPrompt(CertInfo, Sender<bool>),
+    /// A short message for the toast (sent by background jobs such as the screenshot saver).
+    Toast(String),
 }
 
 pub struct Options {
@@ -45,6 +47,8 @@ pub struct Options {
     /// Names for the activity log.
     pub log_profile: String,
     pub log_user: String,
+    /// Lets background threads post toasts back to the window.
+    pub proxy: EventLoopProxy<UserEvent>,
 }
 
 struct Frame {
@@ -63,6 +67,13 @@ pub struct App {
     context: Option<softbuffer::Context<Arc<Window>>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     frame: Option<Frame>,
+    /// Copy of the picture taken when the view was paused.
+    frozen: Option<Frame>,
+    /// Top-left of the visible part in 1:1 mode.
+    pan: (u32, u32),
+    pan_tick: Option<Instant>,
+    cursor_in: bool,
+    proxy: EventLoopProxy<UserEvent>,
     pending_resize: Option<(Instant, u16, u16)>,
     start_fullscreen: bool,
     capture_keys: bool,
@@ -106,6 +117,11 @@ impl App {
             context: None,
             surface: None,
             frame: None,
+            frozen: None,
+            pan: (0, 0),
+            pan_tick: None,
+            cursor_in: false,
+            proxy: o.proxy,
             pending_resize: None,
             start_fullscreen: o.start_fullscreen,
             capture_keys: o.capture_keys,
@@ -176,13 +192,103 @@ impl App {
         self.sync_grab();
     }
 
-    fn fit(&self) -> Option<Fit> {
-        let (w, h) = {
-            let s = self.window.as_ref()?.inner_size();
-            (s.width, s.height)
+    /// The picture currently shown (frozen copy while paused).
+    fn shown(&self) -> Option<&Frame> {
+        self.frozen.as_ref().or(self.frame.as_ref())
+    }
+
+    fn view(&self) -> Option<View> {
+        let s = self.window.as_ref()?.inner_size();
+        let (w, h) = (s.width, s.height.saturating_sub(self.header_h() as u32));
+        let f = self.shown()?;
+        if self.toolbar.actual {
+            Actual::new(f.w, f.h, w, h, self.pan.0, self.pan.1).map(View::Actual)
+        } else {
+            Fit::new(f.w, f.h, w, h).map(View::Fit)
+        }
+    }
+
+    /// Direction (-1/0/1 per axis) the 1:1 view should scroll because the pointer is at a window edge.
+    fn edge_dir(&self) -> (i64, i64) {
+        let (Some(w), Some(View::Actual(a))) = (self.window.as_ref(), self.view()) else { return (0, 0) };
+        if !self.cursor_in || self.toolbar.paused || self.modal.is_some() || self.bar_hit() != BarHit::None {
+            return (0, 0);
+        }
+        let s = w.inner_size();
+        let (aw, ah) = (f64::from(s.width), f64::from(s.height) - f64::from(self.header_h()));
+        let (x, y) = (self.cursor.0, self.cursor.1 - f64::from(self.header_h()));
+        if y < 0.0 || self.resize_edge().is_some() {
+            return (0, 0);
+        }
+        let e = 18.0 * f64::from(self.ui_scale());
+        let (mx, my) = a.max_pan();
+        let dx = if mx > 0 && x < e { -1 } else if mx > 0 && x >= aw - e { 1 } else { 0 };
+        let dy = if my > 0 && y < e { -1 } else if my > 0 && y >= ah - e { 1 } else { 0 };
+        (dx, dy)
+    }
+
+    /// Scroll the 1:1 view one step; returns whether it moved.
+    fn pan_step(&mut self, dx: i64, dy: i64) -> bool {
+        let Some(View::Actual(a)) = self.view() else { return false };
+        let (mx, my) = a.max_pan();
+        let step = 24 * i64::from(self.ui_scale());
+        let nx = (i64::from(self.pan.0) + dx * step).clamp(0, i64::from(mx)) as u32;
+        let ny = (i64::from(self.pan.1) + dy * step).clamp(0, i64::from(my)) as u32;
+        let moved = (nx, ny) != self.pan;
+        self.pan = (nx, ny);
+        moved
+    }
+
+    fn set_paused(&mut self, on: bool) {
+        if on == self.toolbar.paused {
+            return;
+        }
+        self.release_all_keys();
+        self.toolbar.paused = on;
+        self.frozen = if on {
+            self.frame.as_ref().map(|f| Frame { buf: f.buf.clone(), w: f.w, h: f.h })
+        } else {
+            None
         };
-        let f = self.frame.as_ref()?;
-        Fit::new(f.w, f.h, w, h.saturating_sub(self.header_h() as u32))
+        self.show_toast(if on { "View paused: input is not sent" } else { "Resumed" });
+    }
+
+    fn send_cad(&mut self) {
+        if self.toolbar.paused {
+            self.show_toast("Resume first to send Ctrl+Alt+Del");
+            return;
+        }
+        self.release_all_keys();
+        let (ctrl, alt, del) = (Scancode::from_u16(0x1D), Scancode::from_u16(0x38), Scancode::from_u16(0xE053));
+        self.send_ops([
+            Operation::KeyPressed(ctrl),
+            Operation::KeyPressed(alt),
+            Operation::KeyPressed(del),
+            Operation::KeyReleased(del),
+            Operation::KeyReleased(alt),
+            Operation::KeyReleased(ctrl),
+        ]);
+        self.show_toast("Sent Ctrl+Alt+Del");
+    }
+
+    fn screenshot(&mut self) {
+        let Some(f) = self.shown() else {
+            self.show_toast("Nothing to capture yet");
+            return;
+        };
+        let (buf, w, h) = (f.buf.clone(), f.w, f.h);
+        let host = self.toolbar.title.clone();
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new().name("screenshot".into()).spawn(move || {
+            let msg = match crate::shot::save(&buf, w, h, &host) {
+                Ok(p) => format!("Screenshot saved: {}", p.display()),
+                Err(e) => format!("Screenshot failed: {e}"),
+            };
+            let _ = proxy.send_event(UserEvent::Toast(msg));
+        });
+        if spawned.is_err() {
+            self.show_toast("Screenshot failed: cannot start worker");
+        }
     }
 
     /// UI scale for overlay widgets (1 on normal screens, 2 on HiDPI).
@@ -245,9 +351,9 @@ impl App {
                 ResizeDirection::NorthWest | ResizeDirection::SouthEast => CursorIcon::NwseResize,
                 ResizeDirection::NorthEast | ResizeDirection::SouthWest => CursorIcon::NeswResize,
             }),
-            (BarHit::Close | BarHit::Minimize | BarHit::Restore | BarHit::Pin, None) => Some(CursorIcon::Pointer),
             (BarHit::Bar, None) => Some(CursorIcon::Default),
             (BarHit::None, None) => None,
+            (_, None) => Some(CursorIcon::Pointer), // every button is clickable
         };
         let Some(w) = self.window.clone() else { return };
         match want {
@@ -356,6 +462,14 @@ impl App {
                 self.toggle_fullscreen();
             }
             BarHit::Close => self.close_session(el),
+            BarHit::Cad => self.send_cad(),
+            BarHit::Shot => self.screenshot(),
+            BarHit::Scale => {
+                self.toolbar.actual = !self.toolbar.actual;
+                self.pan = (0, 0);
+                self.show_toast(if self.toolbar.actual { "Actual size: move the pointer to a window edge to scroll" } else { "Fit to window" });
+            }
+            BarHit::Pause => self.set_paused(!self.toolbar.paused),
             _ => {}
         }
         self.redraw();
@@ -366,6 +480,8 @@ impl App {
         let hover = self.bar_hit();
         let modal_hover = self.modal_hit();
         let show_bar = self.bar_visible();
+        let view = self.view();
+        let pan = self.pan;
         let (Some(window), Some(surface)) = (self.window.as_ref(), self.surface.as_mut()) else {
             return;
         };
@@ -381,14 +497,15 @@ impl App {
         };
         let hb = (if self.native_frame || window.fullscreen().is_some() { 0 } else { 40 * u }) as u32;
         let hb = hb.min(size.height);
-        match self.frame.as_ref() {
-            Some(frame) => {
+        let src = self.frozen.as_ref().or(self.frame.as_ref());
+        match (src, view) {
+            (Some(frame), Some(v)) => {
                 let skip = ((hb as usize) * (size.width as usize)).min(buffer.len());
                 let (top, rest) = buffer.split_at_mut(skip);
                 top.fill(ui::BG);
-                blit_fit(&frame.buf, frame.w, frame.h, rest, size.width, size.height - hb);
+                v.blit(&frame.buf, rest);
             }
-            None => buffer.fill(ui::BG),
+            _ => buffer.fill(ui::BG),
         }
         {
             let mut c = Canvas { buf: &mut buffer, w: size.width as usize, h: size.height as usize };
@@ -397,6 +514,22 @@ impl App {
                 let k = 3 * u;
                 let tx = (size.width as i32 - ui::text_width(msg, k)) / 2;
                 c.text(tx, size.height as i32 / 2 - 4 * k, msg, k, ui::DIM);
+            }
+            if let Some(View::Actual(a)) = &view {
+                // slim scroll indicators for the 1:1 view
+                let (mx, my) = a.max_pan();
+                let hb = hb as i32;
+                let (aw, ah) = (a.dst_w as i32, a.dst_h as i32);
+                if mx > 0 {
+                    let thumb = (aw as i64 * i64::from(a.dst_w) / i64::from(a.src_w)).max(24) as i32;
+                    let x = (i64::from(pan.0.min(mx)) * i64::from((aw - thumb).max(0)) / i64::from(mx)) as i32;
+                    c.rrect(x, hb + ah - 6 * u, thumb, 4 * u, 2 * u, ui::DIM);
+                }
+                if my > 0 {
+                    let thumb = (ah as i64 * i64::from(a.dst_h) / i64::from(a.src_h)).max(24) as i32;
+                    let y = (i64::from(pan.1.min(my)) * i64::from((ah - thumb).max(0)) / i64::from(my)) as i32;
+                    c.rrect(aw - 6 * u, hb + y, 4 * u, thumb, 2 * u, ui::DIM);
+                }
             }
             if show_bar {
                 self.toolbar.draw(&mut c, u, hover);
@@ -412,6 +545,9 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, state: ElementState) {
+        if self.toolbar.paused {
+            return;
+        }
         let ctrl = self.db.is_key_pressed(Scancode::from_u16(0x1D));
         let alt = self.db.is_key_pressed(Scancode::from_u16(0x38));
         // Local hotkey: Ctrl+Alt+Break toggles full screen (same as mstsc).
@@ -450,6 +586,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.start_fullscreen
                     .then_some(Fullscreen::Borderless(None)),
             );
+        // Window class / app id: lets the dock match the window to the .desktop entry (name + icon).
+        #[cfg(target_os = "linux")]
+        let attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            use winit::platform::x11::WindowAttributesExtX11;
+            let attrs = WindowAttributesExtWayland::with_name(attrs, "nexdesk", "nexdesk");
+            WindowAttributesExtX11::with_name(attrs, "nexdesk", "nexdesk")
+        };
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -469,6 +613,10 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         let ev = match event {
             UserEvent::Rdp(ev) => ev,
+            UserEvent::Toast(t) => {
+                self.show_toast(t);
+                return;
+            }
             UserEvent::CertPrompt(info, reply) => {
                 let changed = info.pinned.is_some();
                 let mut lines: Vec<(String, u32)> = Vec::new();
@@ -564,7 +712,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             RdpOutputEvent::PointerPosition { .. } => {}
             RdpOutputEvent::ConnectionFailure(e) => {
-                let msg = format!("connection failed: {e}");
+                let msg = crate::diag::explain("connection failed", &e);
                 nexdesk_core::logs::connection(nexdesk_core::logs::Level::Error, "Failed", &self.log_profile, &self.toolbar.title, &self.log_user, &msg);
                 self.failure = Some(msg.clone());
                 self.show_error(el, "Connection failed", &msg);
@@ -576,7 +724,8 @@ impl ApplicationHandler<UserEvent> for App {
                         nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Disconnected", &self.log_profile, &self.toolbar.title, &self.log_user, &format!("{reason:?}"));
                     }
                     Err(e) => {
-                        let msg = format!("session error: {e}");
+                        let c = format!("{e:#}");
+                        let msg = match crate::diag::hint(&c) { Some(h) => format!("session error: {c}\n\n{h}"), None => format!("session error: {c}") };
                         nexdesk_core::logs::connection(nexdesk_core::logs::Level::Error, "Failed", &self.log_profile, &self.toolbar.title, &self.log_user, &msg);
                         self.failure = Some(msg.clone());
                         self.show_error(el, "Session ended", &msg);
@@ -603,7 +752,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.drop_batch.push(path);
                 self.drop_deadline = Some(Instant::now() + Duration::from_millis(250));
             }
+            WindowEvent::CursorEntered { .. } => self.cursor_in = true,
             WindowEvent::CursorLeft { .. } => {
+                self.cursor_in = false;
+                self.pan_tick = None;
                 if self.bar_visible() && !self.toolbar.pinned {
                     self.toolbar.touch();
                     self.redraw();
@@ -682,8 +834,15 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                 }
-                if let Some(fit) = self.fit() {
-                    let (x, y) = fit.to_remote(position.x, position.y - f64::from(self.header_h()));
+                self.cursor_in = true;
+                if self.toolbar.actual && self.pan_tick.is_none() && self.edge_dir() != (0, 0) {
+                    self.pan_tick = Some(Instant::now());
+                }
+                if self.toolbar.paused {
+                    return;
+                }
+                if let Some(view) = self.view() {
+                    let (x, y) = view.to_remote(position.x, position.y - f64::from(self.header_h()));
                     self.send_ops([Operation::MouseMove(MousePosition { x, y })]);
                 }
             }
@@ -724,6 +883,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                if self.toolbar.paused {
+                    return;
+                }
                 let b = match button {
                     MouseButton::Left => RdpButton::Left,
                     MouseButton::Right => RdpButton::Right,
@@ -739,7 +901,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.send_ops([op]);
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.modal.is_some() || self.bar_hit() != BarHit::None {
+                if self.modal.is_some() || self.bar_hit() != BarHit::None || self.toolbar.paused {
                     return;
                 }
                 let (dx, dy) = match delta {
@@ -808,6 +970,22 @@ impl ApplicationHandler<UserEvent> for App {
             ]);
         }
 
+        // 1:1 view: scroll while the pointer rests at a window edge.
+        if self.pan_tick.map(|d| now >= d).unwrap_or(false) {
+            let (dx, dy) = self.edge_dir();
+            self.pan_tick = None;
+            if (dx, dy) != (0, 0) {
+                if self.pan_step(dx, dy) {
+                    if let (Some(view), false) = (self.view(), self.toolbar.paused) {
+                        let (x, y) = view.to_remote(self.cursor.0, self.cursor.1 - f64::from(self.header_h()));
+                        self.send_ops([Operation::MouseMove(MousePosition { x, y })]);
+                    }
+                    self.redraw();
+                    self.pan_tick = Some(now + Duration::from_millis(16));
+                }
+            }
+        }
+
         if self.toast.as_ref().map(|t| now >= t.until).unwrap_or(false) {
             self.toast = None;
             self.redraw();
@@ -825,6 +1003,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.paste_at,
             self.toast.as_ref().map(|t| t.until),
             self.toolbar.hide_deadline(),
+            self.pan_tick,
         ];
         match deadlines.into_iter().flatten().min() {
             Some(d) => {

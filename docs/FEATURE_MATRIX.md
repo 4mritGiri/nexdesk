@@ -39,10 +39,10 @@ Feasibility column: **Easy** (days, client only) · **Medium** (1–3 weeks) · 
 | Feature | Feasibility | Status | How |
 |---|---|---|---|
 | Dynamic resolution on window resize | Medium | **Planned P1** | IronRDP DisplayControl DVC (`--dynamic-resize` exists, experimental); debounce resizes, send `DISPLAYCONTROL_MONITOR_LAYOUT` |
-| Scaling toggle (1:1 with scrollbars / fit) | Easy | **Planned P1** | `nexdesk-core::scale` already maps coordinates |
-| Instant screenshot to `~/Pictures` | Easy | **Planned P1** | copy last framebuffer to PNG, timestamp template |
-| Send Ctrl+Alt+Del / Win+L | Easy | **Planned P1** | synthesize scancodes, toolbar button |
-| Pause session / lock local input | Easy | **Planned P1** | stop applying frames, drop input |
+| Scaling toggle (1:1 with scrollbars / fit) | Easy | **Done** | toolbar button; edge-scroll panning, slim scroll indicators (`scale::View`) |
+| Instant screenshot to `~/Pictures` | Easy | **Done** | toolbar camera; PNG, XDG pictures dir, never overwrites (`shot.rs`) |
+| Send Ctrl+Alt+Del / Win+L | Easy | **Partly done** | Ctrl+Alt+Del: toolbar button + Ctrl+Alt+End. Win+L still to do |
+| Pause session / lock local input | Easy | **Done** | toolbar pause: frozen picture, input blocked |
 | Text-priority vs media-priority profile | Medium | **Partly done**: speed presets exist; sharpness-vs-fps trade-off is **Planned P2** | RDP perf flags (font smoothing, wallpaper, animations), colour depth 16/32, bitmap codec choice. Real "H.264 media mode" depends on RDPEGFX, see below |
 | Colour depth / FPS slider | Medium | **Partly done**: 16-bit via Slow preset; slider and FPS cap **Planned P2** | colour depth is negotiated at connect; FPS cap = client-side present throttle |
 | Multi-monitor (span or switchable tabs) | Hard | **Planned P3** | DisplayControl multi-monitor layout + one window per monitor |
@@ -78,7 +78,8 @@ Feasibility column: **Easy** (days, client only) · **Medium** (1–3 weeks) · 
 | Auto-lock after idle / on session lock | Easy | **Planned P1** | manual Lock exists; idle timeout and screen-lock hook still to do |
 | Zero-trust profile toggle (block clipboard, files, drives) | Easy | **Planned P1** | engine refuses to build the backend; enforced client-side. Admin policy file in P4 |
 | TLS only / refuse RDP-security fallback | Easy | **Planned P1** | require TLS or CredSSP, never legacy RDP encryption; setting `Require NLA` |
-| Pre-connection baseline check | Medium | **Planned P2** | cert validity/expiry/key size, TLS version, NLA offered; port scan is out of scope (legal and unreliable) |
+| Find RDP computers on the local subnet | Medium | **Done** | Devices > Scan network: TCP 3389 on own /24 per interface, reverse-DNS names, Add/Connect buttons (`discover.rs`). mDNS/NetBIOS names and non-default ports are future work |
+| Pre-connection baseline check | Medium | **Planned P2** | cert validity/expiry/key size, TLS version, NLA offered; scanning other people's networks is out of scope (legal and unreliable); the Devices scan below only probes your own subnet on request |
 | PAM / polkit unlock of vault | Medium | **Planned P3** | polkit action, fingerprint if the system provides it |
 | Audit log (connect, disconnect, clipboard/file events, no content) | Medium | **Planned P4** | append-only JSON lines, optional syslog/journald |
 | Admin policy file (fleet-wide disable features) | Medium | **Planned P4** | `/etc/nexdesk/policy.toml` overrides profile |
@@ -89,7 +90,7 @@ Feasibility column: **Easy** (days, client only) · **Medium** (1–3 weeks) · 
 
 | Feature | Feasibility | Status | How |
 |---|---|---|---|
-| Pre/post-connection command | Easy | **Planned P1** | per-profile; run via argv (no shell) unless the user opts into shell mode; timeout; show output on failure. Treat profile files as untrusted: require confirm when imported |
+| Pre/post-connection command | Easy | **Done** (shell mode not offered) | per-profile; run via argv (no shell) unless the user opts into shell mode; timeout; show output on failure. Treat profile files as untrusted: require confirm when imported |
 | SSH tunnel / jump host | Medium | **Planned P2** | spawn `ssh -L` or embed `russh`; connect to the local port; certificate name still checked against the real host |
 | Groups, search, quick connect, tabs | Medium | **Planned P2** | folder tree in sidebar, inline connect/edit icons on hover |
 | Auto-reconnect | Medium | **Planned P2** | lifecycle states exist; backoff, re-prompt on credential failure |

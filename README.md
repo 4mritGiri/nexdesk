@@ -21,20 +21,60 @@ crates/
 - The manager passes a password to the RDP child through `NEXDESK_PASSWORD`, never a command-line argument.
 - Remote clipboard file names are sanitized before staging.
 - RDP protocol execution is isolated in `nexdesk-rdp`; the manager owns lifecycle state.
-- TLS verification still follows the underlying IronRDP 0.1.0 behavior and must be hardened before enterprise production.
+- Server certificates are verified by fingerprint pinning (trust on first use); see `--tls`.
+- Before/after-connection commands run without a shell, never see the password, and are ignored in imported `.rdp` files.
 
 ## Build
 
-This source package was migrated against the current GPUI 0.2.2 / gpui_platform 0.1.0 API shape and retains the project's exact IronRDP 0.1.0 pin.
+Needs a current stable Rust toolchain (<https://rustup.rs>) and the Linux development packages GPUI uses. On Ubuntu/Debian:
 
 ```bash
-cargo test -p nexdesk-core
-cargo test -p nexdesk-session
-cargo check --workspace
-cargo build --release --workspace
+sudo apt install build-essential pkg-config clang cmake git \
+  libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libx11-xcb-dev libxcb1-dev libxi-dev \
+  libfontconfig-dev libvulkan-dev libssl-dev libzstd-dev
 ```
 
-The build should be run on a current stable Rust toolchain with the Linux development packages required by GPUI.
+(The exact list can vary with the GPUI revision; if the linker reports a missing `-lfoo`, install the matching `libfoo-dev`.)
+
+```bash
+cargo test --workspace --exclude nexdesk --exclude nexdesk-ui   # logic tests, no GUI libraries needed
+cargo build --release -p nexdesk -p nexdesk-rdp                 # the two executables
+```
+
+The first build downloads and compiles GPUI and takes a while.
+
+## Build a .deb and test it on another laptop
+
+On the build machine (Ubuntu/Debian, same CPU architecture as the target laptop):
+
+```bash
+cargo build --release -p nexdesk -p nexdesk-rdp
+packaging/make-deb.sh            # -> dist/nexdesk_<version>_<arch>.deb
+```
+
+`make-deb.sh` only needs `dpkg-deb`. It installs `nexdesk` and `nexdesk-rdp` side by side in `/usr/bin` (the manager looks for the engine next to itself), plus the menu entry and icon.
+
+On the other laptop:
+
+```bash
+scp dist/nexdesk_0.2.0_amd64.deb user@laptop:/tmp/      # or copy it with a USB stick
+sudo apt install /tmp/nexdesk_0.2.0_amd64.deb           # apt resolves the runtime libraries
+nexdesk                                                 # or start "NexDesk" from the app menu
+sudo apt remove nexdesk                                 # uninstall (your ~/.config/nexdesk data stays)
+```
+
+Runtime needs: a Vulkan-capable GPU/driver (`mesa-vulkan-drivers` is recommended automatically), and for the clipboard/drag & drop on Wayland, XWayland (`DISPLAY` set; default on Ubuntu).
+The package is not signed. To publish it for others, upload the `.deb` to a GitHub Release, or put it in an apt repository (`reprepro` / `aptly`) and sign that repository.
+
+Running from the build folder instead of a package? Run `packaging/install-local.sh` once so the dock shows the NexDesk name and icon instead of "Unknown" (the windows identify themselves as `nexdesk`, which must match an installed `nexdesk.desktop`). It is per-user; `--remove` undoes it.
+
+Quick test without installing a package: copy `target/release/nexdesk` and `target/release/nexdesk-rdp` into the same folder on the other laptop (same architecture and similar Ubuntu version, or the libraries from the list above installed) and run `./nexdesk`.
+
+First-run checklist on the test laptop:
+1. Add a connection (host, user), connect, and accept the certificate fingerprint once.
+2. Check the toolbar in full screen (`Ctrl+Alt+Break`, or the green dot): Ctrl+Alt+Del, screenshot (saved to `~/Pictures`), fit / 1:1, pause.
+3. Copy text and a file both ways, and drop a file on the window (`--x11` if you are on Wayland).
+4. Look at Logs > Connection / Console if anything fails.
 
 ## Running
 
@@ -81,3 +121,15 @@ Header "⋯" menu > Preferences (or sidebar > Settings): theme (Midnight / Graph
 
 ## Password vault
 Preferences > Password vault > *Set up vault*. Passwords are saved only if you tick "Save this password in the vault" when connecting; connections with a saved password then connect without asking. File: `~/.config/nexdesk/vault` (Argon2id + XChaCha20-Poly1305, mode 0600). Keep the recovery key offline: without it and the master password the passwords are unrecoverable by design.
+
+## Session toolbar
+Always visible as the header in a window, and as the pill at the top edge in full screen. Right side: **DEL** sends Ctrl+Alt+Del, the camera saves a PNG of the remote screen to your Pictures folder, the corner icon switches between *fit to window* and *actual size* (1:1; push the pointer to a window edge to scroll), and pause freezes the picture and stops sending input. Hover a button for its name. The connection speed preset is applied when connecting and cannot be changed mid-session.
+
+## Before / after connection commands
+In the connection editor, *Before connect* (for example `nmcli con up "Work VPN"`) runs before the session starts; if it fails or takes longer than 20 s the connection is not started. *After disconnect* runs when the session ends. They are a program plus arguments, not shell text (`;`, `|`, `$VAR` are literal; use `sh -c '...'` yourself if you really want a shell). They get `NEXDESK_HOST`, `NEXDESK_PROFILE`, `NEXDESK_USER` in the environment, never the password. A `.rdp` file you import cannot carry commands.
+
+## Find computers on your network
+Devices > *Scan network* probes the local subnet (at most one /24 per network interface) for TCP port 3389 and lists the computers that answer, with their network name when available. *Add connection* pre-fills the host; *Connect* appears if you already have a connection for it. Nothing is sent after the port answers, and nothing runs unless you press the button. If your friend's PC is not listed: it must be awake and on the same network, Remote Desktop must be enabled (Windows Pro/Enterprise/Server only, Windows Home cannot host RDP) and port 3389 must be allowed in Windows Defender Firewall.
+
+## Connection errors
+Failures now show the underlying cause (refused / timed out / unreachable / sign-in rejected) plus a hint, and the same text goes to Logs > Console.

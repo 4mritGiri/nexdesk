@@ -15,8 +15,8 @@ Adwaita-dark restyle of manager and viewer.
    First-launch wizard, recovery key (24 words, 3-word verification), idle auto-lock.
    Secret Service backend as the alternative; both implement `CredentialStore`.
 2. **Dynamic resize + scaling toggle** via DisplayControl, debounced 150 ms.
-3. **Toolbar v2**: Ctrl+Alt+Del, screenshot, pause, scaling, transfer progress bar with 2 px hidden-state strip.
-4. **Pre/post-connection commands** (argv-based by default, timeouts, import confirmation).
+3. **Toolbar v2**: Ctrl+Alt+Del, screenshot, pause, 1:1 scaling are **done**; transfer progress bar with 2 px hidden-state strip remains.
+4. ~~**Pre/post-connection commands**~~ **Done**: argv-based, 20 s timeout, ignored in imported `.rdp` files.
 5. **Zero-trust profile** flag and "TLS/NLA required" flag enforced in the engine.
 Exit criteria: all unit tests green; manual test pass on Ubuntu X11 and Wayland against a Windows 10/11 and a Server host.
 

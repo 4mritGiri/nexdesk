@@ -66,6 +66,33 @@ pub enum SessionError {
     InvalidProfile(&'static str),
     #[error("failed to start RDP engine: {0}")]
     Spawn(#[from] std::io::Error),
+    #[error("before-connect command failed: {0}")]
+    Hook(String),
+}
+
+/// Run a profile hook with context in the environment (never the password).
+fn run_hook(label: &str, cmd: &str, p: &Profile) -> Result<(), String> {
+    let r = nexdesk_core::hooks::run(
+        cmd,
+        &[("NEXDESK_HOST", p.host.trim()), ("NEXDESK_PROFILE", p.name.trim()), ("NEXDESK_USER", p.user.trim())],
+        nexdesk_core::hooks::DEFAULT_TIMEOUT,
+    );
+    match &r {
+        Ok(()) => nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, label, &p.name, &p.host, &p.user, "ok"),
+        Err(e) => nexdesk_core::logs::connection(nexdesk_core::logs::Level::Error, label, &p.name, &p.host, &p.user, e),
+    }
+    r
+}
+
+/// After-disconnect command, on its own thread so the UI never waits for it.
+fn spawn_post_hook(p: &Profile) {
+    if p.post_command.trim().is_empty() {
+        return;
+    }
+    let p = p.clone();
+    let _ = std::thread::Builder::new().name("post-hook".into()).spawn(move || {
+        let _ = run_hook("After-disconnect", &p.post_command, &p);
+    });
 }
 
 #[derive(Debug, Default)]
@@ -154,6 +181,12 @@ impl SessionManager {
         password: Secret,
     ) -> Result<(u64, Vec<SessionEvent>), SessionError> {
         profile.validate().map_err(SessionError::InvalidProfile)?;
+        // Pre-connect command (e.g. bring a VPN up). Runs before anything is spawned; failure aborts.
+        if !profile.pre_command.trim().is_empty() {
+            if let Err(e) = run_hook("Before-connect", &profile.pre_command, &profile) {
+                return Err(SessionError::Hook(e));
+            }
+        }
         let mut g = self.inner.lock().expect("session manager poisoned");
         let id = g.next_id;
         g.next_id += 1;
@@ -251,6 +284,7 @@ impl SessionManager {
                     id,
                     message: e.to_string(),
                 });
+                spawn_post_hook(&profile);
                 Err(SessionError::Spawn(e))
             }
         }
@@ -272,6 +306,7 @@ impl SessionManager {
             &s.profile.user,
             &format!("closed from manager after {}s", s.started_wall.map(|t| t.elapsed().as_secs()).unwrap_or(0)),
         );
+        spawn_post_hook(&s.profile);
         Ok(SessionEvent::Disconnected {
             id,
             reason: DisconnectReason::UserRequested,
@@ -294,6 +329,7 @@ impl SessionManager {
                             &s.profile.user,
                             &format!("engine {} after {}s", status, s.started_wall.map(|t| t.elapsed().as_secs()).unwrap_or(0)),
                         );
+                        spawn_post_hook(&s.profile);
                         false
                     }
                     Ok(None) => true,

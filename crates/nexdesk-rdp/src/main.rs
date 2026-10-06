@@ -1,7 +1,9 @@
 //! nexdesk: a Rust RDP desktop client (winit + softbuffer) built on IronRDP.
 mod app;
+mod diag;
 mod grab;
 mod keymap;
+mod shot;
 mod tls;
 mod ui;
 
@@ -306,6 +308,7 @@ fn main() -> Result<()> {
         clip_handle = Some(clip.handle());
     }
 
+    let ui_proxy = proxy.clone();
     std::thread::Builder::new()
         .name("rdp-engine".into())
         .spawn(move || {
@@ -337,6 +340,7 @@ fn main() -> Result<()> {
             start_fullscreen: args.fullscreen || file.get_int("screen mode id") == Some(2),
             capture_keys: args.capture_keys,
             drop_paste: args.drop_paste,
+            proxy: ui_proxy,
         },
         input_tx,
         clip_handle,
