@@ -9,3 +9,4 @@ pub mod profiles;
 pub mod rdpfile;
 pub mod scale;
 pub mod settings;
+pub mod vault;

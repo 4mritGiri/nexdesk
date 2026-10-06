@@ -19,6 +19,7 @@ use nexdesk_core::{
     credentials::Secret,
     books::AddressBooks,
     settings::{Settings, Theme, TlsMode},
+    vault::{KdfParams, Vault, VaultError},
     logs::{self, Kind as LogKind, Level as LogLevel},
     profiles::{file_stem_for, Profile, Speed},
 };
@@ -88,6 +89,36 @@ pub struct NexDeskApp {
     pub prefs: Settings,
     menu_open: bool,
     info_dialog: Option<InfoDialog>,
+
+    // password vault
+    vault: Option<Vault>,
+    vault_dialog: Option<VaultDlg>,
+    vault_pw1: Entity<TextInput>,
+    vault_pw2: Entity<TextInput>,
+    vault_rec: Entity<TextInput>,
+    vault_error: Option<String>,
+    /// Recovery key to display once after creating the vault.
+    vault_new_key: Option<String>,
+    save_pw: bool,
+    confirm_wipe: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VaultDlg {
+    Setup,
+    Unlock,
+    UseRecovery,
+    ChangeMaster,
+    ShowRecoveryKey,
+}
+
+/// What the Preferences page needs to know about the vault.
+#[derive(Clone, Copy)]
+struct VaultStatus {
+    exists: bool,
+    unlocked: bool,
+    count: usize,
+    confirm_wipe: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -127,12 +158,16 @@ impl NexDeskApp {
         let password_input = cx.new(|cx| TextInput::new(cx, true, "Password"));
         let search_input = cx.new(|cx| TextInput::new(cx, false, "Search"));
         let book_input = cx.new(|cx| TextInput::new(cx, false, "New address book"));
+        let vault_pw1 = cx.new(|cx| TextInput::new(cx, true, "Master password"));
+        let vault_pw2 = cx.new(|cx| TextInput::new(cx, true, "Repeat master password"));
+        let vault_rec = cx.new(|cx| TextInput::new(cx, false, "XXXX-XXXX-XXXX-..."));
         // Re-render the list while typing in the search box.
         cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
 
         let prefs = Settings::load();
         crate::theme::set_theme(prefs.theme);
-        Self {
+        let vault_exists = nexdesk_core::vault::default_path().map(|p| Vault::exists(&p)).unwrap_or(false);
+        let mut me = Self {
             state: ManagerState::load(engine_path),
             nav: Navigation::default(),
             form: Profile::default(),
@@ -161,8 +196,22 @@ impl NexDeskApp {
             prefs,
             menu_open: false,
             info_dialog: None,
+            vault: None,
+            vault_dialog: None,
+            vault_pw1,
+            vault_pw2,
+            vault_rec,
+            vault_error: None,
+            vault_new_key: None,
+            save_pw: false,
+            confirm_wipe: false,
+        };
+        if vault_exists {
+            me.open_vault_dialog(VaultDlg::Unlock, _window, cx);
         }
+        me
     }
+
 
     /// Change a preference, save it and apply it immediately.
     fn update_settings(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Settings)) {
@@ -172,6 +221,175 @@ impl NexDeskApp {
             self.state.status = format!("Could not save preferences: {e}");
         }
         cx.notify();
+    }
+
+    // ------------------------------------------------------------------
+    // Password vault
+    // ------------------------------------------------------------------
+
+    fn vault_file() -> Option<std::path::PathBuf> {
+        nexdesk_core::vault::default_path()
+    }
+
+    fn vault_exists() -> bool {
+        Self::vault_file().map(|p| Vault::exists(&p)).unwrap_or(false)
+    }
+
+    fn open_vault_dialog(&mut self, kind: VaultDlg, window: &mut Window, cx: &mut Context<Self>) {
+        for i in [&self.vault_pw1, &self.vault_pw2, &self.vault_rec] {
+            i.update(cx, |i, cx| i.reset(cx));
+        }
+        self.vault_error = None;
+        self.vault_dialog = Some(kind);
+        let first = match kind {
+            VaultDlg::UseRecovery => self.vault_rec.read(cx).focus_handle.clone(),
+            _ => self.vault_pw1.read(cx).focus_handle.clone(),
+        };
+        window.focus(&first, cx);
+        cx.notify();
+    }
+
+    fn close_vault_dialog(&mut self, cx: &mut Context<Self>) {
+        self.vault_dialog = None;
+        self.vault_error = None;
+        self.vault_new_key = None;
+        for i in [&self.vault_pw1, &self.vault_pw2, &self.vault_rec] {
+            i.update(cx, |i, cx| i.reset(cx));
+        }
+        cx.notify();
+    }
+
+    fn vault_err(&mut self, e: VaultError, cx: &mut Context<Self>) {
+        self.vault_error = Some(e.to_string());
+        cx.notify();
+    }
+
+    fn vault_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(kind) = self.vault_dialog else { return };
+        let pw1 = self.vault_pw1.read(cx).value().to_string();
+        let pw2 = self.vault_pw2.read(cx).value().to_string();
+        let rec = self.vault_rec.read(cx).value().to_string();
+        let Some(path) = Self::vault_file() else {
+            self.vault_error = Some("No config directory available on this system.".into());
+            cx.notify();
+            return;
+        };
+        match kind {
+            VaultDlg::Setup => {
+                if pw1 != pw2 {
+                    self.vault_error = Some("The two passwords do not match.".into());
+                    cx.notify();
+                    return;
+                }
+                match Vault::create(&path, &pw1, KdfParams::DEFAULT) {
+                    Ok((v, key)) => {
+                        self.vault = Some(v);
+                        self.vault_new_key = Some(key);
+                        logs::alarm(LogLevel::Info, "Password vault created", "", "");
+                        self.open_vault_dialog(VaultDlg::ShowRecoveryKey, window, cx);
+                    }
+                    Err(e) => self.vault_err(e, cx),
+                }
+            }
+            VaultDlg::Unlock => match Vault::unlock(&path, &pw1) {
+                Ok(v) => {
+                    self.state.status = format!("Vault unlocked ({} saved password(s)).", v.len());
+                    self.vault = Some(v);
+                    self.close_vault_dialog(cx);
+                }
+                Err(e) => {
+                    if matches!(e, VaultError::WrongKey) {
+                        logs::alarm(LogLevel::Warn, "Wrong vault master password", "", "");
+                    }
+                    self.vault_err(e, cx)
+                }
+            },
+            VaultDlg::UseRecovery => match Vault::unlock_with_recovery(&path, &rec) {
+                Ok(v) => {
+                    logs::alarm(LogLevel::Warn, "Vault unlocked with the recovery key", "", "choose a new master password");
+                    self.vault = Some(v);
+                    self.open_vault_dialog(VaultDlg::ChangeMaster, window, cx);
+                }
+                Err(e) => self.vault_err(e, cx),
+            },
+            VaultDlg::ChangeMaster => {
+                if pw1 != pw2 {
+                    self.vault_error = Some("The two passwords do not match.".into());
+                    cx.notify();
+                    return;
+                }
+                let res = self.vault.as_mut().map(|v| v.change_master(&pw1));
+                match res {
+                    Some(Ok(())) => {
+                        self.state.status = "Master password changed.".into();
+                        self.close_vault_dialog(cx);
+                    }
+                    Some(Err(e)) => self.vault_err(e, cx),
+                    None => self.close_vault_dialog(cx),
+                }
+            }
+            VaultDlg::ShowRecoveryKey => self.close_vault_dialog(cx),
+        }
+    }
+
+    fn lock_vault(&mut self, cx: &mut Context<Self>) {
+        self.vault = None;
+        self.confirm_wipe = false;
+        self.state.status = "Vault locked.".into();
+        cx.notify();
+    }
+
+    fn wipe_vault_passwords(&mut self, cx: &mut Context<Self>) {
+        if !self.confirm_wipe {
+            self.confirm_wipe = true;
+            cx.notify();
+            return;
+        }
+        self.confirm_wipe = false;
+        if let Some(v) = self.vault.as_mut() {
+            match v.clear() {
+                Ok(()) => self.state.status = "All saved passwords were deleted.".into(),
+                Err(e) => self.state.status = e.to_string(),
+            }
+        }
+        cx.notify();
+    }
+
+    fn forget_saved_password(&mut self, cx: &mut Context<Self>) {
+        if let (Some(p), Some(v)) = (self.selected_profile_cloned(), self.vault.as_mut()) {
+            let _ = v.remove(&p.name);
+            self.state.status = format!("Saved password for \"{}\" removed.", p.name);
+        }
+        cx.notify();
+    }
+
+    fn vault_status(&self) -> VaultStatus {
+        VaultStatus {
+            exists: Self::vault_exists(),
+            unlocked: self.vault.is_some(),
+            count: self.vault.as_ref().map(|v| v.len()).unwrap_or(0),
+            confirm_wipe: self.confirm_wipe,
+        }
+    }
+
+    /// Start the session; on success optionally remember the password in the vault.
+    fn launch(&mut self, profile: Profile, password: Secret, save: bool, cx: &mut Context<Self>) -> Result<u64, String> {
+        let name = profile.name.clone();
+        match self.state.sessions.start(profile, password.clone()) {
+            Ok((id, _)) => {
+                if save {
+                    if let Some(v) = self.vault.as_mut() {
+                        if let Err(e) = v.set(&name, password) {
+                            self.state.status = format!("Connected, but the password could not be saved: {e}");
+                        }
+                    }
+                }
+                self.nav.screen = Screen::Sessions;
+                cx.notify();
+                Ok(id)
+            }
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     fn refresh_logs(&mut self) {
@@ -382,6 +600,9 @@ impl NexDeskApp {
                 if let Some(old) = self.editor.as_ref().and_then(|e| e.original.clone()) {
                     if old != profile.name {
                         self.books.rename_connection(&old, Some(&profile.name));
+                        if let Some(v) = self.vault.as_mut() {
+                            let _ = v.rename(&old, &profile.name);
+                        }
                     }
                 }
                 self.selected_profile = list.iter().position(|p| p.name == profile.name);
@@ -445,6 +666,9 @@ impl NexDeskApp {
         match result {
             Ok(list) => {
                 self.books.rename_connection(&profile.name, None);
+                if let Some(v) = self.vault.as_mut() {
+                    let _ = v.remove(&profile.name);
+                }
                 self.state.profiles = list;
                 self.selected_profile = None;
                 self.state.selected = None;
@@ -470,10 +694,22 @@ impl NexDeskApp {
             return;
         }
 
+        // A saved password in the unlocked vault skips the prompt.
+        if let Some(saved) = self.vault.as_ref().and_then(|v| v.get(&self.state.profiles[index].name)) {
+            let profile = self.state.profiles[index].clone();
+            match self.launch(profile, saved, false, cx) {
+                Ok(id) => self.state.status = format!("Session #{id} is connecting (saved password)..."),
+                Err(e) => self.state.status = format!("Unable to start the RDP session: {e}"),
+            }
+            cx.notify();
+            return;
+        }
+
         self.password_input.update(cx, |input, cx| {
             input.reset(cx);
         });
 
+        self.save_pw = self.vault.is_some();
         self.password_error = None;
         self.password_dialog = true;
 
@@ -522,32 +758,22 @@ impl NexDeskApp {
             return;
         }
 
-        let secret = Secret::new(password);
-
-        match self.state.sessions.start(profile, secret) {
-            Ok((id, _events)) => {
+        let save = self.save_pw && self.vault.is_some();
+        match self.launch(profile, Secret::new(password.to_string()), save, cx) {
+            Ok(id) => {
                 self.password_input.update(cx, |input, cx| {
                     input.reset(cx);
                 });
-
                 self.password_error = None;
                 self.password_dialog = false;
-
                 self.state.status = format!("Session #{id} is connecting...");
-
-                self.nav.screen = Screen::Sessions;
-
                 cx.notify();
             }
-
             Err(error) => {
-                self.password_error = Some(error.to_string());
+                self.password_error = Some(error);
                 self.state.status = "Unable to start the RDP session.".into();
-
                 let focus_handle = self.password_input.read(cx).focus_handle.clone();
-
                 window.focus(&focus_handle, cx);
-
                 cx.notify();
             }
         }
@@ -584,9 +810,13 @@ impl Render for NexDeskApp {
         let status: SharedString = self.state.status.clone().into();
 
         let filter = self.search_input.read(cx).value().trim().to_lowercase();
+        let has_saved_pw = match (&self.vault, self.selected_profile.and_then(|i| self.state.profiles.get(i))) {
+            (Some(v), Some(p)) => v.has(&p.name),
+            _ => false,
+        };
         let content = match self.nav.screen {
             Screen::Connections => {
-                connection_view(profiles, self.selected_profile, self.pending_delete, self.grid_view, filter, cx)
+                connection_view(profiles, self.selected_profile, self.pending_delete, self.grid_view, filter, has_saved_pw, cx)
                     .into_any_element()
             }
 
@@ -605,7 +835,7 @@ impl Render for NexDeskApp {
 
             Screen::Logs(kind) => logs_view(kind, &self.log_entries, &filter, self.confirm_clear, cx).into_any_element(),
 
-            Screen::Settings => settings_view(&self.prefs, cx).into_any_element(),
+            Screen::Settings => settings_view(&self.prefs, self.vault_status(), cx).into_any_element(),
         };
 
         if matches!(self.nav.screen, Screen::Logs(_) | Screen::Devices)
@@ -683,6 +913,8 @@ impl Render for NexDeskApp {
                     .unwrap_or_else(|| "Connection".into()),
                 self.password_input.clone(),
                 self.password_error.clone(),
+                if self.vault.is_some() { Some(self.save_pw) } else { None },
+                Self::vault_exists(),
                 cx,
             ));
         }
@@ -692,6 +924,16 @@ impl Render for NexDeskApp {
         }
         if let Some(d) = self.info_dialog {
             main = main.child(info_dialog(d, cx));
+        }
+        if let Some(k) = self.vault_dialog {
+            main = main.child(vault_dialog_view(
+                k,
+                [self.vault_pw1.clone(), self.vault_pw2.clone(), self.vault_rec.clone()],
+                self.vault_error.clone(),
+                self.vault_new_key.clone(),
+                Self::vault_exists(),
+                cx,
+            ));
         }
 
         // Client-side decorations need their own resize handles.
@@ -1000,6 +1242,7 @@ fn connection_view(
     pending_delete: Option<usize>,
     grid_view: bool,
     filter: String,
+    has_saved_pw: bool,
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
     let mut grid = div().flex().gap_3();
@@ -1169,6 +1412,7 @@ fn connection_view(
                 .child(toolbar_button("New", true, false, NexDeskApp::open_editor_new, cx))
                 .child(toolbar_button("Edit", has_selection, false, NexDeskApp::open_editor_edit, cx))
                 .child(toolbar_button("Duplicate", has_selection, false, NexDeskApp::duplicate_selected, cx))
+                .when(has_saved_pw, |d| d.child(toolbar_button("Forget password", true, false, |this, _w, cx| this.forget_saved_password(cx), cx)))
                 .child(toolbar_button(delete_label, has_selection, confirming, NexDeskApp::delete_selected, cx)),
         )
         .child(
@@ -1797,7 +2041,7 @@ fn pref_group(title: &'static str, rows: Vec<gpui::AnyElement>) -> impl IntoElem
         .child(card)
 }
 
-fn settings_view(p: &Settings, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+fn settings_view(p: &Settings, vs: VaultStatus, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
     let theme_ctl = div().flex().gap_1().children(Theme::ALL.map(|t| {
         seg_btn(format!("pref-theme-{}", t.label()), t.label(), p.theme == t, cx, move |s| s.theme = t).into_any_element()
     }));
@@ -1834,6 +2078,7 @@ fn settings_view(p: &Settings, cx: &mut Context<NexDeskApp>) -> impl IntoElement
                 pref_row("Use the system title bar", "Turn on if the custom header bar misbehaves with your window manager.", switch("pref-frame", p.native_frame, cx, |s, v| s.native_frame = v)).into_any_element(),
             ],
         ))
+        .child(pref_group("PASSWORD VAULT", vault_rows(vs, cx)))
         .child(pref_group(
             "SECURITY",
             vec![
@@ -1842,6 +2087,208 @@ fn settings_view(p: &Settings, cx: &mut Context<NexDeskApp>) -> impl IntoElement
             ],
         ))
         .child(div().text_xs().text_color(muted()).child("Preferences are saved in ~/.config/nexdesk/settings and apply to the next session you start."))
+}
+
+fn vault_rows(vs: VaultStatus, cx: &mut Context<NexDeskApp>) -> Vec<gpui::AnyElement> {
+    let btn = |id: &str, label: &'static str, cx: &mut Context<NexDeskApp>, f: fn(&mut NexDeskApp, &mut Window, &mut Context<NexDeskApp>)| {
+        toolbar_button_dyn(id.to_string(), label, true, cx.listener(move |this, _e, w, cx| f(this, w, cx))).into_any_element()
+    };
+    let mut rows: Vec<gpui::AnyElement> = Vec::new();
+    if !vs.exists {
+        rows.push(
+            pref_row(
+                "Save passwords securely",
+                "Protect saved passwords with one master password (Argon2id + XChaCha20-Poly1305). Without a vault, passwords are asked each time.",
+                btn("vault-setup", "Set up vault", cx, |this, w, cx| this.open_vault_dialog(VaultDlg::Setup, w, cx)),
+            )
+            .into_any_element(),
+        );
+    } else if !vs.unlocked {
+        rows.push(
+            pref_row(
+                "Vault is locked",
+                "Unlock it to use and save passwords.",
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(btn("vault-unlock", "Unlock", cx, |this, w, cx| this.open_vault_dialog(VaultDlg::Unlock, w, cx)))
+                    .child(btn("vault-recover", "Use recovery key", cx, |this, w, cx| this.open_vault_dialog(VaultDlg::UseRecovery, w, cx))),
+            )
+            .into_any_element(),
+        );
+    } else {
+        rows.push(
+            pref_row(
+                "Vault is unlocked",
+                if vs.count == 1 { "1 saved password. Connections with a saved password connect without asking." } else { "Connections with a saved password connect without asking." },
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(btn("vault-lock", "Lock now", cx, |this, _w, cx| this.lock_vault(cx))),
+            )
+            .into_any_element(),
+        );
+        rows.push(
+            pref_row(
+                "Master password",
+                "Your recovery key keeps working after you change it.",
+                btn("vault-change", "Change…", cx, |this, w, cx| this.open_vault_dialog(VaultDlg::ChangeMaster, w, cx)),
+            )
+            .into_any_element(),
+        );
+        rows.push(
+            pref_row(
+                "Saved passwords",
+                "Remove every password from the vault (the vault itself stays).",
+                btn(
+                    "vault-wipe",
+                    if vs.confirm_wipe { "Click again to confirm" } else { "Delete all" },
+                    cx,
+                    |this, _w, cx| this.wipe_vault_passwords(cx),
+                ),
+            )
+            .into_any_element(),
+        );
+    }
+    rows
+}
+
+fn vault_dialog_view(
+    kind: VaultDlg,
+    inputs: [Entity<TextInput>; 3],
+    error: Option<String>,
+    new_key: Option<String>,
+    vault_exists: bool,
+    cx: &mut Context<NexDeskApp>,
+) -> impl IntoElement {
+    let [pw1, pw2, rec] = inputs;
+    let field = |input: Entity<TextInput>| {
+        div().p_3().rounded(px(8.)).bg(input_bg()).border_1().border_color(border()).line_height(px(24.)).child(input)
+    };
+    let (title, blurb): (&str, &str) = match kind {
+        VaultDlg::Setup => ("Set up the password vault", "Choose a master password (at least 8 characters). Saved connection passwords are encrypted with it. NexDesk cannot recover it for you; you will get a recovery key next."),
+        VaultDlg::Unlock => ("Unlock the password vault", "Enter your master password to use saved passwords."),
+        VaultDlg::UseRecovery => ("Unlock with the recovery key", "Type the recovery key you saved when the vault was created. You will then choose a new master password."),
+        VaultDlg::ChangeMaster => ("Choose a new master password", "At least 8 characters. The recovery key stays the same."),
+        VaultDlg::ShowRecoveryKey => ("Save your recovery key", "This is the ONLY way to open the vault if you forget the master password. Store it somewhere safe and offline (password manager, printed copy). It is shown only now."),
+    };
+    let mut body = div().flex().flex_col().gap_3();
+    match kind {
+        VaultDlg::Setup | VaultDlg::ChangeMaster => {
+            body = body.child(field(pw1)).child(field(pw2));
+        }
+        VaultDlg::Unlock => body = body.child(field(pw1)),
+        VaultDlg::UseRecovery => body = body.child(field(rec)),
+        VaultDlg::ShowRecoveryKey => {
+            let key = new_key.clone().unwrap_or_default();
+            let copy = key.clone();
+            body = body
+                .child(
+                    div()
+                        .p_4()
+                        .rounded(px(10.))
+                        .bg(input_bg())
+                        .border_1()
+                        .border_color(warn())
+                        .font_family("Monospace")
+                        .text_sm()
+                        .child(key),
+                )
+                .child(toolbar_button_dyn(
+                    "vault-copy-key".into(),
+                    "Copy to clipboard",
+                    true,
+                    cx.listener(move |this, _e, _w, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                        this.state.status = "Recovery key copied. Paste it somewhere safe, then clear your clipboard.".into();
+                        cx.notify();
+                    }),
+                ));
+        }
+    }
+    let primary = match kind {
+        VaultDlg::Setup => "Create vault",
+        VaultDlg::Unlock => "Unlock",
+        VaultDlg::UseRecovery => "Unlock",
+        VaultDlg::ChangeMaster => "Change password",
+        VaultDlg::ShowRecoveryKey => "I have saved the key",
+    };
+    div()
+        .absolute()
+        .inset_0()
+        .bg(scrim())
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .w(px(520.))
+                .p_6()
+                .rounded(px(16.))
+                .bg(popover())
+                .border_1()
+                .border_color(border())
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(div().flex().items_center().gap_3().child(ico("shield", 22., accent_hover())).child(div().text_xl().font_weight(FontWeight::BOLD).child(title)))
+                .child(div().text_sm().text_color(muted()).child(blurb))
+                .child(body)
+                .when_some(error, |d, e| d.child(div().text_sm().text_color(danger()).child(e)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div().flex().gap_2().when(kind == VaultDlg::Unlock, |d| {
+                                d.child(toolbar_button_dyn(
+                                    "vault-use-recovery".into(),
+                                    "Use recovery key",
+                                    true,
+                                    cx.listener(|this, _e, w, cx| this.open_vault_dialog(VaultDlg::UseRecovery, w, cx)),
+                                ))
+                            }),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .when(kind != VaultDlg::ShowRecoveryKey, |d| {
+                                    d.child(toolbar_button_dyn(
+                                        "vault-cancel".into(),
+                                        if kind == VaultDlg::Unlock { "Skip" } else { "Cancel" },
+                                        true,
+                                        cx.listener(move |this, _e, w, cx| {
+                                            if kind == VaultDlg::UseRecovery && vault_exists {
+                                                this.open_vault_dialog(VaultDlg::Unlock, w, cx)
+                                            } else {
+                                                this.close_vault_dialog(cx)
+                                            }
+                                        }),
+                                    ))
+                                })
+                                .child(
+                                    div()
+                                        .id("vault-primary")
+                                        .px_5()
+                                        .h(px(34.))
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(8.))
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .bg(accent())
+                                        .text_color(on_accent())
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(accent_hover()))
+                                        .on_click(cx.listener(|this, _e, w, cx| this.vault_submit(w, cx)))
+                                        .child(primary),
+                                ),
+                        ),
+                ),
+        )
 }
 
 // ---- header "⋯" menu and its dialogs
@@ -1973,6 +2420,8 @@ fn password_dialog(
     profile_name: String,
     password_input: Entity<TextInput>,
     error: Option<String>,
+    save_choice: Option<bool>,
+    vault_exists: bool,
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
     let password_empty = password_input.read(cx).value().is_empty();
@@ -2020,6 +2469,41 @@ fn password_dialog(
                 )
                 .when_some(error, |element, error| {
                     element.child(div().text_sm().text_color(danger()).child(error))
+                })
+                .child(match save_choice {
+                    Some(on) => div()
+                        .id("save-pw")
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _e, _w, cx| {
+                            this.save_pw = !this.save_pw;
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .size(px(18.))
+                                .rounded(px(5.))
+                                .border_1()
+                                .border_color(if on { accent() } else { hover() })
+                                .bg(if on { accent() } else { input_bg() })
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(if on { ico("check", 12., on_accent()).into_any_element() } else { div().into_any_element() }),
+                        )
+                        .child(div().text_sm().child("Save this password in the vault (encrypted)"))
+                        .into_any_element(),
+                    None => div()
+                        .text_xs()
+                        .text_color(muted())
+                        .child(if vault_exists {
+                            "The password vault is locked. Unlock it in Preferences to save passwords."
+                        } else {
+                            "Tip: set up the password vault in Preferences to save passwords securely."
+                        })
+                        .into_any_element(),
                 })
                 .child(
                     div()

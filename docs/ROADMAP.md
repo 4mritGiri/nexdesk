@@ -10,7 +10,7 @@ Clipboard (text, images, files both ways), drag & drop, TLS verification + known
 Adwaita-dark restyle of manager and viewer.
 
 ## P1 – Daily-use essentials (about 3–4 weeks)
-1. **Vault** (`nexdesk-vault`): Argon2id (m=64 MiB, t=3, p=1) → 256-bit key wraps a random data key; data encrypted with
+1. **Vault** (DONE: crypto, recovery key, UI; remaining: idle auto-lock, first-run wizard, Secret Service backend) (`nexdesk-vault`): Argon2id (m=64 MiB, t=3, p=1) → 256-bit key wraps a random data key; data encrypted with
    XChaCha20-Poly1305; header carries version, salt, KDF params; atomic write, mode 0600; `Secret` types zeroized.
    First-launch wizard, recovery key (24 words, 3-word verification), idle auto-lock.
    Secret Service backend as the alternative; both implement `CredentialStore`.

@@ -70,12 +70,12 @@ Feasibility column: **Easy** (days, client only) · **Medium** (1–3 weeks) · 
 
 | Feature | Feasibility | Status | How |
 |---|---|---|---|
-| Encrypted vault, master password (Argon2id + XChaCha20-Poly1305 / AES-256-GCM) | Medium | **Planned P1** | new `nexdesk-vault` crate behind existing `CredentialStore` trait; random salt and nonce per write, atomic file replace, `0600` |
-| Recovery key (24 words) + verify 3 words | Medium | **Planned P1** | second wrapped copy of the data key; PDF export is a nice-to-have, printable text first |
-| First-launch wizard (vault vs system keyring) | Easy | **Planned P1** | UI only |
+| Encrypted vault, master password (Argon2id + XChaCha20-Poly1305) | Medium | **Done** (crypto tested; UI unverified) | `nexdesk-core::vault`: 64 MiB / 3-pass Argon2id, random data key wrapped by master password and by recovery key, header + both wraps authenticated, padded body, atomic write, mode 0600, hostile-header limits. Save checkbox in the connect dialog, auto-connect with saved password, Forget password, lock / change master / delete all in Preferences, unlock at start |
+| Recovery key | Medium | **Done** (52-character key, shown once, copy button) | the 3-word verification gate and PDF export are **Planned P2** |
+| First-launch wizard (vault vs system keyring) | Easy | **Partly done**: vault setup is in Preferences; a first-run wizard and the keyring choice are **Planned P2** | |
 | GNOME Keyring / KWallet (Secret Service) | Medium | **Planned P1** | `secret-service` crate; per-app attribute scoping, warn about the "any unlocked-session app can read" limitation |
 | Plaintext-never rule | Easy | **Done** | passwords not in profiles or `.rdp` files |
-| Auto-lock after idle / on session lock | Easy | **Planned P1** | zeroize key on timeout |
+| Auto-lock after idle / on session lock | Easy | **Planned P1** | manual Lock exists; idle timeout and screen-lock hook still to do |
 | Zero-trust profile toggle (block clipboard, files, drives) | Easy | **Planned P1** | engine refuses to build the backend; enforced client-side. Admin policy file in P4 |
 | TLS only / refuse RDP-security fallback | Easy | **Planned P1** | require TLS or CredSSP, never legacy RDP encryption; setting `Require NLA` |
 | Pre-connection baseline check | Medium | **Planned P2** | cert validity/expiry/key size, TLS version, NLA offered; port scan is out of scope (legal and unreliable) |

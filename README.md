@@ -78,3 +78,6 @@ Local patches to IronRDP are in `vendor/` (see `vendor/README.md`).
 
 ## Themes and preferences
 Header "⋯" menu > Preferences (or sidebar > Settings): theme (Midnight / Graphite / Light), sidebar and view defaults, default connection speed, session window options, certificate policy. Stored in `~/.config/nexdesk/settings`.
+
+## Password vault
+Preferences > Password vault > *Set up vault*. Passwords are saved only if you tick "Save this password in the vault" when connecting; connections with a saved password then connect without asking. File: `~/.config/nexdesk/vault` (Argon2id + XChaCha20-Poly1305, mode 0600). Keep the recovery key offline: without it and the master password the passwords are unrecoverable by design.
