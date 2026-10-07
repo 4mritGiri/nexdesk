@@ -1,0 +1,19 @@
+[package]
+name = "nexdesk-crypto"
+description = "NexDesk hybrid post-quantum handshake and secure channel (prototype, pending independent review)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ml-kem = "0.2"
+ml-dsa = "0.0.4"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+subtle = "2"
+thiserror = "1"

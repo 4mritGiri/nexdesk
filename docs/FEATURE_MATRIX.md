@@ -149,9 +149,9 @@ RustDesk column is from its public documentation and should be re-checked before
 ### Security beyond RustDesk (design in `docs/SECURITY_DESIGN.md`)
 | Feature | Feasibility | NexDesk | Notes |
 |---|---|---|---|
-| Hybrid post-quantum key exchange (X25519 + ML-KEM-768) in the NexDesk protocol | Medium | **Planned P5a** | first crate of P5; needs independent crypto review |
-| Dual signatures (Ed25519 + ML-DSA-65) on device identity keys | Medium | **Planned P5a** | pinned like known_hosts |
-| 256-bit symmetric encryption, forward secrecy, rekeying | Easy | **Planned P5a** | vault already uses XChaCha20-Poly1305 / Argon2id (**Done**) |
+| Hybrid post-quantum key exchange (X25519 + ML-KEM-768) in the NexDesk protocol | Medium | **Done (prototype)** | `nexdesk-crypto`, tested; **needs independent crypto review** and KAT vectors before any real use |
+| Dual signatures (Ed25519 + ML-DSA-65) on device identity keys | Medium | **Done (prototype)** | both must verify; fingerprint for pinning; identity store in vault still to do |
+| 256-bit symmetric encryption, forward secrecy, rekeying | Easy | **Done (prototype)** | vault already uses XChaCha20-Poly1305 / Argon2id (**Done**) |
 | Post-quantum protection for RDP sessions | Medium | **Planned P2** | SSH tunnel with hybrid KEX (OpenSSH 9+/10) or WireGuard PSK; RDP/TLS itself is chosen by the server |
 | Quantum key distribution (QKD) | n/a | **Out of scope** | needs dedicated optical hardware |
 | Consent by default, per-session permissions (default-deny) | Easy | **Planned P5a** | |

@@ -37,7 +37,7 @@ Own host agent + protocol + rendezvous/relay server so Linux/macOS machines, mac
 * **P5c** `nexdesk-hbb` rendezvous + relay, IDs, NAT hole punching, 2FA, self-hosting docs, shared address book.
 * **P5d** Windows login screen/UAC service, privacy mode, hardware codecs, macOS host.
 * **P6** mobile and web clients, enterprise server tier (OIDC/LDAP, web console, audit).
-Security design (hybrid post-quantum handshake X25519+ML-KEM, dual signatures, consent-by-default, audit, supply chain): `docs/SECURITY_DESIGN.md`. The crypto crate is written first and reviewed before anything else in P5.
+Security design (hybrid post-quantum handshake X25519+ML-KEM, dual signatures, consent-by-default, audit, supply chain): `docs/SECURITY_DESIGN.md`. The crypto crate (`crates/nexdesk-crypto`, see `docs/CRYPTO.md`) is written first and reviewed before anything else in P5. **Step 1 done (prototype, unreviewed)**: hybrid handshake + record layer + tests.
 Prerequisite decision: licence (permissive vs AGPL) and clean-room rule (do not copy RustDesk code).
 
 ## Explicit non-goals (see matrix for reasons)
