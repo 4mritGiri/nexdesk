@@ -1,4 +1,4 @@
-//! Address books: named groups of saved connections (like RustDesk's address books).
+//! Address books: named groups of saved connections (a group of saved connections).
 //! Stored in `~/.config/nexdesk/addressbooks` as `book<TAB>connection` lines; a line with an
 //! empty connection keeps an empty book alive. Connections are referenced by profile name.
 use std::io;

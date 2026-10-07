@@ -15,10 +15,13 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::platform::scancode::PhysicalKeyExtScancode;
-use winit::window::{Window, WindowId};
+use winit::window::{CustomCursor, Window, WindowId};
+use nexdesk_peer::clip::ClipSync;
+use nexdesk_peer::wire::unpack_pixels;
 
 enum Ev {
     Msg(Msg),
+    Status(String),
     Gone(String),
 }
 
@@ -30,6 +33,8 @@ struct App {
     view_only: bool,
     title: String,
     cursor: (f64, f64),
+    clipboard: bool,
+    clip: Option<ClipSync>,
 }
 
 impl App {
@@ -76,6 +81,12 @@ impl ApplicationHandler<Ev> for App {
         match ev {
             Ev::Msg(Msg::Hello { view_only, width, height }) => {
                 self.view_only = view_only;
+                if self.clipboard && !view_only && self.clip.is_none() {
+                    match ClipSync::start(self.out.clone()) {
+                        Ok(c) => self.clip = Some(c),
+                        Err(e) => eprintln!("clipboard sharing unavailable: {e}"),
+                    }
+                }
                 self.screen = Some(Screen::new(width, height));
                 if let Some(w) = &self.window {
                     w.set_title(&format!("{}{}", self.title, if view_only { " (view only)" } else { "" }));
@@ -90,6 +101,24 @@ impl ApplicationHandler<Ev> for App {
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
+                }
+            }
+            Ev::Msg(Msg::Clip(t)) => {
+                if let Some(c) = &self.clip {
+                    c.set_remote(t);
+                }
+            }
+            Ev::Msg(Msg::Cursor { hot_x, hot_y, w, h, lz4 }) => {
+                if let (Some(win), Ok(px)) = (&self.window, unpack_pixels(&lz4, w, h)) {
+                    let rgba = nexdesk_peer::screen::cursor_rgba(&px);
+                    if let Ok(src) = CustomCursor::from_rgba(rgba, w, h, hot_x, hot_y) {
+                        win.set_cursor(el.create_custom_cursor(src));
+                    }
+                }
+            }
+            Ev::Status(s) => {
+                if let Some(w) = &self.window {
+                    w.set_title(&format!("{} ({s})", self.title));
                 }
             }
             Ev::Msg(Msg::Bye(why)) => {
@@ -152,7 +181,117 @@ impl ApplicationHandler<Ev> for App {
     }
 }
 
+/// Keep the session alive: forward messages, send pings, and after a network drop reconnect to the
+/// same pinned agent (backing off, for about 90 s). A connection that ended before the agent sent its
+/// Hello (denied, refused) or with a Bye is final: asking the agent's user again and again would be abuse.
+fn supervise(
+    first: (nexdesk_peer::Reader, Writer),
+    rx: mpsc::Receiver<Msg>,
+    proxy: winit::event_loop::EventLoopProxy<Ev>,
+    addr: String,
+    agent_fp: String,
+    dir: std::path::PathBuf,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut conn = Some(first);
+    let (mut delay, mut waited) = (1u64, 0u64);
+    let mut reconnected = false;
+    loop {
+        let (mut reader, mut writer) = match conn.take() {
+            Some(c) => c,
+            None => {
+                let attempt = store::load_or_create_identity(&dir, "viewer-identity")
+                    .map_err(|e| e.to_string())
+                    .and_then(|me| {
+                        client::connect(&addr, me, |a| a.fingerprint_string() == agent_fp).map_err(|e| e.to_string())
+                    });
+                match attempt {
+                    Ok((r, w, _)) => {
+                        while rx.try_recv().is_ok() {} // never replay stale keys or clicks
+                        (delay, waited, reconnected) = (1, 0, true);
+                        (r, w)
+                    }
+                    Err(e) => {
+                        if waited >= 90 {
+                            let _ = proxy.send_event(Ev::Gone(format!("could not reconnect: {e}")));
+                            return;
+                        }
+                        let _ = proxy.send_event(Ev::Status(format!("reconnecting, retry in {delay} s")));
+                        std::thread::sleep(Duration::from_secs(delay));
+                        waited += delay;
+                        delay = (delay * 2).min(8);
+                        continue;
+                    }
+                }
+            }
+        };
+        let ended = Arc::new(AtomicBool::new(false));
+        let established = Arc::new(AtomicBool::new(false));
+        let said_bye = Arc::new(AtomicBool::new(false));
+        let reader_thread = {
+            let (ended, established, said_bye, proxy) = (ended.clone(), established.clone(), said_bye.clone(), proxy.clone());
+            std::thread::spawn(move || {
+                loop {
+                    match reader.recv() {
+                        Ok(m) => {
+                            match &m {
+                                Msg::Hello { .. } => established.store(true, Ordering::SeqCst),
+                                Msg::Bye(_) => said_bye.store(true, Ordering::SeqCst),
+                                _ => {}
+                            }
+                            if proxy.send_event(Ev::Msg(m)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                ended.store(true, Ordering::SeqCst);
+            })
+        };
+        let mut n = 0u64;
+        let mut last_ping = std::time::Instant::now();
+        let mut window_closed = false;
+        while !ended.load(Ordering::SeqCst) {
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(m) => {
+                    if writer.send(&m).is_err() {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    window_closed = true;
+                    break;
+                }
+            }
+            if last_ping.elapsed() >= Duration::from_secs(10) {
+                last_ping = std::time::Instant::now();
+                n += 1;
+                if writer.send(&Msg::Ping(n)).is_err() {
+                    break;
+                }
+            }
+        }
+        writer.shutdown();
+        let _ = reader_thread.join();
+        if window_closed || said_bye.load(Ordering::SeqCst) {
+            return;
+        }
+        if !established.load(Ordering::SeqCst) {
+            let why = if reconnected { "the agent did not accept the reconnection" } else { "the agent closed the connection" };
+            let _ = proxy.send_event(Ev::Gone(why.into()));
+            return;
+        }
+        let _ = proxy.send_event(Ev::Status("connection lost, reconnecting".into()));
+    }
+}
+
 fn ask(question: &str) -> bool {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return false; // no terminal, no way to ask: refuse (use --trust or --probe)
+    }
     eprint!("{question} [y/N] ");
     let mut s = String::new();
     let _ = std::io::stdin().lock().read_line(&mut s);
@@ -167,11 +306,16 @@ fn die(m: &str) -> ! {
 fn main() {
     let mut forget = false;
     let mut addr = None;
-    for a in std::env::args().skip(1) {
+    let (mut probe, mut clipboard, mut trust) = (false, true, None::<String>);
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
         match a.as_str() {
             "--forget" => forget = true,
+            "--probe" => probe = true,
+            "--no-clipboard" => clipboard = false,
+            "--trust" => trust = Some(it.next().unwrap_or_else(|| die("--trust needs a fingerprint"))),
             "-h" | "--help" => {
-                println!("nexdesk-peer-view HOST:PORT [--forget]\n  --forget  drop the pinned identity of this agent first");
+                println!("nexdesk-peer-view HOST:PORT [--forget] [--no-clipboard] [--trust SHA256:..] [--probe]\n  --forget  drop the pinned identity of this agent first\n  --trust   pin the agent if its fingerprint is exactly this\n  --probe   print \"FINGERPRINT <fp>\" and exit (no session)");
                 return;
             }
             _ => addr = Some(a),
@@ -189,8 +333,16 @@ fn main() {
     let mut pin_error = None;
     let result = client::connect(&addr, me, |agent| {
         let fp = agent.fingerprint_string();
+        if probe {
+            println!("FINGERPRINT {fp}");
+            return false;
+        }
         match known.lookup(&key, &fp) {
             Lookup::Match => true,
+            Lookup::Unknown if trust.as_deref() == Some(fp.as_str()) => {
+                let _ = known.set(&key, &fp);
+                true
+            }
             Lookup::Unknown => {
                 eprintln!("First connection to {key}.\nThe agent's fingerprint is\n  {fp}\nCompare it with the one printed on the agent's screen.");
                 if ask("Trust this agent?") {
@@ -206,51 +358,21 @@ fn main() {
             }
         }
     });
-    let (mut reader, mut writer, peer) = match result {
+    if probe {
+        std::process::exit(0);
+    }
+    let (reader, writer, peer) = match result {
         Ok(x) => x,
         Err(e) => die(&pin_error.unwrap_or_else(|| format!("connection failed: {e}"))),
     };
     eprintln!("connected to {} - waiting for the agent's user to approve if asked", peer.fingerprint_string());
 
+    let addr_for_retry = addr.clone();
     let el = EventLoop::<Ev>::with_user_event().build().unwrap_or_else(|e| die(&e.to_string()));
     let proxy = el.create_proxy();
-    std::thread::spawn(move || loop {
-        match reader.recv() {
-            Ok(m) => {
-                if proxy.send_event(Ev::Msg(m)).is_err() {
-                    break;
-                }
-            }
-            Err(e) => {
-                let _ = proxy.send_event(Ev::Gone(e.to_string()));
-                break;
-            }
-        }
-    });
     let (tx, rx) = mpsc::channel::<Msg>();
-    std::thread::spawn(move || {
-        let mut w: Writer = writer;
-        let mut n = 0u64;
-        loop {
-            match rx.recv_timeout(Duration::from_secs(10)) {
-                Ok(m) => {
-                    if w.send(&m).is_err() {
-                        break;
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    n += 1;
-                    if w.send(&Msg::Ping(n)).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => {
-                    w.shutdown();
-                    break;
-                }
-            }
-        }
-    });
+    let agent_fp = peer.fingerprint_string();
+    std::thread::spawn(move || supervise((reader, writer), rx, proxy, addr_for_retry, agent_fp, dir));
     let mut app = App {
         window: None,
         surface: None,
@@ -259,6 +381,8 @@ fn main() {
         view_only: false,
         title: format!("nexdesk - {addr}"),
         cursor: (0.0, 0.0),
+        clipboard,
+        clip: None,
     };
     let _ = el.run_app(&mut app);
 }

@@ -3,6 +3,10 @@ use crate::PeerError;
 
 /// Largest screen edge accepted.
 pub const MAX_DIM: u16 = 16384;
+/// Largest clipboard text accepted, in bytes.
+pub const MAX_CLIP: usize = 1024 * 1024;
+/// Largest cursor image edge accepted.
+pub const MAX_CURSOR: u16 = 256;
 /// Largest raw tile (bytes) accepted: 64 MiB.
 pub const MAX_TILE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -14,6 +18,8 @@ pub enum Msg {
     /// A rectangle of the screen, BGRX pixels compressed with LZ4 (block format, size implied by w*h*4).
     Tile { x: u16, y: u16, w: u16, h: u16, lz4: Vec<u8> },
     Bye(String),
+    /// The remote pointer image: BGRA (premultiplied) pixels, LZ4-compressed, with its hotspot.
+    Cursor { hot_x: u16, hot_y: u16, w: u16, h: u16, lz4: Vec<u8> },
     // viewer -> agent
     MouseMove { x: u16, y: u16 },
     /// 1 = left, 2 = middle, 3 = right.
@@ -22,6 +28,8 @@ pub enum Msg {
     /// Linux evdev key code (KEY_*), the same on every Linux viewer and host.
     Key { code: u16, down: bool },
     // both
+    /// Clipboard text (UTF-8, at most `MAX_CLIP` bytes). Never logged.
+    Clip(String),
     Ping(u64),
     Pong(u64),
 }
@@ -29,6 +37,8 @@ pub enum Msg {
 const T_HELLO: u8 = 1;
 const T_TILE: u8 = 2;
 const T_BYE: u8 = 3;
+const T_CURSOR: u8 = 4;
+const T_CLIP: u8 = 0x30;
 const T_MOVE: u8 = 0x10;
 const T_BUTTON: u8 = 0x11;
 const T_WHEEL: u8 = 0x12;
@@ -61,6 +71,17 @@ impl Msg {
                 v.push(T_BYE);
                 let b = s.as_bytes();
                 v.extend_from_slice(&b[..b.len().min(200)]);
+            }
+            Msg::Cursor { hot_x, hot_y, w, h, lz4 } => {
+                v.push(T_CURSOR);
+                for n in [hot_x, hot_y, w, h] {
+                    v.extend_from_slice(&n.to_be_bytes());
+                }
+                v.extend_from_slice(lz4);
+            }
+            Msg::Clip(t) => {
+                v.push(T_CLIP);
+                v.extend_from_slice(t.as_bytes());
             }
             Msg::MouseMove { x, y } => {
                 v.push(T_MOVE);
@@ -126,6 +147,22 @@ impl Msg {
                 Msg::Tile { x, y, w, h, lz4: rest[8..].to_vec() }
             }
             T_BYE => Msg::Bye(String::from_utf8_lossy(rest).chars().filter(|c| !c.is_control()).collect()),
+            T_CURSOR => {
+                if rest.len() < 8 {
+                    return Err(bad("short cursor"));
+                }
+                let (hot_x, hot_y, w, h) = (u16at(0)?, u16at(2)?, u16at(4)?, u16at(6)?);
+                if w == 0 || h == 0 || w > MAX_CURSOR || h > MAX_CURSOR || hot_x >= w || hot_y >= h {
+                    return Err(bad("bad cursor"));
+                }
+                Msg::Cursor { hot_x, hot_y, w, h, lz4: rest[8..].to_vec() }
+            }
+            T_CLIP => {
+                if rest.len() > MAX_CLIP {
+                    return Err(bad("clipboard too large"));
+                }
+                Msg::Clip(String::from_utf8(rest.to_vec()).map_err(|_| bad("clipboard is not UTF-8"))?)
+            }
             T_MOVE => {
                 exact(4)?;
                 Msg::MouseMove { x: u16at(0)?, y: u16at(2)? }
@@ -193,6 +230,8 @@ mod tests {
         rt(Msg::MouseButton { button: 3, down: true });
         rt(Msg::Wheel { dx: -120, dy: 240 });
         rt(Msg::Key { code: 30, down: false });
+        rt(Msg::Cursor { hot_x: 1, hot_y: 2, w: 16, h: 16, lz4: vec![1, 2] });
+        rt(Msg::Clip("héllo\nworld".into()));
         rt(Msg::Ping(u64::MAX));
         rt(Msg::Pong(1));
     }
@@ -214,6 +253,13 @@ mod tests {
         let mut t = vec![T_TILE, 0, 0, 0, 0, 0xFF, 0xFF, 0, 1];
         t.push(0);
         assert!(Msg::decode(&t).is_err(), "w above MAX_DIM");
+        assert!(Msg::decode(&[T_CLIP, 0xFF, 0xFE]).is_err(), "clipboard must be UTF-8");
+        let mut big = vec![T_CLIP];
+        big.resize(1 + MAX_CLIP + 1, b'a');
+        assert!(Msg::decode(&big).is_err(), "clipboard size cap");
+        assert!(Msg::decode(&[T_CURSOR, 0, 0, 0, 0, 0, 0, 0, 0]).is_err(), "zero cursor");
+        assert!(Msg::decode(&[T_CURSOR, 0, 16, 0, 0, 0, 16, 0, 16]).is_err(), "hotspot outside the image");
+        assert!(Msg::decode(&[T_CURSOR, 0, 0, 0, 0, 1, 1, 0, 16]).is_err(), "cursor larger than MAX_CURSOR");
         // control characters in Bye are stripped (it is shown to the user)
         let m = Msg::decode(&[T_BYE, b'a', 0x1b, b'b', b'\n']).unwrap();
         assert_eq!(m, Msg::Bye("ab".into()));

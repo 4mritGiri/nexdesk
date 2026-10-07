@@ -2,6 +2,8 @@
 //!
 //! Everything after the handshake travels inside `nexdesk-crypto` records. See `docs/PEER.md`.
 pub mod client;
+pub mod clip;
+pub mod control;
 pub mod host;
 pub mod inject;
 pub mod link;
@@ -26,5 +28,5 @@ pub enum PeerError {
     Capture(String),
 }
 
-/// Default TCP port of the agent (same as RustDesk's direct-IP port, easy to remember).
+/// Default TCP port of the agent.
 pub const DEFAULT_PORT: u16 = 21118;

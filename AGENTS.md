@@ -660,7 +660,7 @@ docs/CLIPBOARD.md
 docs/VIEWER.md
 docs/FEATURE_MATRIX.md
 docs/ROADMAP.md
-docs/RUSTDESK_PARITY.md
+docs/REMOTE.md
 ```
 
  Do not modify documentation merely to restate obvious implementation details.

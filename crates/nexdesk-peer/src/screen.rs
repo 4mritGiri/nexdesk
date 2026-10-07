@@ -2,6 +2,17 @@
 use crate::wire::{unpack_pixels, Msg};
 use crate::PeerError;
 
+/// Premultiplied BGRA (as X11 delivers cursors) to straight RGBA for winit.
+pub fn cursor_rgba(bgra_premul: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bgra_premul.len());
+    for p in bgra_premul.chunks_exact(4) {
+        let a = p[3] as u32;
+        let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a / 2) / a).min(255) as u8 };
+        out.extend_from_slice(&[un(p[2]), un(p[1]), un(p[0]), p[3]]);
+    }
+    out
+}
+
 pub struct Screen {
     pub w: u32,
     pub h: u32,
@@ -51,5 +62,17 @@ mod tests {
         assert_eq!(s.buf[0], 0);
         let off = Msg::Tile { x: 7, y: 0, w: 2, h: 2, lz4: pack_pixels(&px) };
         assert!(s.apply(&off).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::cursor_rgba;
+    #[test]
+    fn unpremultiply() {
+        // half-transparent premultiplied red (B=0,G=0,R=128,A=128) -> straight R=255
+        assert_eq!(cursor_rgba(&[0, 0, 128, 128]), vec![255, 0, 0, 128]);
+        assert_eq!(cursor_rgba(&[9, 9, 9, 0]), vec![0, 0, 0, 0]);
+        assert_eq!(cursor_rgba(&[1, 2, 3, 255]), vec![3, 2, 1, 255]);
     }
 }

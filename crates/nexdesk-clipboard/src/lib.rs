@@ -10,6 +10,8 @@ mod files;
 pub mod transport;
 #[cfg(unix)]
 mod x11;
+#[cfg(unix)]
+pub use x11::X11Transport;
 
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;

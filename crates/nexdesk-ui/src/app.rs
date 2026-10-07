@@ -103,6 +103,19 @@ pub struct NexDeskApp {
     confirm_wipe: bool,
     /// Network scan for computers with RDP enabled (Devices page).
     scan: Option<nexdesk_core::discover::Scan>,
+
+    // Remote Control (NexDesk peer protocol)
+    remote_addr: Entity<TextInput>,
+    remote_probe: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
+    /// Agent address and the fingerprint the user is asked to trust.
+    remote_trust: Option<(String, String)>,
+    remote_msg: String,
+    agent: Option<nexdesk_peer::control::Agent>,
+    agent_fp: Option<String>,
+    agent_request: Option<String>,
+    share_view_only: bool,
+    share_clipboard: bool,
+    viewers: Vec<std::process::Child>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -210,6 +223,16 @@ impl NexDeskApp {
             save_pw: false,
             confirm_wipe: false,
             scan: None,
+            remote_addr: make_input(cx, "agent address, e.g. 192.168.1.20:21118", ""),
+            remote_probe: None,
+            remote_trust: None,
+            remote_msg: String::new(),
+            agent: None,
+            agent_fp: None,
+            agent_request: None,
+            share_view_only: false,
+            share_clipboard: true,
+            viewers: Vec::new(),
         };
         if vault_exists {
             me.open_vault_dialog(VaultDlg::Unlock, _window, cx);
@@ -395,6 +418,126 @@ impl NexDeskApp {
             }
             Err(e) => Err(e.to_string()),
         }
+    }
+
+
+    // ------------------------------------------------------------------
+    // Remote Control (viewer and agent run as separate processes)
+    // ------------------------------------------------------------------
+
+    /// Collect results of background work; returns true while something is still pending.
+    fn poll_remote(&mut self, cx: &mut Context<Self>) -> bool {
+        use nexdesk_peer::control::AgentEvent;
+        let mut changed = false;
+        if let Some((addr, rx)) = self.remote_probe.as_ref() {
+            match rx.try_recv() {
+                Ok(Ok(fp)) => {
+                    let addr = addr.clone();
+                    let known = nexdesk_peer::store::default_dir()
+                        .map(|d| nexdesk_core::knownhosts::KnownHosts::load(&d.join("known_agents")))
+                        .unwrap_or_else(nexdesk_core::knownhosts::KnownHosts::in_memory);
+                    let (host, port) = addr.rsplit_once(':').map(|(h, p)| (h.to_string(), p.parse().unwrap_or(nexdesk_peer::DEFAULT_PORT))).unwrap_or((addr.clone(), nexdesk_peer::DEFAULT_PORT));
+                    let key = nexdesk_core::knownhosts::host_key(&host, port);
+                    self.remote_probe = None;
+                    if matches!(known.lookup(&key, &fp), nexdesk_core::knownhosts::Lookup::Match) {
+                        self.start_viewer(&addr, None);
+                    } else {
+                        // unknown or changed: the user must compare the fingerprint first
+                        self.remote_trust = Some((addr, fp));
+                    }
+                    changed = true;
+                }
+                Ok(Err(e)) => {
+                    self.remote_msg = format!("Could not reach the agent: {e}");
+                    self.remote_probe = None;
+                    changed = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(_) => {
+                    self.remote_probe = None;
+                    changed = true;
+                }
+            }
+        }
+        let mut exited = false;
+        if let Some(a) = self.agent.as_ref() {
+            while let Ok(ev) = a.events.try_recv() {
+                changed = true;
+                match ev {
+                    AgentEvent::Identity(f) => self.agent_fp = Some(f),
+                    AgentEvent::Request(f) => {
+                        self.agent_request = Some(f);
+                        self.nav.screen = Screen::Remote; // make sure the person sees the question
+                    }
+                    AgentEvent::Exited => exited = true,
+                }
+            }
+        }
+        if exited {
+            self.agent = None;
+            self.agent_request = None;
+            self.agent_fp = None;
+            self.remote_msg = "The sharing agent stopped.".into();
+        }
+        self.viewers.retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_))));
+        if changed {
+            cx.notify();
+        }
+        self.remote_probe.is_some() || self.agent.is_some()
+    }
+
+    fn start_viewer(&mut self, addr: &str, trust: Option<&str>) {
+        match nexdesk_peer::control::launch_viewer(addr, trust, true) {
+            Ok(c) => {
+                self.viewers.push(c);
+                self.remote_msg = format!("Opened a remote control window for {addr}.");
+                nexdesk_core::logs::console(LogLevel::Info, "remote", &format!("viewer started for {addr}"));
+            }
+            Err(e) => self.remote_msg = e,
+        }
+    }
+
+    fn remote_connect(&mut self, cx: &mut Context<Self>) {
+        let raw = self.remote_addr.read(cx).value().trim().to_string();
+        if !nexdesk_peer::control::valid_addr(&raw) {
+            self.remote_msg = "Enter the agent's address, like 192.168.1.20 or pc.lan:21118.".into();
+            return;
+        }
+        let addr = nexdesk_peer::control::with_port(&raw);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let a2 = addr.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(nexdesk_peer::control::probe(&a2));
+        });
+        self.remote_probe = Some((addr, rx));
+        self.remote_msg = "Contacting the agent...".into();
+    }
+
+    fn toggle_agent(&mut self) {
+        if let Some(mut a) = self.agent.take() {
+            a.stop();
+            self.agent_fp = None;
+            self.agent_request = None;
+            self.remote_msg = "Sharing stopped.".into();
+            nexdesk_core::logs::console(LogLevel::Info, "remote", "screen sharing stopped");
+            return;
+        }
+        let listen = format!("0.0.0.0:{}", nexdesk_peer::DEFAULT_PORT);
+        match nexdesk_peer::control::Agent::start(&listen, self.share_view_only, self.share_clipboard) {
+            Ok(a) => {
+                self.agent = Some(a);
+                self.remote_msg = "Sharing started. Every viewer must be approved here first.".into();
+                nexdesk_core::logs::console(LogLevel::Info, "remote", "screen sharing started (consent required per viewer)");
+            }
+            Err(e) => self.remote_msg = e,
+        }
+    }
+
+    fn answer_request(&mut self, yes: bool) {
+        if let Some(a) = self.agent.as_mut() {
+            a.answer(yes);
+        }
+        self.agent_request = None;
     }
 
     fn refresh_logs(&mut self) {
@@ -833,6 +976,9 @@ impl Render for NexDeskApp {
             (Some(v), Some(p)) => v.has(&p.name),
             _ => false,
         };
+        if self.poll_remote(cx) {
+            window.request_animation_frame(); // keep polling the helper processes
+        }
         if self.scan.as_ref().map(|s| !s.is_done()).unwrap_or(false) {
             window.request_animation_frame(); // keep repainting while the scan runs
         }
@@ -845,6 +991,19 @@ impl Render for NexDeskApp {
             Screen::Sessions => session_view(sessions, cx).into_any_element(),
 
             Screen::Devices => devices_view(&self.state.profiles, &self.conn_log, &filter, self.scan.as_ref(), cx).into_any_element(),
+
+            Screen::Remote => remote_view(
+                self.remote_addr.clone(),
+                &self.remote_msg,
+                self.remote_probe.is_some(),
+                self.agent.is_some(),
+                self.agent_fp.clone(),
+                self.share_view_only,
+                self.share_clipboard,
+                self.viewers.len(),
+                cx,
+            )
+            .into_any_element(),
 
             Screen::AddressBooks => books_view(
                 &self.books,
@@ -946,6 +1105,51 @@ impl Render for NexDeskApp {
         }
         if let Some(d) = self.info_dialog {
             main = main.child(info_dialog(d, cx));
+        }
+        if let Some((addr, fp)) = self.remote_trust.clone() {
+            main = main.child(remote_dialog(
+                "Trust this computer?",
+                vec![
+                    format!("First connection to {addr}."),
+                    "Its fingerprint is:".into(),
+                    fp.clone(),
+                    "Compare it with the fingerprint shown on that computer (Remote Control > Share this computer). Only continue if they are identical.".into(),
+                ],
+                "Trust and connect",
+                "Cancel",
+                cx.listener(move |this, _e, _w, cx| {
+                    if let Some((a, f)) = this.remote_trust.take() {
+                        this.start_viewer(&a, Some(&f));
+                    }
+                    cx.notify();
+                }),
+                cx.listener(|this, _e, _w, cx| {
+                    this.remote_trust = None;
+                    this.remote_msg = "Cancelled. Nothing was connected.".into();
+                    cx.notify();
+                }),
+            ));
+        }
+        if let Some(fp) = self.agent_request.clone() {
+            main = main.child(remote_dialog(
+                "Allow remote control?",
+                vec![
+                    "A computer wants to see this screen".to_string() + if self.share_view_only { " (view only)." } else { " and control it." },
+                    "Its fingerprint:".into(),
+                    fp,
+                    "Only allow it if you expect this connection and the fingerprint matches what the other person tells you.".into(),
+                ],
+                "Allow",
+                "Deny",
+                cx.listener(|this, _e, _w, cx| {
+                    this.answer_request(true);
+                    cx.notify();
+                }),
+                cx.listener(|this, _e, _w, cx| {
+                    this.answer_request(false);
+                    cx.notify();
+                }),
+            ));
         }
         if let Some(k) = self.vault_dialog {
             main = main.child(vault_dialog_view(
@@ -1236,6 +1440,7 @@ fn sidebar_view(active: Screen, collapsed: bool, logs_open: bool, cx: &mut Conte
         .overflow_y_scroll()
         .child(sidebar_button("connections", "Connections", collapsed, active == Screen::Connections, Screen::Connections, false, cx))
         .child(sidebar_button("devices", "Devices", collapsed, active == Screen::Devices, Screen::Devices, false, cx))
+        .child(sidebar_button("zap", "Remote Control", collapsed, active == Screen::Remote, Screen::Remote, false, cx))
         .child(sidebar_button("book", "Address Books", collapsed, active == Screen::AddressBooks, Screen::AddressBooks, false, cx))
         .child(sidebar_button("sessions", "Sessions", collapsed, active == Screen::Sessions, Screen::Sessions, false, cx))
         .child(div().h(px(1.)).my_2().mx_2().bg(border()))
@@ -1300,6 +1505,142 @@ fn sidebar_button(
         .on_click(cx.listener(move |this, _event, _window, cx| this.navigate(screen, cx)))
         .child(div().w(px(22.)).flex().justify_center().child(ico(icon, 18., if active { accent_hover() } else { crate::theme::icon() })))
         .when(!collapsed, |d| d.child(div().text_sm().child(label)))
+}
+
+
+// ============================================================================
+// Remote Control
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn remote_view(
+    addr: Entity<TextInput>,
+    msg: &str,
+    probing: bool,
+    sharing: bool,
+    fingerprint: Option<String>,
+    view_only: bool,
+    clipboard: bool,
+    open_windows: usize,
+    cx: &mut Context<NexDeskApp>,
+) -> impl IntoElement {
+    let card = || div().w_full().p_4().rounded(px(12.)).bg(panel()).flex().flex_col().gap_3();
+    let connect = card()
+        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Connect to a NexDesk computer"))
+        .child(div().text_xs().text_color(muted()).child("End-to-end encrypted with a hybrid post-quantum handshake. The first connection asks you to compare a fingerprint."))
+        .child(
+            div()
+                .flex()
+                .gap_3()
+                .items_center()
+                .child(div().flex_1().h(px(34.)).px_3().rounded(px(8.)).bg(panel_2()).flex().items_center().child(addr))
+                .child(toolbar_button_dyn(
+                    "remote-connect".into(),
+                    if probing { "Connecting..." } else { "Connect" },
+                    !probing,
+                    cx.listener(|this, _e, _w, cx| {
+                        this.remote_connect(cx);
+                        cx.notify();
+                    }),
+                )),
+        )
+        .when(open_windows > 0, |d| d.child(div().text_xs().text_color(muted()).child(format!("{open_windows} remote control window(s) open"))));
+
+    let mut share = card()
+        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Share this computer"))
+        .child(div().text_xs().text_color(muted()).child("Lets another NexDesk user see and control this screen (X11 or XWayland). You approve every viewer. Prototype: the cryptography has not been independently reviewed yet."));
+    if let Some(fp) = fingerprint {
+        share = share
+            .child(div().text_xs().text_color(muted()).child("This computer's fingerprint (tell it to the other person so they can compare):"))
+            .child(div().text_sm().child(fp));
+    }
+    share = share.child(
+        div()
+            .flex()
+            .gap_3()
+            .items_center()
+            .child(toolbar_button_dyn(
+                "share-toggle".into(),
+                if sharing { "Stop sharing" } else { "Start sharing" },
+                true,
+                cx.listener(|this, _e, _w, cx| {
+                    this.toggle_agent();
+                    cx.notify();
+                }),
+            ))
+            .child(toolbar_button_dyn(
+                "share-viewonly".into(),
+                if view_only { "View only: on" } else { "View only: off" },
+                !sharing,
+                cx.listener(|this, _e, _w, cx| {
+                    this.share_view_only = !this.share_view_only;
+                    cx.notify();
+                }),
+            ))
+            .child(toolbar_button_dyn(
+                "share-clip".into(),
+                if clipboard { "Clipboard: shared" } else { "Clipboard: private" },
+                !sharing,
+                cx.listener(|this, _e, _w, cx| {
+                    this.share_clipboard = !this.share_clipboard;
+                    cx.notify();
+                }),
+            )),
+    );
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(connect)
+        .child(share)
+        .when(!msg.is_empty(), |d| d.child(div().text_sm().text_color(muted()).child(msg.to_string())))
+}
+
+/// A modal question with two buttons, drawn like the other popups.
+fn remote_dialog(
+    title: &'static str,
+    lines: Vec<String>,
+    yes: &'static str,
+    no: &'static str,
+    on_yes: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    on_no: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let mut body = div().flex().flex_col().gap_2();
+    for l in lines {
+        body = body.child(div().text_sm().child(l));
+    }
+    div()
+        .absolute()
+        .inset_0()
+        .occlude()
+        .bg(scrim())
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .w(px(520.))
+                .p_6()
+                .rounded(px(16.))
+                .bg(popover())
+                .border_1()
+                .border_color(border())
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(title))
+                .child(body)
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_3()
+                        .child(toolbar_button_dyn("rd-no".into(), no, true, on_no))
+                        .child(toolbar_button_dyn("rd-yes".into(), yes, true, on_yes)),
+                ),
+        )
 }
 
 // ============================================================================

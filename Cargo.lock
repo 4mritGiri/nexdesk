@@ -4759,6 +4759,7 @@ name = "nexdesk-peer"
 version = "0.2.0"
 dependencies = [
  "lz4_flex",
+ "nexdesk-clipboard",
  "nexdesk-core",
  "nexdesk-crypto",
  "softbuffer",
@@ -4818,6 +4819,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "nexdesk-core",
+ "nexdesk-peer",
  "nexdesk-session",
 ]
 

@@ -98,7 +98,7 @@ Feasibility column: **Easy** (days, client only) · **Medium** (1–3 weeks) · 
 | Session recording (webm/mp4) | Hard | **Planned P3** | frame tap → `ffmpeg` pipe if installed; opt-in per profile, large privacy warning, never records the password prompt window of the client |
 | Audio, printers, USB | Hard | **Planned P3/P4** | IronRDP `rdpsnd` first |
 | RD Gateway | Hard | **Blocked** | upstream gateway support |
-| NAT hole punching / relay (RustDesk style) | Infra | **Out of scope** | needs a signaling+relay server and a different (non-RDP-listener) agent on the target. Recommended instead: SSH jump host (P2) or WireGuard/Tailscale; revisit only if you want to operate infrastructure |
+| NAT hole punching / relay (native protocol) | Infra | **Out of scope** | needs a signaling+relay server and a different (non-RDP-listener) agent on the target. Recommended instead: SSH jump host (P2) or WireGuard/Tailscale; revisit only if you want to operate infrastructure |
 | VPN control (bring up a NetworkManager VPN before RDP, wait until reachable, optionally bring down after) | Medium | **Planned P2** | `nmcli connection up/down`, polkit (no sudo), credentials stay in NetworkManager/keyring; never falls back to a direct connection if the VPN fails. Vendor-only clients (AnyConnect etc.) via the pre/post command (P1) |
 | VNC and SSH protocols | Hard | **Out of scope for now** | NexDesk is an RDP client; the profile format stays protocol-tagged so it can be added later |
 
@@ -111,42 +111,41 @@ Feasibility column: **Easy** (days, client only) · **Medium** (1–3 weeks) · 
 | `.deb` and Flatpak | **Planned P4** (Flatpak needs portal-based file access, review clipboard staging path) |
 | Signed releases, SBOM, `cargo audit` in CI | **Planned P4** |
 
-## 7. RustDesk-style remote control (own agent + protocol + servers)
-Full analysis, architecture and phases: `docs/RUSTDESK_PARITY.md`. RDP stays the way to reach Windows Pro/Server; this section covers what RDP cannot.
-RustDesk column is from its public documentation and should be re-checked before each item starts.
+## 7. Native remote control (own agent + protocol + servers)
+Architecture and rules: `docs/REMOTE.md`. RDP stays the way to reach Windows Pro/Server; this section covers what RDP cannot.
 
-| Feature | RustDesk | Feasibility | NexDesk | Notes |
-|---|---|---|---|---|
-| Control a Windows PC | yes | Easy | **Done (via RDP)** | |
-| Control Linux X11 host | yes | Hard | **Done (prototype)** | `nexdesk-agent` + `nexdesk-peer-view`, direct IP, tested on Xvfb; XShm/codec/clipboard still to do (`docs/PEER.md`) |
-| Control Linux Wayland host | yes | Hard | **Planned P5b** | xdg-desktop-portal ScreenCast + PipeWire, libei; permission prompt limits unattended use |
-| Control macOS host | yes | Hard | **Planned P5d** | ScreenCaptureKit, CGEvent, permission dialogs |
-| Connect by ID + password, no port forwarding | yes | Infra | **Planned P5c** | rendezvous server |
-| Direct IP access | yes | Medium | **Done (prototype)** | agent listens on a port; default 127.0.0.1:21118 |
-| Self-hosted ID + relay servers | yes | Infra | **Planned P5c** | `nexdesk-hbb`, `nexdesk-relay`, Docker image |
-| NAT hole punching, relay fallback | yes | Hard | **Planned P5c** | |
-| End-to-end encryption, key pinning | yes | Medium | **Planned P5a** | Noise-style handshake, known_hosts-like pins |
-| Unattended access (service, permanent password, allow-list) | yes | Medium | **Planned P5b** | systemd / Windows service |
-| Accept/deny prompt, per-session permissions, view-only | yes | Easy | **Done (prototype)** | terminal prompt, `--allow` list, `--view-only`; per-feature toggles later |
-| Windows login screen / UAC | yes | Hard | **Planned P5d** | SYSTEM service helper |
-| Privacy mode, block remote input | yes | Hard | **Planned P5d** | |
-| Audio | yes | Medium | **Planned P5b** | Opus |
-| File transfer (queue, resume) | yes | Medium | **Planned P5b** | reuse clipfiles sanitising |
-| Clipboard text/images/files | yes | Easy | **Planned P5a** | reuse `nexdesk-clipboard` |
-| Chat | yes | Easy | **Planned P5b** | |
-| TCP tunnelling | yes | Medium | **Planned P5b** | off by default |
-| Multi-monitor, custom resolution | yes | Medium | **Planned P5b** | |
-| Codec / quality / FPS selection, hardware encoders | yes | Hard | **Planned P5a, hardware P5d** | |
-| Session recording | yes | Medium | **Planned P5b** | host consent required |
-| Wake-on-LAN | yes | Easy | **Planned P2** | no new protocol needed |
-| 2FA for incoming connections | yes | Medium | **Planned P5c** | |
-| Address book / tags / groups synced between users | yes (account) | Infra | **Planned P5c** | local books exist today |
-| Android / iOS / web clients | yes | Hard | **Planned P6** | separate effort |
-| Web console, OIDC/LDAP, audit log (Pro) | Pro only | Infra | **Planned P6** | audit log locally is P4 |
-| Plugins | yes | Hard | **Out of scope** | attack surface; revisit later |
-| Interoperate with RustDesk clients/servers | n/a | Hard | **Out of scope** | AGPL and protocol churn; we build our own |
+| Feature | Feasibility | NexDesk | Notes |
+|---|---|---|---|
+| Control a Windows PC | Easy | **Done (via RDP)** | |
+| Control Linux X11 host | Hard | **Done (prototype)** | `nexdesk-agent` + `nexdesk-peer-view`, direct IP, tested on Xvfb; XShm and a video codec still to do (`docs/PEER.md`) |
+| Control Linux Wayland host | Hard | **Planned P5b** | xdg-desktop-portal ScreenCast + PipeWire, libei; permission prompt limits unattended use |
+| Control macOS host | Hard | **Planned P5d** | ScreenCaptureKit, CGEvent, permission dialogs |
+| Connect by ID + password, no port forwarding | Infra | **Planned P5c** | rendezvous server |
+| Direct IP access | Medium | **Done (prototype)** | agent listens on a port; default 127.0.0.1:21118 |
+| Self-hosted ID + relay servers | Infra | **Planned P5c** | `nexdesk-hbb`, `nexdesk-relay`, Docker image |
+| NAT hole punching, relay fallback | Hard | **Planned P5c** | |
+| End-to-end encryption, key pinning | Medium | **Done (prototype, unreviewed)** | Noise-style handshake, known_hosts-like pins |
+| Unattended access (service, permanent password, allow-list) | Medium | **Planned P5b** | systemd / Windows service |
+| Accept/deny prompt, per-session permissions, view-only | Easy | **Done (prototype)** | terminal prompt, `--allow` list, `--view-only`; per-feature toggles later |
+| Windows login screen / UAC | Hard | **Planned P5d** | SYSTEM service helper |
+| Privacy mode, block remote input | Hard | **Planned P5d** | |
+| Audio | Medium | **Planned P5b** | Opus |
+| File transfer (queue, resume) | Medium | **Planned P5b** | reuse clipfiles sanitising |
+| Clipboard text/images/files | Easy | **Text done (P5a prototype)**, images/files planned | text via `nexdesk-clipboard` X11 transport |
+| Chat | Easy | **Planned P5b** | |
+| TCP tunnelling | Medium | **Planned P5b** | off by default |
+| Multi-monitor, custom resolution | Medium | **Planned P5b** | |
+| Codec / quality / FPS selection, hardware encoders | Hard | **Planned P5a, hardware P5d** | |
+| Session recording | Medium | **Planned P5b** | host consent required |
+| Wake-on-LAN | Easy | **Planned P2** | no new protocol needed |
+| 2FA for incoming connections | Medium | **Planned P5c** | |
+| Address book / tags / groups synced between users | Infra | **Planned P5c** | local books exist today |
+| Android / iOS / web clients | Hard | **Planned P6** | separate effort |
+| Web console, OIDC/LDAP, audit log (Pro) | Infra | **Planned P6** | audit log locally is P4 |
+| Plugins | Hard | **Out of scope** | attack surface; revisit later |
+| Interoperate with other remote-desktop products | Hard | **Out of scope** | protocol churn and licence issues; we build our own |
 
-### Security beyond RustDesk (design in `docs/SECURITY_DESIGN.md`)
+### Security design (see `docs/SECURITY_DESIGN.md`)
 | Feature | Feasibility | NexDesk | Notes |
 |---|---|---|---|
 | Hybrid post-quantum key exchange (X25519 + ML-KEM-768) in the NexDesk protocol | Medium | **Done (prototype)** | `nexdesk-crypto`, tested; **needs independent crypto review** and KAT vectors before any real use |

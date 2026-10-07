@@ -4,6 +4,7 @@ use nexdesk_core::logs::Kind;
 pub enum Screen {
     Connections,
     Devices,
+    Remote,
     AddressBooks,
     Sessions,
     Logs(Kind),
@@ -15,6 +16,7 @@ impl Screen {
         match self {
             Screen::Connections => "Connections",
             Screen::Devices => "Devices",
+            Screen::Remote => "Remote Control",
             Screen::AddressBooks => "Address Books",
             Screen::Sessions => "Active Sessions",
             Screen::Logs(Kind::Connection) => "Logs / Connection",
@@ -26,7 +28,7 @@ impl Screen {
     }
 
     pub fn searchable(self) -> bool {
-        !matches!(self, Screen::Sessions | Screen::Settings | Screen::AddressBooks)
+        !matches!(self, Screen::Sessions | Screen::Settings | Screen::AddressBooks | Screen::Remote)
     }
 }
 

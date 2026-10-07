@@ -2,7 +2,7 @@
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nexdesk_crypto::{Identity, IdentityPublic, Responder};
@@ -24,16 +24,44 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 pub struct Policy {
     /// The viewer sees the screen but its input is ignored.
     pub view_only: bool,
+    /// Share text clipboard both ways (ignored for view-only sessions).
+    pub clipboard: bool,
     /// Fingerprints (`SHA256:...`) that are accepted without asking.
     pub allow: Vec<String>,
     /// Asked for every other viewer; `None` means "deny everyone not on the allow list".
     pub prompt: Option<Box<dyn Fn(&IdentityPublic) -> bool + Send + Sync>>,
+    /// A viewer approved a moment ago may reconnect without being asked again for this long
+    /// (its identity is re-verified by the handshake). `Duration::ZERO` always asks.
+    pub reconnect_grace: Duration,
+    recent: Mutex<Option<(String, Instant)>>,
 }
 
 impl Policy {
+    pub fn new(
+        view_only: bool,
+        clipboard: bool,
+        allow: Vec<String>,
+        prompt: Option<Box<dyn Fn(&IdentityPublic) -> bool + Send + Sync>>,
+    ) -> Self {
+        Self { view_only, clipboard, allow, prompt, reconnect_grace: Duration::from_secs(60), recent: Mutex::new(None) }
+    }
+
+    fn remember(&self, fp: &str) {
+        if let Ok(mut r) = self.recent.lock() {
+            *r = Some((fp.to_string(), Instant::now()));
+        }
+    }
+
+    fn recently_approved(&self, fp: &str) -> bool {
+        match self.recent.lock() {
+            Ok(r) => matches!(r.as_ref(), Some((f, t)) if f == fp && t.elapsed() < self.reconnect_grace),
+            Err(_) => false,
+        }
+    }
+
     fn permits(&self, peer: &IdentityPublic) -> bool {
         let fp = peer.fingerprint_string();
-        if self.allow.iter().any(|a| a == &fp) {
+        if self.allow.iter().any(|a| a == &fp) || self.recently_approved(&fp) {
             return true;
         }
         self.prompt.as_ref().map(|p| p(peer)).unwrap_or(false)
@@ -50,6 +78,8 @@ struct Capture {
     w: u16,
     h: u16,
     prev: Vec<u8>,
+    xfixes: bool,
+    cursor_serial: u32,
 }
 
 impl Capture {
@@ -65,7 +95,8 @@ impl Capture {
         if fmt.bits_per_pixel != 32 {
             return Err(cap(format!("unsupported screen format ({} bits per pixel)", fmt.bits_per_pixel)));
         }
-        Ok(Self { root: s.root, w: s.width_in_pixels, h: s.height_in_pixels, prev: Vec::new(), conn })
+        let xfixes = x11rb::protocol::xfixes::query_version(&conn, 5, 0).ok().and_then(|c| c.reply().ok()).is_some();
+        Ok(Self { root: s.root, w: s.width_in_pixels, h: s.height_in_pixels, prev: Vec::new(), xfixes, cursor_serial: 0, conn })
     }
 
     fn grab(&self) -> Result<Vec<u8>, PeerError> {
@@ -79,6 +110,24 @@ impl Capture {
             return Err(cap("unexpected image size"));
         }
         Ok(r.data)
+    }
+
+    /// A new pointer image if it changed since the last call.
+    fn cursor(&mut self) -> Option<Msg> {
+        if !self.xfixes {
+            return None;
+        }
+        let r = x11rb::protocol::xfixes::get_cursor_image(&self.conn).ok()?.reply().ok()?;
+        if r.cursor_serial == self.cursor_serial {
+            return None;
+        }
+        self.cursor_serial = r.cursor_serial;
+        let (w, h) = (r.width, r.height);
+        if w == 0 || h == 0 || w > crate::wire::MAX_CURSOR || h > crate::wire::MAX_CURSOR || r.cursor_image.len() != w as usize * h as usize {
+            return None;
+        }
+        let bytes: Vec<u8> = r.cursor_image.iter().flat_map(|p| p.to_le_bytes()).collect();
+        Some(Msg::Cursor { hot_x: r.xhot.min(w - 1), hot_y: r.yhot.min(h - 1), w, h, lz4: pack_pixels(&bytes) })
     }
 
     fn size_changed(&self) -> bool {
@@ -175,6 +224,7 @@ pub fn serve_connection(stream: TcpStream, id: &Identity, policy: &Policy) -> Re
     let fp = peer.fingerprint_string();
     let result = session_loop(reader, &mut writer, policy);
     writer.shutdown();
+    policy.remember(&fp); // starts the reconnect grace period
     result.map(|_| fp)
 }
 
@@ -187,16 +237,33 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
         }
     };
     let injector = if policy.view_only { None } else { Injector::new().ok() };
-    writer.send(&Msg::Hello { view_only: policy.view_only || injector.is_none(), width: capture.w, height: capture.h })?;
+    let view_only = policy.view_only || injector.is_none();
+    writer.send(&Msg::Hello { view_only, width: capture.w, height: capture.h })?;
 
     let done = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Msg>();
+    let clip = if policy.clipboard && !policy.view_only {
+        match crate::clip::ClipSync::start(tx.clone()) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("clipboard sharing unavailable: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let reader_done = done.clone();
     let input = std::thread::Builder::new().name("agent-input".into()).spawn(move || {
         loop {
             match rd.recv() {
                 Ok(Msg::Ping(n)) => {
                     let _ = tx.send(Msg::Pong(n));
+                }
+                Ok(Msg::Clip(t)) => {
+                    if let Some(c) = &clip {
+                        c.set_remote(t);
+                    }
                 }
                 Ok(m) => {
                     if let Some(inj) = &injector {
@@ -225,14 +292,28 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
             while let Ok(m) = rx.try_recv() {
                 writer.send(&m)?;
             }
-            for m in capture.next_update()? {
-                writer.send(&m)?;
+            if let Some(c) = capture.cursor() {
+                writer.send(&c)?;
+            }
+            match capture.next_update() {
+                Ok(msgs) => {
+                    for m in msgs {
+                        writer.send(&m)?;
+                    }
+                }
+                // a grab that fails right after a size change is not fatal: announce the new size
+                Err(_) if capture.size_changed() => {
+                    capture = Capture::new()?;
+                    writer.send(&Msg::Hello { view_only, width: capture.w, height: capture.h })?;
+                }
+                Err(e) => return Err(e),
             }
             if last_size_check.elapsed() > Duration::from_secs(1) {
                 last_size_check = Instant::now();
                 if capture.size_changed() {
-                    writer.send(&Msg::Bye("the screen size changed, reconnect".into()))?;
-                    break;
+                    // announce the new size; the viewer starts a fresh picture
+                    capture = Capture::new()?;
+                    writer.send(&Msg::Hello { view_only, width: capture.w, height: capture.h })?;
                 }
             }
             if let Some(rest) = FRAME_TIME.checked_sub(t0.elapsed()) {
@@ -267,7 +348,11 @@ pub fn run(listener: TcpListener, id: Arc<Identity>, policy: Arc<Policy>, log: i
                 Ok(fp) => log(&format!("session with {fp} ended")),
                 Err(e) => {
                     log(&format!("connection from {from} failed: {e}"));
-                    std::thread::sleep(Duration::from_millis(500)); // slow down guessing
+                    // free the slot first: a viewer that only checked our fingerprint (probe) may
+                    // reconnect immediately; the pause below only slows this one thread down
+                    busy.store(false, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(500));
+                    return;
                 }
             }
             busy.store(false, Ordering::SeqCst);
@@ -303,6 +388,20 @@ mod tests {
         let mut d = a.clone();
         d[(129 * w + 199) * 4 + 1] = 5;
         assert_eq!(dirty_rects(&a, &d, w, h), vec![(192, 128, 8, 2)]);
+    }
+
+    #[test]
+    fn reconnect_grace_only_covers_the_same_viewer_for_a_short_time() {
+        let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let p = Policy::new(false, true, vec![], None);
+        assert!(!p.permits(a.public()), "nobody is approved at first");
+        p.remember(&a.public().fingerprint_string());
+        assert!(p.permits(a.public()), "same identity right after its session");
+        assert!(!p.permits(b.public()), "another identity is not covered");
+        let mut p = Policy::new(false, true, vec![], None);
+        p.reconnect_grace = Duration::ZERO;
+        p.remember(&a.public().fingerprint_string());
+        assert!(!p.permits(a.public()), "grace 0 always asks");
     }
 
     #[test]

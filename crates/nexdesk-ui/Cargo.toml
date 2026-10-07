@@ -10,3 +10,4 @@ gpui = { git = "https://github.com/zed-industries/zed", branch = "main", package
 gpui_platform = { git = "https://github.com/zed-industries/zed", branch = "main", package = "gpui_platform", features = ["font-kit", "wayland", "x11"] }
 nexdesk-core = { path = "../nexdesk-core" }
 nexdesk-session = { path = "../nexdesk-session" }
+nexdesk-peer = { path = "../nexdesk-peer" }

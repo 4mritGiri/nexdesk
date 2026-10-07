@@ -30,7 +30,7 @@ Drive redirection (RDPDR), multi-monitor, wgpu renderer / HiDPI, download resume
 ## P4 – Enterprise (ongoing)
 Policy file, audit log, Kerberos/SSO, `.deb` + Flatpak, signed releases, smartcard / RD Gateway when upstream lands.
 
-## P5 – RustDesk-style remote control (months; a second product, see `docs/RUSTDESK_PARITY.md`)
+## P5 – NexDesk native remote control (months; a second product, see `docs/REMOTE.md`)
 Own host agent + protocol + rendezvous/relay server so Linux/macOS machines, machines behind NAT and Windows Home can be controlled by ID.
 * **P5a** direct IP, Linux X11 host agent, viewer engine, pinned-key handshake, accept prompt, clipboard, software codec. **Done so far (prototype, `docs/PEER.md`)**: agent + viewer over the hybrid handshake, X11 capture with tile diff + LZ4, mouse/keyboard/wheel via XTEST, consent/allow-list/view-only, pinning, end-to-end test on Xvfb. **Left**: clipboard, cursor shape, resize, reconnect, manager UI entry, encrypted identity store, XShm/video codec.
 * **P5b** Wayland host (portal/PipeWire/libei), Windows host, audio, files, chat, multi-monitor, recording, TCP tunnels, unattended service.
@@ -38,10 +38,10 @@ Own host agent + protocol + rendezvous/relay server so Linux/macOS machines, mac
 * **P5d** Windows login screen/UAC service, privacy mode, hardware codecs, macOS host.
 * **P6** mobile and web clients, enterprise server tier (OIDC/LDAP, web console, audit).
 Security design (hybrid post-quantum handshake X25519+ML-KEM, dual signatures, consent-by-default, audit, supply chain): `docs/SECURITY_DESIGN.md`. The crypto crate (`crates/nexdesk-crypto`, see `docs/CRYPTO.md`) is written first and reviewed before anything else in P5. **Step 1 done (prototype, unreviewed)**: hybrid handshake + record layer + tests.
-Prerequisite decision: licence (permissive vs AGPL) and clean-room rule (do not copy RustDesk code).
+Prerequisite decision: licence (permissive vs AGPL) and the own-code rule (do not copy code from other remote-desktop projects).
 
 ## Explicit non-goals (see matrix for reasons)
-Virtual display driver injection, mounting remote folders in Nautilus, clipboard compression, VNC protocol, interoperating with RustDesk's own servers/clients. (NAT hole-punching and a relay moved into P5c; SSH tunnels for RDP stay in P2.)
+Virtual display driver injection, mounting remote folders in Nautilus, clipboard compression, VNC protocol, interoperating with other remote-desktop products' clients and servers. (NAT hole-punching and a relay moved into P5c; SSH tunnels for RDP stay in P2.)
 
 ## Risks
 * IronRDP features (RDPEGFX, RAIL, gateway, smartcard) are upstream dependencies; we vendor-patch only small hooks.
