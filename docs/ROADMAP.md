@@ -22,7 +22,7 @@ Exit criteria: all unit tests green; manual test pass on Ubuntu X11 and Wayland 
 
 ## P2 – Management and resilience (3–4 weeks)
 Groups/quick connect/tabs, auto-reconnect, SSH tunnel, **VPN control** (NetworkManager profile picker in the connection editor, status "VPN connecting → Connected → RDP", wait-for-reachability, optional bring-down after the session; not urgent), performance profiles (text vs media), colour depth and FPS cap,
-transfers manager with queue and collision dialog, clipboard history, pre-connection baseline check, GUI e2e harness.
+SSH tunnel for RDP (also the post-quantum path for RDP, see `docs/SECURITY_DESIGN.md`), transfers manager with queue and collision dialog, clipboard history, pre-connection baseline check, GUI e2e harness.
 
 ## P3 – Heavy protocol work (6–10 weeks, parts depend on IronRDP)
 Drive redirection (RDPDR), multi-monitor, wgpu renderer / HiDPI, download resume, audio, session recording, PAM/polkit unlock.
@@ -30,8 +30,18 @@ Drive redirection (RDPDR), multi-monitor, wgpu renderer / HiDPI, download resume
 ## P4 – Enterprise (ongoing)
 Policy file, audit log, Kerberos/SSO, `.deb` + Flatpak, signed releases, smartcard / RD Gateway when upstream lands.
 
+## P5 – RustDesk-style remote control (months; a second product, see `docs/RUSTDESK_PARITY.md`)
+Own host agent + protocol + rendezvous/relay server so Linux/macOS machines, machines behind NAT and Windows Home can be controlled by ID.
+* **P5a** direct IP, Linux X11 host agent, viewer engine, pinned-key handshake, accept prompt, clipboard, software codec.
+* **P5b** Wayland host (portal/PipeWire/libei), Windows host, audio, files, chat, multi-monitor, recording, TCP tunnels, unattended service.
+* **P5c** `nexdesk-hbb` rendezvous + relay, IDs, NAT hole punching, 2FA, self-hosting docs, shared address book.
+* **P5d** Windows login screen/UAC service, privacy mode, hardware codecs, macOS host.
+* **P6** mobile and web clients, enterprise server tier (OIDC/LDAP, web console, audit).
+Security design (hybrid post-quantum handshake X25519+ML-KEM, dual signatures, consent-by-default, audit, supply chain): `docs/SECURITY_DESIGN.md`. The crypto crate is written first and reviewed before anything else in P5.
+Prerequisite decision: licence (permissive vs AGPL) and clean-room rule (do not copy RustDesk code).
+
 ## Explicit non-goals (see matrix for reasons)
-Virtual display driver injection, mounting remote folders in Nautilus, NAT hole-punching relay, clipboard compression, VNC/SSH protocols.
+Virtual display driver injection, mounting remote folders in Nautilus, clipboard compression, VNC protocol, interoperating with RustDesk's own servers/clients. (NAT hole-punching and a relay moved into P5c; SSH tunnels for RDP stay in P2.)
 
 ## Risks
 * IronRDP features (RDPEGFX, RAIL, gateway, smartcard) are upstream dependencies; we vendor-patch only small hooks.

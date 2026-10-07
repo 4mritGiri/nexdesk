@@ -1016,6 +1016,54 @@ fn dot(
         .on_click(cx.listener(move |_this, _e, window, _cx| action(window)))
 }
 
+/// The close dot of a popup: it belongs to the popup card (top-left, like a window title bar)
+/// and only dismisses that popup. Popups have no minimise / full-screen dots.
+fn popup_close(
+    id: &'static str,
+    cx: &mut Context<NexDeskApp>,
+    on_close: impl Fn(&mut NexDeskApp, &mut Window, &mut Context<NexDeskApp>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex_none()
+        .size(px(14.))
+        .rounded_full()
+        .bg(dot_close())
+        .cursor_pointer()
+        .opacity(0.92)
+        .hover(|s| s.opacity(1.0))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, _e, w, cx| on_close(this, w, cx)))
+}
+
+/// Title bar of a popup card: close dot, optional icon and title on a darker strip that runs edge to
+/// edge (the card has 24 px padding, so the bar pulls itself out with negative margins).
+fn popup_header(
+    card_w: f32,
+    dot: impl IntoElement,
+    icon: Option<&'static str>,
+    title: impl Into<SharedString>,
+) -> impl IntoElement {
+    div()
+        .w(px(card_w - 2.))
+        .h(px(48.))
+        .flex_none()
+        .mx(px(-24.))
+        .mt(px(-24.))
+        .mb(px(4.))
+        .px_4()
+        .flex()
+        .items_center()
+        .gap_3()
+        .rounded_t(px(15.))
+        .bg(sidebar())
+        .border_b_1()
+        .border_color(border())
+        .child(dot)
+        .when_some(icon, |d, name| d.child(ico(name, 18., accent_hover())))
+        .child(div().text_lg().font_weight(FontWeight::BOLD).child(title.into()))
+}
+
 /// Round-rect icon button used in the header (glyph from the system font).
 fn hbtn(
     id: &'static str,
@@ -2359,6 +2407,7 @@ fn vault_dialog_view(
     div()
         .absolute()
         .inset_0()
+        .occlude() // nothing behind the popup may react to the mouse
         .bg(scrim())
         .flex()
         .items_center()
@@ -2375,7 +2424,21 @@ fn vault_dialog_view(
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(div().flex().items_center().gap_3().child(ico("shield", 22., accent_hover())).child(div().text_xl().font_weight(FontWeight::BOLD).child(title)))
+                .child(popup_header(
+                    520.,
+                    div().when(kind != VaultDlg::ShowRecoveryKey, |d| {
+                        // The recovery key must be acknowledged, so that popup has no close dot.
+                        d.child(popup_close("pc-vault", cx, move |this, w, cx| {
+                            if kind == VaultDlg::UseRecovery && vault_exists {
+                                this.open_vault_dialog(VaultDlg::Unlock, w, cx)
+                            } else {
+                                this.close_vault_dialog(cx)
+                            }
+                        }))
+                    }),
+                    Some("shield"),
+                    title,
+                ))
                 .child(div().text_sm().text_color(muted()).child(blurb))
                 .child(body)
                 .when_some(error, |d, e| d.child(div().text_sm().text_color(danger()).child(e)))
@@ -2462,6 +2525,7 @@ fn menu_popover(cx: &mut Context<NexDeskApp>) -> impl IntoElement {
         .id("menu-backdrop")
         .absolute()
         .inset_0()
+        .occlude()
         .on_click(cx.listener(|this, _e, _w, cx| {
             this.menu_open = false;
             cx.notify();
@@ -2523,6 +2587,7 @@ fn info_dialog(d: InfoDialog, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
     div()
         .absolute()
         .inset_0()
+        .occlude() // nothing behind the popup may react to the mouse
         .bg(scrim())
         .flex()
         .items_center()
@@ -2539,7 +2604,15 @@ fn info_dialog(d: InfoDialog, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(div().text_xl().font_weight(FontWeight::BOLD).child(title))
+                .child(popup_header(
+                    560.,
+                    popup_close("pc-info", cx, |this, _w, cx| {
+                        this.info_dialog = None;
+                        cx.notify();
+                    }),
+                    None,
+                    title,
+                ))
                 .child(body)
                 .child(
                     div().flex().justify_end().child(toolbar_button_dyn(
@@ -2572,6 +2645,7 @@ fn password_dialog(
     div()
         .absolute()
         .inset_0()
+        .occlude() // nothing behind the popup may react to the mouse
         .bg(scrim())
         .flex()
         .items_center()
@@ -2588,12 +2662,12 @@ fn password_dialog(
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(
-                    div()
-                        .text_xl()
-                        .font_weight(FontWeight::BOLD)
-                        .child("Connect"),
-                )
+                .child(popup_header(
+                    440.,
+                    popup_close("pc-password", cx, |this, w, cx| this.cancel_password_dialog(w, cx)),
+                    None,
+                    "Connect",
+                ))
                 .child(
                     div()
                         .text_sm()
@@ -2756,6 +2830,7 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
     div()
         .absolute()
         .inset_0()
+        .occlude() // nothing behind the popup may react to the mouse
         .bg(scrim())
         .flex()
         .items_center()
@@ -2772,7 +2847,12 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(div().text_xl().font_weight(FontWeight::BOLD).child(title))
+                .child(popup_header(
+                    580.,
+                    popup_close("pc-editor", cx, |this, _w, cx| this.cancel_editor(cx)),
+                    None,
+                    title,
+                ))
                 .child(field_row("Computer", ed.host.clone()))
                 .child(field_row("User name", ed.user.clone()))
                 .child(field_row("Domain", ed.domain.clone()))

@@ -110,3 +110,53 @@ Feasibility column: **Easy** (days, client only) · **Medium** (1–3 weeks) · 
 | GUI end-to-end test harness (Xvfb + scripted RDP server) | **Planned P2** |
 | `.deb` and Flatpak | **Planned P4** (Flatpak needs portal-based file access, review clipboard staging path) |
 | Signed releases, SBOM, `cargo audit` in CI | **Planned P4** |
+
+## 7. RustDesk-style remote control (own agent + protocol + servers)
+Full analysis, architecture and phases: `docs/RUSTDESK_PARITY.md`. RDP stays the way to reach Windows Pro/Server; this section covers what RDP cannot.
+RustDesk column is from its public documentation and should be re-checked before each item starts.
+
+| Feature | RustDesk | Feasibility | NexDesk | Notes |
+|---|---|---|---|---|
+| Control a Windows PC | yes | Easy | **Done (via RDP)** | |
+| Control Linux X11 host | yes | Hard | **Planned P5a** | host agent: capture (XShm), encode, XTest injection |
+| Control Linux Wayland host | yes | Hard | **Planned P5b** | xdg-desktop-portal ScreenCast + PipeWire, libei; permission prompt limits unattended use |
+| Control macOS host | yes | Hard | **Planned P5d** | ScreenCaptureKit, CGEvent, permission dialogs |
+| Connect by ID + password, no port forwarding | yes | Infra | **Planned P5c** | rendezvous server |
+| Direct IP access | yes | Medium | **Planned P5a** | first milestone, no server needed |
+| Self-hosted ID + relay servers | yes | Infra | **Planned P5c** | `nexdesk-hbb`, `nexdesk-relay`, Docker image |
+| NAT hole punching, relay fallback | yes | Hard | **Planned P5c** | |
+| End-to-end encryption, key pinning | yes | Medium | **Planned P5a** | Noise-style handshake, known_hosts-like pins |
+| Unattended access (service, permanent password, allow-list) | yes | Medium | **Planned P5b** | systemd / Windows service |
+| Accept/deny prompt, per-session permissions, view-only | yes | Easy | **Planned P5a** | |
+| Windows login screen / UAC | yes | Hard | **Planned P5d** | SYSTEM service helper |
+| Privacy mode, block remote input | yes | Hard | **Planned P5d** | |
+| Audio | yes | Medium | **Planned P5b** | Opus |
+| File transfer (queue, resume) | yes | Medium | **Planned P5b** | reuse clipfiles sanitising |
+| Clipboard text/images/files | yes | Easy | **Planned P5a** | reuse `nexdesk-clipboard` |
+| Chat | yes | Easy | **Planned P5b** | |
+| TCP tunnelling | yes | Medium | **Planned P5b** | off by default |
+| Multi-monitor, custom resolution | yes | Medium | **Planned P5b** | |
+| Codec / quality / FPS selection, hardware encoders | yes | Hard | **Planned P5a, hardware P5d** | |
+| Session recording | yes | Medium | **Planned P5b** | host consent required |
+| Wake-on-LAN | yes | Easy | **Planned P2** | no new protocol needed |
+| 2FA for incoming connections | yes | Medium | **Planned P5c** | |
+| Address book / tags / groups synced between users | yes (account) | Infra | **Planned P5c** | local books exist today |
+| Android / iOS / web clients | yes | Hard | **Planned P6** | separate effort |
+| Web console, OIDC/LDAP, audit log (Pro) | Pro only | Infra | **Planned P6** | audit log locally is P4 |
+| Plugins | yes | Hard | **Out of scope** | attack surface; revisit later |
+| Interoperate with RustDesk clients/servers | n/a | Hard | **Out of scope** | AGPL and protocol churn; we build our own |
+
+### Security beyond RustDesk (design in `docs/SECURITY_DESIGN.md`)
+| Feature | Feasibility | NexDesk | Notes |
+|---|---|---|---|
+| Hybrid post-quantum key exchange (X25519 + ML-KEM-768) in the NexDesk protocol | Medium | **Planned P5a** | first crate of P5; needs independent crypto review |
+| Dual signatures (Ed25519 + ML-DSA-65) on device identity keys | Medium | **Planned P5a** | pinned like known_hosts |
+| 256-bit symmetric encryption, forward secrecy, rekeying | Easy | **Planned P5a** | vault already uses XChaCha20-Poly1305 / Argon2id (**Done**) |
+| Post-quantum protection for RDP sessions | Medium | **Planned P2** | SSH tunnel with hybrid KEX (OpenSSH 9+/10) or WireGuard PSK; RDP/TLS itself is chosen by the server |
+| Quantum key distribution (QKD) | n/a | **Out of scope** | needs dedicated optical hardware |
+| Consent by default, per-session permissions (default-deny) | Easy | **Planned P5a** | |
+| FIDO2/WebAuthn + TOTP + device certificates (mTLS) | Medium | **Planned P5c** | |
+| Signed admin policy enforced in the agent | Medium | **Planned P4/P5c** | |
+| Tamper-evident (hash-chained, signed) audit log + SIEM export | Medium | **Planned P4** | local logs exist today |
+| Signed releases, SBOM, cargo-audit/deny in CI, reproducible builds | Medium | **Planned P4** | |
+| Protocol fuzzing, third-party pentest and crypto review before release | Medium | **Planned P5a-P5c** | release gate |

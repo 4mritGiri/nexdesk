@@ -133,3 +133,6 @@ Devices > *Scan network* probes the local subnet (at most one /24 per network in
 
 ## Connection errors
 Failures now show the underlying cause (refused / timed out / unreachable / sign-in rejected) plus a hint, and the same text goes to Logs > Console.
+
+## Roadmap
+`docs/ROADMAP.md` (phases), `docs/FEATURE_MATRIX.md` (status of every feature) and `docs/RUSTDESK_PARITY.md` (what a RustDesk-style remote-control mode would take).
