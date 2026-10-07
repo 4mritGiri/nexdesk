@@ -40,16 +40,60 @@ impl Direction {
     }
 }
 
+/// Sending half of a session (can be moved to its own thread).
+pub struct Sealer {
+    dir: Direction,
+}
+
+/// Receiving half of a session.
+pub struct Opener {
+    dir: Direction,
+}
+
+impl Sealer {
+    /// Encrypt one record. Output = ciphertext || 16-byte tag.
+    pub fn seal(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, Error> {
+        if plaintext.len() > MAX_RECORD {
+            return Err(Error::TooLarge);
+        }
+        let c = ChaCha20Poly1305::new(Key::from_slice(&*self.dir.key));
+        let out = c
+            .encrypt(&self.dir.nonce(), Payload { msg: plaintext, aad })
+            .map_err(|_| Error::Record)?;
+        self.dir.advance()?;
+        Ok(out)
+    }
+}
+
+impl Opener {
+    /// Decrypt the next record. On failure the session must be dropped.
+    pub fn open(&mut self, record: &[u8], aad: &[u8]) -> Result<Vec<u8>, Error> {
+        if record.len() > MAX_RECORD + 16 {
+            return Err(Error::TooLarge);
+        }
+        let c = ChaCha20Poly1305::new(Key::from_slice(&*self.dir.key));
+        let out = c
+            .decrypt(&self.dir.nonce(), Payload { msg: record, aad })
+            .map_err(|_| Error::Record)?;
+        self.dir.advance()?;
+        Ok(out)
+    }
+}
+
 /// An established, mutually authenticated session. One per connection; not `Clone` on purpose.
 pub struct Session {
-    send: Direction,
-    recv: Direction,
+    send: Sealer,
+    recv: Opener,
     id: [u8; 32],
 }
 
 impl Session {
     pub(crate) fn new(send_key: [u8; 32], recv_key: [u8; 32], id: [u8; 32]) -> Self {
-        Self { send: Direction::new(send_key), recv: Direction::new(recv_key), id }
+        Self {
+            send: Sealer { dir: Direction::new(send_key) },
+            recv: Opener { dir: Direction::new(recv_key) },
+            id,
+        }
     }
 
     /// Value both sides derive identically; bind higher-level authentication (e.g. a one-time code) to it.
@@ -57,36 +101,22 @@ impl Session {
         self.id
     }
 
-    /// Encrypt one record. Output = ciphertext || 16-byte tag.
     pub fn seal(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, Error> {
-        if plaintext.len() > MAX_RECORD {
-            return Err(Error::TooLarge);
-        }
-        let c = ChaCha20Poly1305::new(Key::from_slice(&*self.send.key));
-        let out = c
-            .encrypt(&self.send.nonce(), Payload { msg: plaintext, aad })
-            .map_err(|_| Error::Record)?;
-        self.send.advance()?;
-        Ok(out)
+        self.send.seal(plaintext, aad)
     }
 
-    /// Decrypt the next record. On failure the session must be dropped (the counter is not advanced,
-    /// but a peer that sends garbage is not worth keeping).
     pub fn open(&mut self, record: &[u8], aad: &[u8]) -> Result<Vec<u8>, Error> {
-        if record.len() > MAX_RECORD + 16 {
-            return Err(Error::TooLarge);
-        }
-        let c = ChaCha20Poly1305::new(Key::from_slice(&*self.recv.key));
-        let out = c
-            .decrypt(&self.recv.nonce(), Payload { msg: record, aad })
-            .map_err(|_| Error::Record)?;
-        self.recv.advance()?;
-        Ok(out)
+        self.recv.open(record, aad)
+    }
+
+    /// Split into independent halves so reading and writing can live on different threads.
+    pub fn split(self) -> (Sealer, Opener) {
+        (self.send, self.recv)
     }
 
     #[cfg(test)]
     pub(crate) fn set_counters(&mut self, send: u64, recv: u64) {
-        self.send.counter = send;
-        self.recv.counter = recv;
+        self.send.dir.counter = send;
+        self.recv.dir.counter = recv;
     }
 }

@@ -17,7 +17,7 @@ mod channel;
 mod handshake;
 mod identity;
 
-pub use channel::Session;
+pub use channel::{Opener, Sealer, Session};
 pub use handshake::{Initiator, InitiatorWaiting, Responder, ResponderWaiting};
 pub use identity::{Identity, IdentityPublic};
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build a .deb from already-built release binaries, using only dpkg-deb (no cargo-deb needed).
-#   cargo build --release -p nexdesk -p nexdesk-rdp
+#   cargo build --release -p nexdesk -p nexdesk-rdp -p nexdesk-peer   (peer tools are optional)
 #   packaging/make-deb.sh            ->  dist/nexdesk_<version>_<arch>.deb
 # Env: BIN_DIR (default target/release), OUT_DIR (default dist), DEB_ARCH (default dpkg's arch)
 set -euo pipefail
@@ -15,6 +15,7 @@ done
 ROOT="$(mktemp -d)"; trap 'rm -rf "$ROOT"' EXIT
 install -Dm755 "$BIN_DIR/nexdesk"     "$ROOT/usr/bin/nexdesk"
 install -Dm755 "$BIN_DIR/nexdesk-rdp" "$ROOT/usr/bin/nexdesk-rdp"
+for f in nexdesk-agent nexdesk-peer-view; do [ -x "$BIN_DIR/$f" ] && install -Dm755 "$BIN_DIR/$f" "$ROOT/usr/bin/$f"; done
 install -Dm644 packaging/nexdesk.desktop "$ROOT/usr/share/applications/nexdesk.desktop"
 install -Dm644 packaging/nexdesk.svg "$ROOT/usr/share/icons/hicolor/scalable/apps/nexdesk.svg"
 install -Dm644 README.md "$ROOT/usr/share/doc/nexdesk/README.md"

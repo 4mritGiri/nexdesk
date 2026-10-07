@@ -4441,6 +4441,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+
+[[package]]
 name = "mac-notification-sys"
 version = "0.6.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4746,6 +4752,19 @@ dependencies = [
  "thiserror 1.0.69",
  "x25519-dalek 2.0.1",
  "zeroize",
+]
+
+[[package]]
+name = "nexdesk-peer"
+version = "0.2.0"
+dependencies = [
+ "lz4_flex",
+ "nexdesk-core",
+ "nexdesk-crypto",
+ "softbuffer",
+ "thiserror 1.0.69",
+ "winit",
+ "x11rb",
 ]
 
 [[package]]

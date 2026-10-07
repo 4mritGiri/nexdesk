@@ -1,0 +1,231 @@
+//! Messages inside the encrypted channel. Hand-rolled, big-endian, strictly length-checked.
+use crate::PeerError;
+
+/// Largest screen edge accepted.
+pub const MAX_DIM: u16 = 16384;
+/// Largest raw tile (bytes) accepted: 64 MiB.
+pub const MAX_TILE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Msg {
+    // agent -> viewer
+    /// First message after the handshake.
+    Hello { view_only: bool, width: u16, height: u16 },
+    /// A rectangle of the screen, BGRX pixels compressed with LZ4 (block format, size implied by w*h*4).
+    Tile { x: u16, y: u16, w: u16, h: u16, lz4: Vec<u8> },
+    Bye(String),
+    // viewer -> agent
+    MouseMove { x: u16, y: u16 },
+    /// 1 = left, 2 = middle, 3 = right.
+    MouseButton { button: u8, down: bool },
+    Wheel { dx: i16, dy: i16 },
+    /// Linux evdev key code (KEY_*), the same on every Linux viewer and host.
+    Key { code: u16, down: bool },
+    // both
+    Ping(u64),
+    Pong(u64),
+}
+
+const T_HELLO: u8 = 1;
+const T_TILE: u8 = 2;
+const T_BYE: u8 = 3;
+const T_MOVE: u8 = 0x10;
+const T_BUTTON: u8 = 0x11;
+const T_WHEEL: u8 = 0x12;
+const T_KEY: u8 = 0x13;
+const T_PING: u8 = 0x20;
+const T_PONG: u8 = 0x21;
+
+fn bad(m: &'static str) -> PeerError {
+    PeerError::Proto(m)
+}
+
+impl Msg {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut v = Vec::new();
+        match self {
+            Msg::Hello { view_only, width, height } => {
+                v.push(T_HELLO);
+                v.push(*view_only as u8);
+                v.extend_from_slice(&width.to_be_bytes());
+                v.extend_from_slice(&height.to_be_bytes());
+            }
+            Msg::Tile { x, y, w, h, lz4 } => {
+                v.push(T_TILE);
+                for n in [x, y, w, h] {
+                    v.extend_from_slice(&n.to_be_bytes());
+                }
+                v.extend_from_slice(lz4);
+            }
+            Msg::Bye(s) => {
+                v.push(T_BYE);
+                let b = s.as_bytes();
+                v.extend_from_slice(&b[..b.len().min(200)]);
+            }
+            Msg::MouseMove { x, y } => {
+                v.push(T_MOVE);
+                v.extend_from_slice(&x.to_be_bytes());
+                v.extend_from_slice(&y.to_be_bytes());
+            }
+            Msg::MouseButton { button, down } => v.extend_from_slice(&[T_BUTTON, *button, *down as u8]),
+            Msg::Wheel { dx, dy } => {
+                v.push(T_WHEEL);
+                v.extend_from_slice(&dx.to_be_bytes());
+                v.extend_from_slice(&dy.to_be_bytes());
+            }
+            Msg::Key { code, down } => {
+                v.push(T_KEY);
+                v.extend_from_slice(&code.to_be_bytes());
+                v.push(*down as u8);
+            }
+            Msg::Ping(n) => {
+                v.push(T_PING);
+                v.extend_from_slice(&n.to_be_bytes());
+            }
+            Msg::Pong(n) => {
+                v.push(T_PONG);
+                v.extend_from_slice(&n.to_be_bytes());
+            }
+        }
+        v
+    }
+
+    pub fn decode(b: &[u8]) -> Result<Msg, PeerError> {
+        let (&tag, rest) = b.split_first().ok_or_else(|| bad("empty message"))?;
+        let u16at = |i: usize| -> Result<u16, PeerError> {
+            rest.get(i..i + 2).map(|s| u16::from_be_bytes([s[0], s[1]])).ok_or_else(|| bad("short message"))
+        };
+        let exact = |n: usize| if rest.len() == n { Ok(()) } else { Err(bad("wrong message length")) };
+        let flag = |i: usize| -> Result<bool, PeerError> {
+            match rest.get(i) {
+                Some(0) => Ok(false),
+                Some(1) => Ok(true),
+                _ => Err(bad("bad flag")),
+            }
+        };
+        Ok(match tag {
+            T_HELLO => {
+                exact(5)?;
+                let (width, height) = (u16at(1)?, u16at(3)?);
+                if width == 0 || height == 0 || width > MAX_DIM || height > MAX_DIM {
+                    return Err(bad("bad screen size"));
+                }
+                Msg::Hello { view_only: flag(0)?, width, height }
+            }
+            T_TILE => {
+                if rest.len() < 8 {
+                    return Err(bad("short tile"));
+                }
+                let (x, y, w, h) = (u16at(0)?, u16at(2)?, u16at(4)?, u16at(6)?);
+                if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM {
+                    return Err(bad("bad tile size"));
+                }
+                if (w as usize) * (h as usize) * 4 > MAX_TILE_BYTES {
+                    return Err(bad("tile too large"));
+                }
+                Msg::Tile { x, y, w, h, lz4: rest[8..].to_vec() }
+            }
+            T_BYE => Msg::Bye(String::from_utf8_lossy(rest).chars().filter(|c| !c.is_control()).collect()),
+            T_MOVE => {
+                exact(4)?;
+                Msg::MouseMove { x: u16at(0)?, y: u16at(2)? }
+            }
+            T_BUTTON => {
+                exact(2)?;
+                let button = rest[0];
+                if !(1..=3).contains(&button) {
+                    return Err(bad("bad button"));
+                }
+                Msg::MouseButton { button, down: flag(1)? }
+            }
+            T_WHEEL => {
+                exact(4)?;
+                Msg::Wheel { dx: u16at(0)? as i16, dy: u16at(2)? as i16 }
+            }
+            T_KEY => {
+                exact(3)?;
+                Msg::Key { code: u16at(0)?, down: flag(2)? }
+            }
+            T_PING | T_PONG => {
+                exact(8)?;
+                let mut n = [0u8; 8];
+                n.copy_from_slice(rest);
+                let n = u64::from_be_bytes(n);
+                if tag == T_PING { Msg::Ping(n) } else { Msg::Pong(n) }
+            }
+            _ => return Err(bad("unknown message")),
+        })
+    }
+}
+
+/// Compress BGRX pixels of one tile.
+pub fn pack_pixels(bgrx: &[u8]) -> Vec<u8> {
+    lz4_flex::block::compress(bgrx)
+}
+
+/// Decompress a tile; the result must be exactly `w*h*4` bytes.
+pub fn unpack_pixels(lz4: &[u8], w: u16, h: u16) -> Result<Vec<u8>, PeerError> {
+    let want = w as usize * h as usize * 4;
+    if want > MAX_TILE_BYTES {
+        return Err(bad("tile too large"));
+    }
+    let out = lz4_flex::block::decompress(lz4, want).map_err(|_| bad("corrupt tile"))?;
+    if out.len() != want {
+        return Err(bad("tile size mismatch"));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rt(m: Msg) {
+        assert_eq!(Msg::decode(&m.encode()).unwrap(), m);
+    }
+
+    #[test]
+    fn roundtrip_all() {
+        rt(Msg::Hello { view_only: true, width: 1920, height: 1080 });
+        rt(Msg::Tile { x: 1, y: 2, w: 3, h: 4, lz4: vec![9, 8, 7] });
+        rt(Msg::Bye("denied".into()));
+        rt(Msg::MouseMove { x: 5, y: 6 });
+        rt(Msg::MouseButton { button: 3, down: true });
+        rt(Msg::Wheel { dx: -120, dy: 240 });
+        rt(Msg::Key { code: 30, down: false });
+        rt(Msg::Ping(u64::MAX));
+        rt(Msg::Pong(1));
+    }
+
+    #[test]
+    fn hostile_input_is_rejected_not_trusted() {
+        assert!(Msg::decode(&[]).is_err());
+        assert!(Msg::decode(&[0xEE]).is_err());
+        assert!(Msg::decode(&[T_HELLO, 0, 0, 0, 0, 0]).is_err(), "zero size");
+        assert!(Msg::decode(&[T_HELLO, 2, 7, 128, 4, 56]).is_err(), "flag must be 0/1");
+        assert!(Msg::decode(&[T_MOVE, 0, 1]).is_err(), "short");
+        assert!(Msg::decode(&[T_MOVE, 0, 1, 0, 1, 9]).is_err(), "long");
+        assert!(Msg::decode(&[T_BUTTON, 9, 1]).is_err(), "button range");
+        // 16384 x 16384 x 4 = 1 GiB tile must be refused before any allocation
+        let mut t = vec![T_TILE, 0, 0, 0, 0];
+        t.extend_from_slice(&16384u16.to_be_bytes());
+        t.extend_from_slice(&16384u16.to_be_bytes());
+        assert!(Msg::decode(&t).is_err());
+        let mut t = vec![T_TILE, 0, 0, 0, 0, 0xFF, 0xFF, 0, 1];
+        t.push(0);
+        assert!(Msg::decode(&t).is_err(), "w above MAX_DIM");
+        // control characters in Bye are stripped (it is shown to the user)
+        let m = Msg::decode(&[T_BYE, b'a', 0x1b, b'b', b'\n']).unwrap();
+        assert_eq!(m, Msg::Bye("ab".into()));
+    }
+
+    #[test]
+    fn pixels_roundtrip_and_size_is_enforced() {
+        let px: Vec<u8> = (0..4 * 4 * 4).map(|i| (i % 7) as u8).collect();
+        let z = pack_pixels(&px);
+        assert_eq!(unpack_pixels(&z, 4, 4).unwrap(), px);
+        assert!(unpack_pixels(&z, 4, 5).is_err(), "claimed size larger than data");
+        assert!(unpack_pixels(&z, 2, 2).is_err(), "claimed size smaller than data");
+        assert!(unpack_pixels(&[0xFF; 20], 4, 4).is_err(), "garbage");
+    }
+}

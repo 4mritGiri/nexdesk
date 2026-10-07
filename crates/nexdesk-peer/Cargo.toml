@@ -1,0 +1,23 @@
+[package]
+name = "nexdesk-peer"
+description = "NexDesk remote-control protocol: host agent and viewer (P5a prototype)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nexdesk-agent"
+path = "src/bin/agent.rs"
+
+[[bin]]
+name = "nexdesk-peer-view"
+path = "src/bin/view.rs"
+
+[dependencies]
+nexdesk-crypto = { path = "../nexdesk-crypto" }
+nexdesk-core = { path = "../nexdesk-core" }
+lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }
+thiserror = "1"
+winit = "0.30"
+softbuffer = "0.4"
+x11rb = { version = "0.13", features = ["xtest"] }

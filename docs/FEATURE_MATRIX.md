@@ -118,16 +118,16 @@ RustDesk column is from its public documentation and should be re-checked before
 | Feature | RustDesk | Feasibility | NexDesk | Notes |
 |---|---|---|---|---|
 | Control a Windows PC | yes | Easy | **Done (via RDP)** | |
-| Control Linux X11 host | yes | Hard | **Planned P5a** | host agent: capture (XShm), encode, XTest injection |
+| Control Linux X11 host | yes | Hard | **Done (prototype)** | `nexdesk-agent` + `nexdesk-peer-view`, direct IP, tested on Xvfb; XShm/codec/clipboard still to do (`docs/PEER.md`) |
 | Control Linux Wayland host | yes | Hard | **Planned P5b** | xdg-desktop-portal ScreenCast + PipeWire, libei; permission prompt limits unattended use |
 | Control macOS host | yes | Hard | **Planned P5d** | ScreenCaptureKit, CGEvent, permission dialogs |
 | Connect by ID + password, no port forwarding | yes | Infra | **Planned P5c** | rendezvous server |
-| Direct IP access | yes | Medium | **Planned P5a** | first milestone, no server needed |
+| Direct IP access | yes | Medium | **Done (prototype)** | agent listens on a port; default 127.0.0.1:21118 |
 | Self-hosted ID + relay servers | yes | Infra | **Planned P5c** | `nexdesk-hbb`, `nexdesk-relay`, Docker image |
 | NAT hole punching, relay fallback | yes | Hard | **Planned P5c** | |
 | End-to-end encryption, key pinning | yes | Medium | **Planned P5a** | Noise-style handshake, known_hosts-like pins |
 | Unattended access (service, permanent password, allow-list) | yes | Medium | **Planned P5b** | systemd / Windows service |
-| Accept/deny prompt, per-session permissions, view-only | yes | Easy | **Planned P5a** | |
+| Accept/deny prompt, per-session permissions, view-only | yes | Easy | **Done (prototype)** | terminal prompt, `--allow` list, `--view-only`; per-feature toggles later |
 | Windows login screen / UAC | yes | Hard | **Planned P5d** | SYSTEM service helper |
 | Privacy mode, block remote input | yes | Hard | **Planned P5d** | |
 | Audio | yes | Medium | **Planned P5b** | Opus |
