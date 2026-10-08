@@ -280,9 +280,11 @@ impl App {
         let host = self.toolbar.title.clone();
         let proxy = self.proxy.clone();
         let spawned = std::thread::Builder::new().name("screenshot".into()).spawn(move || {
-            let msg = match crate::shot::save(&buf, w, h, &host) {
-                Ok(p) => format!("Screenshot saved: {}", p.display()),
-                Err(e) => format!("Screenshot failed: {e}"),
+            // Copy to the clipboard only; no file is written.
+            let _ = &host;
+            let msg = match crate::shot::copy(&buf, w, h) {
+                Ok(()) => "Screen copied to clipboard".to_string(),
+                Err(e) => format!("Copy failed: {e}"),
             };
             let _ = proxy.send_event(UserEvent::Toast(msg));
         });
@@ -436,7 +438,7 @@ impl App {
         }
         self.modal = Some(Modal {
             heading: heading.to_owned(),
-            lines: ui::wrap(msg, 90).into_iter().map(|l| (l, ui::FG)).collect(),
+            lines: ui::wrap_words(msg, 70).into_iter().map(|l| (l, ui::FG)).collect(),
             accent: ui::DANGER,
             accept: None,
             reject: "Close".into(),
@@ -621,27 +623,29 @@ impl ApplicationHandler<UserEvent> for App {
                 let changed = info.pinned.is_some();
                 let mut lines: Vec<(String, u32)> = Vec::new();
                 if changed {
-                    lines.push(("The certificate of this computer is DIFFERENT from the one you trusted before.".into(), ui::DANGER));
-                    lines.push(("Someone may be intercepting the connection. Only continue if the server was reinstalled.".into(), ui::DANGER));
+                    lines.push(("This computer's certificate is different from the one you trusted before.".into(), ui::DANGER));
+                    lines.push(("Someone may be intercepting the connection. Continue only if the server was reinstalled.".into(), ui::DANGER));
                 } else {
-                    lines.push(("The identity of the remote computer could not be verified.".into(), ui::WARN));
+                    lines.push(("NexDesk cannot verify who this computer is.".into(), ui::WARN));
                     lines.push(("Connect only if you recognise the fingerprint below.".into(), ui::DIM));
                 }
                 lines.push((String::new(), ui::FG));
-                lines.push((format!("Computer : {}", info.host), ui::FG));
-                lines.push((format!("Subject  : {}", info.subject), ui::FG));
-                lines.push(("Fingerprint:".into(), ui::FG));
-                for l in ui::wrap(&info.fingerprint, 44) {
+                lines.push((format!("Computer:  {}", info.host), ui::FG));
+                lines.push((format!("Subject:  {}", info.subject), ui::FG));
+                lines.push((String::new(), ui::FG));
+                lines.push(("Fingerprint (SHA-256):".into(), ui::DIM));
+                for l in ui::wrap(&info.fingerprint, 48) {
                     lines.push((format!("  {l}"), ui::ACCENT));
                 }
                 if let Some(old) = &info.pinned {
-                    lines.push(("Previously trusted:".into(), ui::FG));
-                    for l in ui::wrap(old, 44) {
+                    lines.push((String::new(), ui::FG));
+                    lines.push(("Previously trusted:".into(), ui::DIM));
+                    for l in ui::wrap(old, 48) {
                         lines.push((format!("  {l}"), ui::DIM));
                     }
                 }
                 self.modal = Some(Modal {
-                    heading: if changed { "SERVER CERTIFICATE CHANGED".into() } else { "Unknown server certificate".into() },
+                    heading: if changed { "Certificate changed".into() } else { "Trust this computer?".into() },
                     lines,
                     accent: if changed { ui::DANGER } else { ui::WARN },
                     accept: Some(if changed { "Trust new certificate".into() } else { "Trust and connect".into() }),
@@ -924,6 +928,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.send_ops(ops);
             }
             _ => {}
+        }
+    }
+
+    /// Give the keyboard back while the window and display still exist. Tearing the
+    /// grab down after winit has closed the display is what crashed on close.
+    fn exiting(&mut self, _el: &ActiveEventLoop) {
+        if let Some(w) = self.window.clone() {
+            self.grab.set(&w, false);
         }
     }
 

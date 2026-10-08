@@ -85,7 +85,7 @@ impl App {
         if !self.view_only {
             l.push((Action::Cad, "Ctrl+Alt+Del".to_string()));
         }
-        l.push((Action::Screenshot, "Shot".to_string()));
+        l.push((Action::Screenshot, "Copy screen".to_string()));
         l
     }
 
@@ -171,9 +171,10 @@ impl App {
 
     fn screenshot(&mut self) {
         let Some(sc) = self.screen.as_ref() else { return };
-        let msg = match nexdesk_peer::shot::save(&sc.buf, sc.w, sc.h, &self.title) {
-            Ok(p) => format!("Saved {}", p.display()),
-            Err(e) => format!("Screenshot failed: {e}"),
+        // Copy to the clipboard only; no file is written.
+        let msg = match nexdesk_peer::shot::copy(&sc.buf, sc.w, sc.h) {
+            Ok(()) => "Screen copied to clipboard".to_string(),
+            Err(e) => format!("Copy failed: {e}"),
         };
         self.say(msg);
     }

@@ -347,8 +347,15 @@ fn main() -> Result<()> {
     );
     event_loop.run_app(&mut app)?;
 
-    match app.failure {
-        Some(msg) => bail!(msg),
-        None => Ok(()),
-    }
+    // Leave without running destructors: the window system, clipboard threads and the
+    // protocol runtime are torn down in an unsafe order otherwise (this used to end in SIGSEGV).
+    let code = match app.failure.take() {
+        Some(msg) => {
+            eprintln!("Error: {msg}");
+            1
+        }
+        None => 0,
+    };
+    std::mem::forget(app);
+    std::process::exit(code);
 }

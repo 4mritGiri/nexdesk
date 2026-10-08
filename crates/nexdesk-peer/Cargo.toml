@@ -24,4 +24,5 @@ winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
 font8x8 = { version = "0.3", default-features = false, features = ["std"] }
 softbuffer = "0.4"
+arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
 x11rb = { version = "0.13", features = ["xtest", "xfixes", "randr", "damage"] }

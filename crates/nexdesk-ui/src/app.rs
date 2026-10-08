@@ -1239,6 +1239,8 @@ impl Render for NexDeskApp {
         div()
             .size_full()
             .relative()
+            // Solid layer under everything, so nothing from the desktop shows through the window.
+            .child(div().absolute().inset_0().bg(bg()).when(rounded, |d| d.rounded(px(12.))))
             .child(main)
             .when(client && !window.is_maximized(), |d| d.children(resize_handles()))
     }

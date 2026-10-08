@@ -23,9 +23,11 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
-# Local patches of two IronRDP crates (see vendor/README.md):
+# Local patches of three IronRDP crates (see vendor/README.md):
 #  * ironrdp-client: lets the embedding app inject a clipboard backend and a TLS verifier
 #  * ironrdp-tls:    adds `upgrade_with_verifier` (stock code accepts every certificate)
+#  * ironrdp-connector: continues when a server skips licensing (stock code fails)
 [patch.crates-io]
 ironrdp-client = { path = "vendor/ironrdp-client" }
 ironrdp-tls = { path = "vendor/ironrdp-tls" }
+ironrdp-connector = { path = "vendor/ironrdp-connector" }

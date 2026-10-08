@@ -28,6 +28,82 @@ fn mix(a: u32, b: u32, t: f32) -> u32 {
     ch(16) << 16 | ch(8) << 8 | ch(0)
 }
 
+
+// ------------------------------------------------------------------ text
+//
+// Anti-aliased TrueType text (fontdue) when a system font is found, else the 8x8 bitmap font.
+// Callers keep passing the old "scale" `k`: the line box is 8*k pixels high and the text is
+// centred in it, so layouts written for the bitmap font still line up.
+mod font {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    pub struct Fonts {
+        pub sans: Option<fontdue::Font>,
+        pub mono: Option<fontdue::Font>,
+    }
+
+    fn load(paths: &[&str]) -> Option<fontdue::Font> {
+        for p in paths {
+            if let Ok(bytes) = std::fs::read(p) {
+                if let Ok(f) = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
+                    return Some(f);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn fonts() -> &'static Fonts {
+        static F: OnceLock<Fonts> = OnceLock::new();
+        F.get_or_init(|| Fonts {
+            sans: load(&[
+                "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            ]),
+            mono: load(&[
+                "/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+                "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+            ]),
+        })
+    }
+
+    /// Pixel size for the old scale factor: k=1 -> 13px (body), k=2 -> 19px (heading).
+    pub fn px(k: i32) -> f32 {
+        6.0 * k.max(1) as f32 + 7.0
+    }
+
+    pub type Glyph = (fontdue::Metrics, Vec<u8>);
+
+    thread_local! {
+        static CACHE: RefCell<HashMap<(bool, char, u32), std::rc::Rc<Glyph>>> = RefCell::new(HashMap::new());
+    }
+
+    pub fn glyph(mono: bool, f: &fontdue::Font, ch: char, px: f32) -> std::rc::Rc<Glyph> {
+        CACHE.with(|c| {
+            c.borrow_mut()
+                .entry((mono, ch, px.to_bits()))
+                .or_insert_with(|| std::rc::Rc::new(f.rasterize(ch, px)))
+                .clone()
+        })
+    }
+
+    pub fn advance(mono: bool, f: &fontdue::Font, ch: char, px: f32) -> f32 {
+        glyph(mono, f, ch, px).0.advance_width
+    }
+}
+
 pub struct Canvas<'a> {
     pub buf: &'a mut [u32],
     pub w: usize,
@@ -110,8 +186,55 @@ impl Canvas<'_> {
         }
     }
 
-    /// Draw ASCII text with the 8x8 font scaled by `k`; returns the drawn width.
+    /// Draw text. `y` is the top of an 8*k pixel line box; returns the drawn width.
     pub fn text(&mut self, x: i32, y: i32, s: &str, k: i32, color: u32) -> i32 {
+        self.text_in(x, y, s, k, color, false)
+    }
+
+    /// Same, in the monospace face (fingerprints).
+    pub fn text_mono(&mut self, x: i32, y: i32, s: &str, k: i32, color: u32) -> i32 {
+        self.text_in(x, y, s, k, color, true)
+    }
+
+    fn text_in(&mut self, x: i32, y: i32, s: &str, k: i32, color: u32, mono: bool) -> i32 {
+        let fonts = font::fonts();
+        let face = if mono { fonts.mono.as_ref().or(fonts.sans.as_ref()) } else { fonts.sans.as_ref() };
+        let Some(f) = face else {
+            return self.text_bitmap(x, y, s, k, color);
+        };
+        let px = font::px(k);
+        let centre = y as f32 + 4.0 * k as f32;
+        let baseline = (centre + px * 0.36).round() as i32;
+        let mut pen = x as f32;
+        for ch in s.chars() {
+            let g = font::glyph(mono, f, ch, px);
+            let (m, bitmap) = (&g.0, &g.1);
+            let gx = pen.round() as i32 + m.xmin;
+            let gy = baseline - m.height as i32 - m.ymin;
+            for row in 0..m.height {
+                let yy = gy + row as i32;
+                if yy < 0 || yy >= self.h as i32 {
+                    continue;
+                }
+                for col in 0..m.width {
+                    let xx = gx + col as i32;
+                    if xx < 0 || xx >= self.w as i32 {
+                        continue;
+                    }
+                    let a = bitmap[row * m.width + col];
+                    if a == 0 {
+                        continue;
+                    }
+                    let i = yy as usize * self.w + xx as usize;
+                    self.buf[i] = if a == 255 { color } else { mix(self.buf[i], color, a as f32 / 255.0) };
+                }
+            }
+            pen += m.advance_width;
+        }
+        (pen - x as f32).round() as i32
+    }
+
+    fn text_bitmap(&mut self, x: i32, y: i32, s: &str, k: i32, color: u32) -> i32 {
         let mut cx = x;
         for ch in s.chars() {
             let idx = if (ch as u32) < 128 { ch as usize } else { b'?' as usize };
@@ -130,17 +253,35 @@ impl Canvas<'_> {
 }
 
 pub fn text_width(s: &str, k: i32) -> i32 {
-    s.chars().count() as i32 * 8 * k
+    width_in(s, k, false)
 }
 
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_owned()
-    } else {
-        let mut t: String = s.chars().take(max_chars.saturating_sub(3)).collect();
-        t.push_str("...");
-        t
+pub fn text_width_mono(s: &str, k: i32) -> i32 {
+    width_in(s, k, true)
+}
+
+fn width_in(s: &str, k: i32, mono: bool) -> i32 {
+    let fonts = font::fonts();
+    let face = if mono { fonts.mono.as_ref().or(fonts.sans.as_ref()) } else { fonts.sans.as_ref() };
+    match face {
+        Some(f) => {
+            let px = font::px(k);
+            s.chars().map(|c| font::advance(mono, f, c, px)).sum::<f32>().ceil() as i32
+        }
+        None => s.chars().count() as i32 * 8 * k,
     }
+}
+
+/// Shorten `s` with "..." so it is at most `max_w` pixels wide.
+fn truncate(s: &str, max_w: i32, k: i32) -> String {
+    if text_width(s, k) <= max_w {
+        return s.to_owned();
+    }
+    let mut t: String = s.to_owned();
+    while !t.is_empty() && text_width(&format!("{t}..."), k) > max_w {
+        t.pop();
+    }
+    format!("{t}...")
 }
 
 // ------------------------------------------------------------------ connection bar
@@ -260,7 +401,7 @@ impl Toolbar {
             BarHit::Restore => "Toggle full screen",
             BarHit::Pin => if self.pinned { "Unpin bar" } else { "Pin bar" },
             BarHit::Cad => "Send Ctrl+Alt+Del",
-            BarHit::Shot => "Save screenshot",
+            BarHit::Shot => "Copy screen to clipboard",
             BarHit::Scale => if self.actual { "Fit to window" } else { "Actual size (1:1)" },
             BarHit::Pause => if self.paused { "Resume" } else { "Pause" },
             BarHit::None | BarHit::Bar => return None,
@@ -332,24 +473,32 @@ impl Toolbar {
                 }
             }
         }
+        // Session tab: sits right after the window buttons, like a browser tab.
         let k = u.max(1);
-        let left = x + 26 * u + 3 * 28 * u - 4 * u;
+        let tab_left = x + 26 * u + 2 * 28 * u + 24 * u;
         let tools_left = buttons
             .iter()
             .filter(|b| matches!(b.0, BarHit::Cad | BarHit::Shot | BarHit::Scale | BarHit::Pause | BarHit::Pin))
             .map(|b| b.1 - b.2)
             .min()
             .unwrap_or(x + w);
-        let right = tools_left - 6 * u;
-        let room = (right - left).max(0);
-        let max_chars = (room / (8 * k)).max(0) as usize;
+        let room = (tools_left - 10 * u - tab_left).max(0);
         let mut label = self.title.clone();
         if self.paused {
-            label = format!("{} (paused)", label);
+            label = format!("{label} (paused)");
         }
-        let title = truncate(&label, max_chars);
-        let tw = text_width(&title, k);
-        c.text(left + (room - tw) / 2, cy - 4 * k, &title, k, if self.paused { WARN } else { FG });
+        let pad = 12 * u;
+        let dot_w = 18 * u;
+        let label = truncate(&label, (room - 2 * pad - dot_w).max(0), k);
+        let tw = text_width(&label, k);
+        let tab_w = (tw + 2 * pad + dot_w).min(room);
+        if tab_w > 2 * pad {
+            let (tab_h, tab_y) = (28 * u, cy - 14 * u);
+            c.rrect(tab_left, tab_y, tab_w, tab_h, 9 * u, 0x00_38_38_38);
+            c.rect(tab_left + 10 * u, tab_y + tab_h - 2 * u, tab_w - 20 * u, 2 * u, if self.paused { WARN } else { ACCENT_HI });
+            c.circle(tab_left + pad + 3 * u, cy, 4 * u, if self.paused { WARN } else { GREEN });
+            c.text(tab_left + pad + dot_w - 2 * u, cy - 4 * k, &label, k, if self.paused { WARN } else { FG });
+        }
 
         // Tooltip under the hovered button.
         if let Some(tip) = self.tip(hover) {
@@ -432,24 +581,39 @@ pub enum ModalHit {
 }
 
 impl Modal {
+    const PAD: i32 = 28;
+    const HEAD: i32 = 52;
+
+    fn is_mono(line: &str) -> bool {
+        line.starts_with("  ") && !line.trim().is_empty()
+    }
+
+    fn line_h(line: &str) -> i32 {
+        if line.is_empty() { 10 } else { 21 }
+    }
+
+    fn line_w(line: &str, u: i32) -> i32 {
+        if Self::is_mono(line) { text_width_mono(line, u.max(1)) } else { text_width(line, u.max(1)) }
+    }
+
     fn geometry(&self, win_w: i32, win_h: i32, u: i32) -> (i32, i32, i32, i32) {
-        let k = 2 * u;
         let widest = self
             .lines
             .iter()
-            .map(|(l, _)| text_width(l, u.max(1) * 1))
-            .chain(std::iter::once(text_width(&self.heading, k)))
+            .map(|(l, _)| Self::line_w(l, u))
+            .chain(std::iter::once(text_width(&self.heading, 2 * u) + 60 * u))
             .max()
             .unwrap_or(0);
-        let w = (widest + 48 * u).max(420 * u).min((win_w - 20).max(1));
-        let h = (70 + 14 * self.lines.len() as i32 + 70) * u;
+        let w = (widest + 2 * Self::PAD * u).max(480 * u).min((win_w - 20).max(1));
+        let body: i32 = self.lines.iter().map(|(l, _)| Self::line_h(l)).sum();
+        let h = (Self::PAD + Self::HEAD + body + 24 + 32 + 20) * u;
         ((win_w - w) / 2, ((win_h - h) / 2).max(0), w, h)
     }
 
     fn button_rects(&self, win_w: i32, win_h: i32, u: i32) -> (Option<(i32, i32, i32, i32)>, (i32, i32, i32, i32)) {
         let (x, y, w, h) = self.geometry(win_w, win_h, u);
-        let (bw, bh) = (170 * u, 32 * u);
-        let by = y + h - bh - 16 * u;
+        let (bw, bh) = (180 * u, 36 * u);
+        let by = y + h - bh - 20 * u;
         let reject = (x + w - bw - 20 * u, by, bw, bh);
         let accept = self.accept.as_ref().map(|_| (x + w - 2 * bw - 32 * u, by, bw, bh));
         (accept, reject)
@@ -476,14 +640,33 @@ impl Modal {
             *p = mix(*p, 0, 0.62);
         }
         let (x, y, w, h) = self.geometry(c.w as i32, c.h as i32, u);
+        // soft shadow, border, card
+        c.rrect(x - 3 * u, y + u, w + 6 * u, h + 5 * u, 19 * u, 0x00_10_10_10);
         c.rrect(x - u, y - u, w + 2 * u, h + 2 * u, 15 * u, EDGE);
         c.rrect(x, y, w, h, 14 * u, BAR);
-        c.text(x + 22 * u, y + 24 * u, &self.heading, 2 * u, if self.accent == DANGER { DANGER } else { FG });
-        for (i, (line, color)) in self.lines.iter().enumerate() {
-            c.text(x + 22 * u, y + (62 + 14 * i as i32) * u, line, u.max(1), *color);
+        // icon badge + heading
+        let danger = self.accent == DANGER;
+        let tone = if danger { DANGER } else if self.accent == WARN { WARN } else { ACCENT_HI };
+        let (ix, iy) = (x + Self::PAD * u + 14 * u, y + Self::PAD * u + 14 * u);
+        c.circle(ix, iy, 14 * u, mix(BAR, tone, 0.22));
+        c.circle(ix, iy, 10 * u, tone);
+        let glyph = if danger || self.accent == WARN { "!" } else { "i" };
+        let gw = text_width(glyph, u.max(1) + 1);
+        c.text(ix - gw / 2, iy - 4 * (u.max(1) + 1), glyph, u.max(1) + 1, 0x00_20_20_20);
+        c.text(x + (Self::PAD + 36) * u, y + Self::PAD * u + 14 * u - 8 * 2 * u / 2, &self.heading, 2 * u, if danger { DANGER } else { FG });
+        // divider
+        c.rect(x + Self::PAD * u, y + (Self::PAD + Self::HEAD - 6) * u, w - 2 * Self::PAD * u, u, EDGE);
+        // body
+        let mut ly = y + (Self::PAD + Self::HEAD + 6) * u;
+        for (line, color) in self.lines.iter() {
+            if Self::is_mono(line) {
+                c.text_mono(x + Self::PAD * u, ly, line.trim_start(), u.max(1), *color);
+            } else {
+                c.text(x + Self::PAD * u, ly, line, u.max(1), *color);
+            }
+            ly += Self::line_h(line) * u;
         }
         let (a, r) = self.button_rects(c.w as i32, c.h as i32, u);
-        let danger = self.accent == DANGER;
         let mut button = |rect: (i32, i32, i32, i32), label: &str, primary: bool, hot: bool| {
             let bg = match (primary, danger, hot) {
                 (true, true, _) => if hot { 0x00_f6_61_51 } else { 0x00_c0_1c_28 },
@@ -492,7 +675,7 @@ impl Modal {
                 (false, _, true) => 0x00_4a_4a_4a,
                 (false, _, false) => 0x00_3a_3a_3a,
             };
-            c.rrect(rect.0, rect.1, rect.2, rect.3, 9 * u, bg);
+            c.rrect(rect.0, rect.1, rect.2, rect.3, 10 * u, bg);
             let tw = text_width(label, u.max(1));
             c.text(rect.0 + (rect.2 - tw) / 2, rect.1 + (rect.3 - 8 * u.max(1)) / 2, label, u.max(1), 0x00_ff_ff_ff);
         };
@@ -508,6 +691,35 @@ pub fn wrap(s: &str, n: usize) -> Vec<String> {
     s.chars().collect::<Vec<_>>().chunks(n.max(1)).map(|c| c.iter().collect()).collect()
 }
 
+/// Word-wrap `s` to about `n` characters per line; keeps explicit line breaks.
+pub fn wrap_words(s: &str, n: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for para in s.split('\n') {
+        if para.trim().is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut line = String::new();
+        for word in para.split_whitespace() {
+            let word: Vec<char> = word.chars().collect();
+            for piece in word.chunks(n.max(1)) {
+                let piece: String = piece.iter().collect();
+                if !line.is_empty() && line.chars().count() + 1 + piece.chars().count() > n {
+                    out.push(std::mem::take(&mut line));
+                }
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(&piece);
+            }
+        }
+        if !line.is_empty() {
+            out.push(line);
+        }
+    }
+    out
+}
+
 // ------------------------------------------------------------------ toast
 
 pub struct Toast {
@@ -517,9 +729,9 @@ pub struct Toast {
 
 impl Toast {
     pub fn draw(&self, c: &mut Canvas, u: i32) {
-        let k = u.max(1) * 2;
+        let k = u.max(1);
         let tw = text_width(&self.text, k);
-        let (w, h) = (tw + 36 * u, 16 * k + 6 * u);
+        let (w, h) = (tw + 40 * u, 8 * k + 20 * u);
         let x = (c.w as i32 - w) / 2;
         let y = c.h as i32 - h - 40 * u;
         c.rrect(x - u, y - u, w + 2 * u, h + 2 * u, h / 2 + u, EDGE);
@@ -531,6 +743,41 @@ impl Toast {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Writes a preview PNG when NEXDESK_PREVIEW_DIR is set (manual look at the overlay).
+    #[test]
+    fn preview_render() {
+        let Ok(dir) = std::env::var("NEXDESK_PREVIEW_DIR") else { return };
+        let (w, h) = (1100usize, 600usize);
+        let mut buf = vec![0x00_30_40_55u32; w * h];
+        let mut c = Canvas { buf: &mut buf, w, h };
+        let mut t = Toolbar::new("Yaman Desktop (192.168.1.149)".into());
+        t.docked = true;
+        t.draw(&mut c, 1, BarHit::None);
+        let m = Modal {
+            heading: "Trust this computer?".into(),
+            lines: vec![
+                ("NexDesk cannot verify who this computer is.".into(), WARN),
+                ("Connect only if you recognise the fingerprint below.".into(), DIM),
+                (String::new(), FG),
+                ("Computer:  192.168.1.149:3389".into(), FG),
+                ("Subject:  CN=YAMAN-PC".into(), FG),
+                (String::new(), FG),
+                ("Fingerprint (SHA-256):".into(), DIM),
+                ("  9F:2A:11:C0:5B:7E:90:AA:34:0D:E2:19:77:C1:B3:08".into(), ACCENT),
+                ("  4E:5A:6B:7C:8D:9E:AF:B0:C1:D2:E3:F4:05:16:27:38".into(), ACCENT),
+            ],
+            accent: WARN,
+            accept: Some("Trust and connect".into()),
+            reject: "Cancel".into(),
+            reply: None,
+        };
+        m.draw(&mut c, 1, ModalHit::None);
+        Toast { text: "Screen copied to clipboard".into(), until: Instant::now() }.draw(&mut c, 1);
+        let mut rgb = Vec::new();
+        for p in &buf { rgb.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]); }
+        image::RgbImage::from_raw(w as u32, h as u32, rgb).unwrap().save(format!("{dir}/preview.png")).unwrap();
+    }
 
     #[test]
     fn toolbar_hit_testing() {

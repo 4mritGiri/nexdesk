@@ -87,6 +87,32 @@ pub fn save(buf: &[u32], w: u32, h: u32, host: &str) -> Result<PathBuf, String> 
     save_in(&dir, buf, w, h, host, &nexdesk_core::logs::format_time(now_ms))
 }
 
+/// Put the picture on the system clipboard as an image. Nothing is written to disk.
+/// The clipboard object is kept for the life of the process: on X11 the data only exists
+/// while we still own the selection.
+pub fn copy(buf: &[u32], w: u32, h: u32) -> Result<(), String> {
+    use std::sync::Mutex;
+    static CLIP: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
+    let n = (w as usize) * (h as usize);
+    if n == 0 || buf.len() < n {
+        return Err("no picture to copy yet".into());
+    }
+    let mut rgba = Vec::with_capacity(n * 4);
+    for p in &buf[..n] {
+        rgba.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8, 255]);
+    }
+    let mut guard = CLIP.lock().map_err(|_| "clipboard busy".to_string())?;
+    if guard.is_none() {
+        *guard = Some(arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?);
+    }
+    guard
+        .as_mut()
+        .map(|cb| cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: rgba.into() }))
+        .transpose()
+        .map_err(|e| format!("cannot copy: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
