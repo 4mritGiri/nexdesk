@@ -181,6 +181,20 @@ fn view_control_and_policy_on_a_real_x_server() {
     w4.shutdown();
 }
 
+/// Remove the monitors the monitor test defines, so tests do not depend on their order.
+fn remove_test_monitors(xc: &impl Connection, root: u32) {
+    use x11rb::protocol::randr::ConnectionExt as _;
+    for name in ["nd-left", "nd-right"] {
+        if let Ok(a) = xc.intern_atom(true, name.as_bytes()).and_then(|c| Ok(c.reply())) {
+            if let Ok(a) = a {
+                if a.atom != 0 {
+                    let _ = xc.randr_delete_monitor(root, a.atom).map(|c| c.check());
+                }
+            }
+        }
+    }
+}
+
 /// Changing the X screen size must not end the session: the agent sends a new Hello.
 #[test]
 fn screen_resize_is_announced_not_fatal() {
@@ -190,6 +204,7 @@ fn screen_resize_is_announced_not_fatal() {
     let _x = X_SERVER.lock().unwrap_or_else(|e| e.into_inner());
     let (xc, n) = x11rb::connect(None).unwrap();
     let root = xc.setup().roots[n].root;
+    remove_test_monitors(&xc, root);
     let v = Identity::generate().unwrap();
     let (addr, agent_pub) = start_agent(Policy::new(false, true, vec![v.public().fingerprint_string()], None));
     let pinned = agent_pub.fingerprint();
@@ -224,4 +239,86 @@ fn screen_resize_is_announced_not_fatal() {
             _ => {}
         }
     }
+}
+
+fn next_msg(reader: &mut nexdesk_peer::Reader, want: &mut dyn FnMut(&Msg) -> bool) -> Msg {
+    let t = Instant::now();
+    loop {
+        assert!(t.elapsed() < Duration::from_secs(8), "expected message never came");
+        let m = reader.recv().unwrap();
+        if want(&m) {
+            return m;
+        }
+    }
+}
+
+/// Two monitors: the viewer is told about both, can switch, and the mouse lands on the chosen one.
+#[test]
+fn monitor_selection_and_idle_screen() {
+    if !have_display() {
+        return;
+    }
+    use x11rb::protocol::randr::{self, ConnectionExt as _, MonitorInfo};
+    let _x = X_SERVER.lock().unwrap_or_else(|e| e.into_inner());
+    let (xc, n) = x11rb::connect(None).unwrap();
+    let root = xc.setup().roots[n].root;
+    let res = xc.randr_get_screen_resources(root).unwrap().reply().unwrap();
+    for crtc in res.crtcs {
+        let info = xc.randr_get_crtc_info(crtc, 0).unwrap().reply().unwrap();
+        if info.mode != 0 {
+            xc.randr_set_crtc_config(crtc, 0, res.config_timestamp, 0, 0, 0u32, randr::Rotation::ROTATE0, &[]).unwrap().reply().unwrap();
+        }
+    }
+    randr::set_screen_size(&xc, root, 1280, 600, 340, 160).unwrap().check().expect("set_screen_size");
+    for (name, x) in [("nd-left", 0i16), ("nd-right", 640i16)] {
+        let atom = xc.intern_atom(false, name.as_bytes()).unwrap().reply().unwrap().atom;
+        let m = MonitorInfo { name: atom, primary: x == 0, automatic: false, x, y: 0, width: 640, height: 600, width_in_millimeters: 170, height_in_millimeters: 160, outputs: vec![] };
+        xc.randr_set_monitor(root, m).unwrap().check().expect("set_monitor");
+    }
+    xc.flush().unwrap();
+
+    let v = Identity::generate().unwrap();
+    let (addr, agent_pub) = start_agent(Policy::new(false, true, vec![v.public().fingerprint_string()], None));
+    let pinned = agent_pub.fingerprint();
+    let (mut reader, mut writer, _) = client::connect(&addr, v, |p| p.fingerprint() == pinned).unwrap();
+    let Msg::Hello { width, height, .. } = next_msg(&mut reader, &mut |m| matches!(m, Msg::Hello { .. })) else { unreachable!() };
+    assert_eq!((width, height), (640, 600), "the first monitor, not the whole screen");
+    let Msg::Monitors { rects, current } = next_msg(&mut reader, &mut |m| matches!(m, Msg::Monitors { .. })) else { unreachable!() };
+    assert_eq!(rects.len(), 2, "{rects:?}");
+    assert_eq!(current, 0);
+
+    // idle screen: after the first full picture no more tiles arrive (XDamage reports nothing)
+    let mut quiet_rounds = 0;
+    for round in 0..40u64 {
+        writer.send(&Msg::Ping(1000 + round)).unwrap();
+        let mut tiles = 0;
+        loop {
+            match reader.recv().unwrap() {
+                Msg::Pong(n) if n == 1000 + round => break,
+                Msg::Tile { .. } => tiles += 1,
+                _ => {}
+            }
+        }
+        quiet_rounds = if tiles == 0 { quiet_rounds + 1 } else { 0 };
+        if quiet_rounds >= 3 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    assert!(quiet_rounds >= 3, "an idle screen must stop producing tiles");
+
+    writer.send(&Msg::SelectMonitor(1)).unwrap();
+    let Msg::Hello { width, height, .. } = next_msg(&mut reader, &mut |m| matches!(m, Msg::Hello { .. })) else { unreachable!() };
+    assert_eq!((width, height), (640, 600));
+    let Msg::Monitors { current, rects } = next_msg(&mut reader, &mut |m| matches!(m, Msg::Monitors { .. })) else { unreachable!() };
+    assert_eq!(current, 1);
+    let second = rects[1];
+    writer.send(&Msg::MouseMove { x: 10, y: 20 }).unwrap();
+    assert!(wait_for(|| pointer(&xc, root) == (second.x + 10, second.y + 20)), "pointer must land on the chosen monitor: {:?} vs {second:?}", pointer(&xc, root));
+    // an out of range index is clamped, not an error
+    writer.send(&Msg::SelectMonitor(200)).unwrap();
+    writer.send(&Msg::Ping(9)).unwrap();
+    next_msg(&mut reader, &mut |m| *m == Msg::Pong(9));
+    writer.shutdown();
+    remove_test_monitors(&xc, root);
 }

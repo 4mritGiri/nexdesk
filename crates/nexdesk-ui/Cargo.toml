@@ -11,3 +11,4 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", branch = "main"
 nexdesk-core = { path = "../nexdesk-core" }
 nexdesk-session = { path = "../nexdesk-session" }
 nexdesk-peer = { path = "../nexdesk-peer" }
+nexdesk-network = { path = "../nexdesk-network" }

@@ -9,6 +9,7 @@ members = [
     "crates/nexdesk-clipboard",
     "crates/nexdesk-crypto",
     "crates/nexdesk-peer",
+    "crates/nexdesk-network",
     "crates/nexdesk",
 ]
 

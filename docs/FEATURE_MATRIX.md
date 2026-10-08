@@ -120,9 +120,9 @@ Architecture and rules: `docs/REMOTE.md`. RDP stays the way to reach Windows Pro
 | Control Linux X11 host | Hard | **Done (prototype)** | `nexdesk-agent` + `nexdesk-peer-view`, direct IP, tested on Xvfb; XShm and a video codec still to do (`docs/PEER.md`) |
 | Control Linux Wayland host | Hard | **Planned P5b** | xdg-desktop-portal ScreenCast + PipeWire, libei; permission prompt limits unattended use |
 | Control macOS host | Hard | **Planned P5d** | ScreenCaptureKit, CGEvent, permission dialogs |
-| Connect by ID + password, no port forwarding | Infra | **Planned P5c** | rendezvous server |
+| Connect by ID, no port forwarding | Infra | **Done (prototype, relay only)** | `nexdesk-relay`, `docs/RELAY.md`; hole punching, relay auth and failover still to do |
 | Direct IP access | Medium | **Done (prototype)** | agent listens on a port; default 127.0.0.1:21118 |
-| Self-hosted ID + relay servers | Infra | **Planned P5c** | `nexdesk-hbb`, `nexdesk-relay`, Docker image |
+| Self-hosted ID + relay servers | Infra | **Done (prototype)**, Docker image and hardening planned | `nexdesk-relay` |
 | NAT hole punching, relay fallback | Hard | **Planned P5c** | |
 | End-to-end encryption, key pinning | Medium | **Done (prototype, unreviewed)** | Noise-style handshake, known_hosts-like pins |
 | Unattended access (service, permanent password, allow-list) | Medium | **Planned P5b** | systemd / Windows service |
@@ -134,7 +134,7 @@ Architecture and rules: `docs/REMOTE.md`. RDP stays the way to reach Windows Pro
 | Clipboard text/images/files | Easy | **Text done (P5a prototype)**, images/files planned | text via `nexdesk-clipboard` X11 transport |
 | Chat | Easy | **Planned P5b** | |
 | TCP tunnelling | Medium | **Planned P5b** | off by default |
-| Multi-monitor, custom resolution | Medium | **Planned P5b** | |
+| Multi-monitor, custom resolution | Medium | **Monitor switching done (prototype)**, custom resolution planned | RandR monitor list, one monitor shown at a time |
 | Codec / quality / FPS selection, hardware encoders | Hard | **Planned P5a, hardware P5d** | |
 | Session recording | Medium | **Planned P5b** | host consent required |
 | Wake-on-LAN | Easy | **Planned P2** | no new protocol needed |

@@ -4755,13 +4755,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexdesk-network"
+version = "0.2.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "nexdesk-peer"
 version = "0.2.0"
 dependencies = [
+ "font8x8",
+ "image",
  "lz4_flex",
  "nexdesk-clipboard",
  "nexdesk-core",
  "nexdesk-crypto",
+ "nexdesk-network",
  "softbuffer",
  "thiserror 1.0.69",
  "winit",
@@ -4819,6 +4830,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "nexdesk-core",
+ "nexdesk-network",
  "nexdesk-peer",
  "nexdesk-session",
 ]

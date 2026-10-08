@@ -39,11 +39,15 @@ pub fn with_port(addr: &str) -> String {
 }
 
 /// Connect once to learn the agent's fingerprint. Blocking: call it from a thread.
-pub fn probe(addr: &str) -> Result<String, String> {
-    if !valid_addr(addr) {
+pub fn probe(addr: &str, relay: Option<&str>) -> Result<String, String> {
+    if !valid_addr(addr) || relay.map(|r| !valid_addr(r)).unwrap_or(false) {
         return Err("that is not a valid address".into());
     }
-    let out = Command::new(bin("nexdesk-peer-view"))
+    let mut cmd = Command::new(bin("nexdesk-peer-view"));
+    if let Some(r) = relay {
+        cmd.args(["--relay", r]);
+    }
+    let out = cmd
         .args(["--probe", addr])
         .stdin(Stdio::null())
         .output()
@@ -60,11 +64,14 @@ pub fn probe(addr: &str) -> Result<String, String> {
 }
 
 /// Open a viewer window. `trust` pins the agent if (and only if) its fingerprint is exactly this.
-pub fn launch_viewer(addr: &str, trust: Option<&str>, clipboard: bool) -> Result<Child, String> {
-    if !valid_addr(addr) || trust.map(|t| !valid_fingerprint(t)).unwrap_or(false) {
+pub fn launch_viewer(addr: &str, relay: Option<&str>, trust: Option<&str>, clipboard: bool) -> Result<Child, String> {
+    if !valid_addr(addr) || trust.map(|t| !valid_fingerprint(t)).unwrap_or(false) || relay.map(|r| !valid_addr(r)).unwrap_or(false) {
         return Err("invalid address or fingerprint".into());
     }
     let mut c = Command::new(bin("nexdesk-peer-view"));
+    if let Some(r) = relay {
+        c.args(["--relay", r]);
+    }
     c.arg(addr);
     if let Some(t) = trust {
         c.args(["--trust", t]);
@@ -79,6 +86,10 @@ pub fn launch_viewer(addr: &str, trust: Option<&str>, clipboard: bool) -> Result
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
     Identity(String),
+    /// This computer's relay ID (nine digits).
+    Id(String),
+    /// Relay registration status text, for display only.
+    Relay(String),
     /// A viewer asks to connect; answer with `Agent::answer`.
     Request(String),
     Exited,
@@ -92,12 +103,15 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn start(listen: &str, view_only: bool, clipboard: bool) -> Result<Self, String> {
-        if !valid_addr(listen) {
-            return Err("invalid listen address".into());
+    pub fn start(listen: &str, relay: Option<&str>, view_only: bool, clipboard: bool) -> Result<Self, String> {
+        if !valid_addr(listen) || relay.map(|r| !valid_addr(r)).unwrap_or(false) {
+            return Err("invalid listen or relay address".into());
         }
         let mut c = Command::new(bin("nexdesk-agent"));
         c.args(["--listen", listen, "--stdio-control"]);
+        if let Some(r) = relay {
+            c.args(["--relay", r]);
+        }
         if view_only {
             c.arg("--view-only");
         }
@@ -117,6 +131,8 @@ impl Agent {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 let ev = match line.split_once(' ') {
                     Some(("IDENTITY", f)) if valid_fingerprint(f.trim()) => AgentEvent::Identity(f.trim().into()),
+                    Some(("ID", i)) if nexdesk_network::proto::valid_id(i.trim()) => AgentEvent::Id(i.trim().into()),
+                    Some(("RELAY", t)) => AgentEvent::Relay(t.chars().filter(|c| !c.is_control()).take(120).collect()),
                     Some(("REQUEST", f)) if valid_fingerprint(f.trim()) => AgentEvent::Request(f.trim().into()),
                     _ => continue,
                 };

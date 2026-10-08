@@ -12,7 +12,7 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::inject::Injector;
 use crate::link::{read_frame, write_frame, Reader, Writer, MAX_PRE_AUTH};
-use crate::wire::{pack_pixels, Msg};
+use crate::wire::{pack_pixels, Msg, Rect, MAX_MONITORS};
 use crate::PeerError;
 
 const TILE: usize = 64;
@@ -75,15 +75,48 @@ fn cap(e: impl std::fmt::Display) -> PeerError {
 struct Capture {
     conn: RustConnection,
     root: u32,
+    /// The shared area (one monitor, or the whole screen) in root coordinates.
+    ox: i16,
+    oy: i16,
     w: u16,
     h: u16,
+    /// Whole X screen size and monitor list when this capture was set up.
+    root_size: (u16, u16),
+    monitors: Vec<Rect>,
+    selected: usize,
     prev: Vec<u8>,
     xfixes: bool,
     cursor_serial: u32,
+    damage: Option<u32>,
+    last_grab: Instant,
+}
+
+/// Monitors from RandR; the whole screen when RandR is missing or lists nothing usable.
+fn list_monitors(conn: &RustConnection, root: u32, root_w: u16, root_h: u16) -> Vec<Rect> {
+    use x11rb::protocol::randr::ConnectionExt as _;
+    let mut out: Vec<Rect> = conn
+        .randr_get_monitors(root, true)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .map(|r| {
+            r.monitors
+                .iter()
+                .filter(|m| m.width > 0 && m.height > 0)
+                .map(|m| Rect { x: m.x, y: m.y, w: m.width, h: m.height })
+                // keep only monitors inside the screen, so a grab can never fail on bounds
+                .filter(|m| m.x >= 0 && m.y >= 0 && m.x as u32 + m.w as u32 <= root_w as u32 && m.y as u32 + m.h as u32 <= root_h as u32)
+                .collect()
+        })
+        .unwrap_or_default();
+    out.truncate(MAX_MONITORS);
+    if out.is_empty() {
+        out.push(Rect { x: 0, y: 0, w: root_w, h: root_h });
+    }
+    out
 }
 
 impl Capture {
-    fn new() -> Result<Self, PeerError> {
+    fn new(selected: usize) -> Result<Self, PeerError> {
         let (conn, n) = x11rb::connect(None).map_err(cap)?;
         let setup = conn.setup();
         let s = &setup.roots[n];
@@ -95,14 +128,42 @@ impl Capture {
         if fmt.bits_per_pixel != 32 {
             return Err(cap(format!("unsupported screen format ({} bits per pixel)", fmt.bits_per_pixel)));
         }
+        let root = s.root;
+        let (root_w, root_h) = (s.width_in_pixels, s.height_in_pixels);
         let xfixes = x11rb::protocol::xfixes::query_version(&conn, 5, 0).ok().and_then(|c| c.reply().ok()).is_some();
-        Ok(Self { root: s.root, w: s.width_in_pixels, h: s.height_in_pixels, prev: Vec::new(), xfixes, cursor_serial: 0, conn })
+        let monitors = list_monitors(&conn, root, root_w, root_h);
+        let selected = selected.min(monitors.len() - 1);
+        let m = monitors[selected];
+        // XDamage tells us when anything on screen changed, so an idle screen costs nothing
+        let damage = (|| {
+            use x11rb::protocol::damage::{ConnectionExt as _, ReportLevel};
+            conn.damage_query_version(1, 1).ok()?.reply().ok()?;
+            let id = conn.generate_id().ok()?;
+            conn.damage_create(id, root, ReportLevel::NON_EMPTY).ok()?.check().ok()?;
+            Some(id)
+        })();
+        Ok(Self {
+            conn,
+            root,
+            ox: m.x,
+            oy: m.y,
+            w: m.w,
+            h: m.h,
+            root_size: (root_w, root_h),
+            monitors,
+            selected,
+            prev: Vec::new(),
+            xfixes,
+            cursor_serial: 0,
+            damage,
+            last_grab: Instant::now(),
+        })
     }
 
     fn grab(&self) -> Result<Vec<u8>, PeerError> {
         let r = self
             .conn
-            .get_image(ImageFormat::Z_PIXMAP, self.root, 0, 0, self.w, self.h, !0)
+            .get_image(ImageFormat::Z_PIXMAP, self.root, self.ox, self.oy, self.w, self.h, !0)
             .map_err(cap)?
             .reply()
             .map_err(cap)?;
@@ -130,15 +191,47 @@ impl Capture {
         Some(Msg::Cursor { hot_x: r.xhot.min(w - 1), hot_y: r.yhot.min(h - 1), w, h, lz4: pack_pixels(&bytes) })
     }
 
-    fn size_changed(&self) -> bool {
+    /// The screen size or the monitor layout is not what we set up with.
+    fn layout_changed(&self) -> bool {
         match self.conn.get_geometry(self.root).ok().and_then(|c| c.reply().ok()) {
-            Some(g) => g.width != self.w || g.height != self.h,
+            Some(g) => (g.width, g.height) != self.root_size || list_monitors(&self.conn, self.root, g.width, g.height) != self.monitors,
             None => false,
         }
     }
 
+    /// Messages that tell the viewer what it is looking at.
+    fn announce(&self, view_only: bool) -> [Msg; 2] {
+        [
+            Msg::Hello { view_only, width: self.w, height: self.h },
+            Msg::Monitors { current: self.selected as u8, rects: self.monitors.clone() },
+        ]
+    }
+
+    /// True when something on the screen changed since the last grab (always true without XDamage,
+    /// and at least once a second as a safety net).
+    fn needs_grab(&mut self) -> bool {
+        let Some(d) = self.damage else { return true };
+        let mut dirty = self.prev.is_empty() || self.last_grab.elapsed() >= Duration::from_secs(1);
+        while let Ok(Some(ev)) = self.conn.poll_for_event() {
+            if matches!(ev, x11rb::protocol::Event::DamageNotify(_)) {
+                dirty = true;
+            }
+        }
+        if dirty {
+            use x11rb::protocol::damage::ConnectionExt as _;
+            // re-arm: the next change produces a new notification
+            let _ = self.conn.damage_subtract(d, 0u32, 0u32);
+            let _ = self.conn.flush();
+        }
+        dirty
+    }
+
     /// Tiles that changed since the last call, merged per tile row, as ready-to-send messages.
     fn next_update(&mut self) -> Result<Vec<Msg>, PeerError> {
+        if !self.needs_grab() {
+            return Ok(Vec::new());
+        }
+        self.last_grab = Instant::now();
         let cur = self.grab()?;
         let rects = dirty_rects(&self.prev, &cur, self.w as usize, self.h as usize);
         let msgs = rects
@@ -229,16 +322,19 @@ pub fn serve_connection(stream: TcpStream, id: &Identity, policy: &Policy) -> Re
 }
 
 fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<(), PeerError> {
-    let mut capture = match Capture::new() {
+    let mut capture = match Capture::new(0) {
         Ok(c) => c,
         Err(e) => {
             let _ = writer.send(&Msg::Bye("the agent cannot capture its screen".into()));
             return Err(e);
         }
     };
-    let injector = if policy.view_only { None } else { Injector::new().ok() };
+    let injector: Arc<Option<Injector>> = Arc::new(if policy.view_only { None } else { Injector::new().ok() });
+    let injector_input = injector.clone();
     let view_only = policy.view_only || injector.is_none();
-    writer.send(&Msg::Hello { view_only, width: capture.w, height: capture.h })?;
+    for m in capture.announce(view_only) {
+        writer.send(&m)?;
+    }
 
     let done = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Msg>();
@@ -260,13 +356,16 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
                 Ok(Msg::Ping(n)) => {
                     let _ = tx.send(Msg::Pong(n));
                 }
+                Ok(Msg::SelectMonitor(i)) => {
+                    let _ = tx.send(Msg::SelectMonitor(i)); // handled by the capture loop
+                }
                 Ok(Msg::Clip(t)) => {
                     if let Some(c) = &clip {
                         c.set_remote(t);
                     }
                 }
                 Ok(m) => {
-                    if let Some(inj) = &injector {
+                    if let Some(inj) = &*injector_input {
                         let _ = match m {
                             Msg::MouseMove { x, y } => inj.move_to(x, y),
                             Msg::MouseButton { button, down } => inj.button(button, down),
@@ -290,7 +389,21 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
         while !done.load(Ordering::Relaxed) {
             let t0 = Instant::now();
             while let Ok(m) = rx.try_recv() {
-                writer.send(&m)?;
+                match m {
+                    Msg::SelectMonitor(i) => {
+                        let i = usize::from(i).min(capture.monitors.len() - 1);
+                        if i != capture.selected {
+                            capture = Capture::new(i)?;
+                            if let Some(inj) = &*injector {
+                                inj.set_region(capture.ox, capture.oy, capture.w, capture.h);
+                            }
+                            for m in capture.announce(view_only) {
+                                writer.send(&m)?;
+                            }
+                        }
+                    }
+                    m => writer.send(&m)?,
+                }
             }
             if let Some(c) = capture.cursor() {
                 writer.send(&c)?;
@@ -302,18 +415,28 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
                     }
                 }
                 // a grab that fails right after a size change is not fatal: announce the new size
-                Err(_) if capture.size_changed() => {
-                    capture = Capture::new()?;
-                    writer.send(&Msg::Hello { view_only, width: capture.w, height: capture.h })?;
+                Err(_) if capture.layout_changed() => {
+                    capture = Capture::new(capture.selected)?;
+                    if let Some(inj) = &*injector {
+                        inj.set_region(capture.ox, capture.oy, capture.w, capture.h);
+                    }
+                    for m in capture.announce(view_only) {
+                        writer.send(&m)?;
+                    }
                 }
                 Err(e) => return Err(e),
             }
             if last_size_check.elapsed() > Duration::from_secs(1) {
                 last_size_check = Instant::now();
-                if capture.size_changed() {
-                    // announce the new size; the viewer starts a fresh picture
-                    capture = Capture::new()?;
-                    writer.send(&Msg::Hello { view_only, width: capture.w, height: capture.h })?;
+                if capture.layout_changed() {
+                    // announce the new size or monitors; the viewer starts a fresh picture
+                    capture = Capture::new(capture.selected)?;
+                    if let Some(inj) = &*injector {
+                        inj.set_region(capture.ox, capture.oy, capture.w, capture.h);
+                    }
+                    for m in capture.announce(view_only) {
+                        writer.send(&m)?;
+                    }
                 }
             }
             if let Some(rest) = FRAME_TIME.checked_sub(t0.elapsed()) {
@@ -334,30 +457,41 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
 /// Accept loop: one viewer at a time, others are dropped immediately.
 pub fn run(listener: TcpListener, id: Arc<Identity>, policy: Arc<Policy>, log: impl Fn(&str) + Send + Sync + 'static) {
     let busy = Arc::new(AtomicBool::new(false));
-    let log = Arc::new(log);
+    run_shared(listener, id, policy, Arc::new(log), busy);
+}
+
+pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Like [`run`], with the "a session is running" flag shared with other ways in (the relay).
+pub fn run_shared(listener: TcpListener, id: Arc<Identity>, policy: Arc<Policy>, log: Log, busy: Arc<AtomicBool>) {
     for stream in listener.incoming().flatten() {
-        let from = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-        if busy.swap(true, Ordering::SeqCst) {
-            log(&format!("refused {from}: a session is already running"));
-            continue;
-        }
-        let (id, policy, busy, log) = (id.clone(), policy.clone(), busy.clone(), log.clone());
-        std::thread::spawn(move || {
-            log(&format!("connection from {from}"));
-            match serve_connection(stream, &id, &policy) {
-                Ok(fp) => log(&format!("session with {fp} ended")),
-                Err(e) => {
-                    log(&format!("connection from {from} failed: {e}"));
-                    // free the slot first: a viewer that only checked our fingerprint (probe) may
-                    // reconnect immediately; the pause below only slows this one thread down
-                    busy.store(false, Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(500));
-                    return;
-                }
-            }
-            busy.store(false, Ordering::SeqCst);
-        });
+        handle_stream(stream, &id, &policy, &busy, &log);
     }
+}
+
+/// Serve one incoming connection (direct or through the relay) on its own thread, unless a session is running.
+pub fn handle_stream(stream: TcpStream, id: &Arc<Identity>, policy: &Arc<Policy>, busy: &Arc<AtomicBool>, log: &Log) {
+    let from = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+    if busy.swap(true, Ordering::SeqCst) {
+        log(&format!("refused {from}: a session is already running"));
+        return;
+    }
+    let (id, policy, busy, log) = (id.clone(), policy.clone(), busy.clone(), log.clone());
+    std::thread::spawn(move || {
+        log(&format!("connection from {from}"));
+        match serve_connection(stream, &id, &policy) {
+            Ok(fp) => log(&format!("session with {fp} ended")),
+            Err(e) => {
+                log(&format!("connection from {from} failed: {e}"));
+                // free the slot first: a viewer that only checked our fingerprint (probe) may
+                // reconnect immediately; the pause below only slows this one thread down
+                busy.store(false, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(500));
+                return;
+            }
+        }
+        busy.store(false, Ordering::SeqCst);
+    });
 }
 
 #[cfg(test)]

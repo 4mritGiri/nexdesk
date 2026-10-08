@@ -112,9 +112,16 @@ pub struct NexDeskApp {
     remote_msg: String,
     agent: Option<nexdesk_peer::control::Agent>,
     agent_fp: Option<String>,
+    relay_input: Entity<TextInput>,
+    agent_id: Option<String>,
+    relay_status: String,
+    /// Relay used by the connection attempt in progress (ID connections only).
+    pending_relay: Option<String>,
     agent_request: Option<String>,
     share_view_only: bool,
     share_clipboard: bool,
+    /// Show the relay server and sharing options on the Remote Control page.
+    remote_adv: bool,
     viewers: Vec<std::process::Child>,
 }
 
@@ -223,15 +230,24 @@ impl NexDeskApp {
             save_pw: false,
             confirm_wipe: false,
             scan: None,
-            remote_addr: make_input(cx, "agent address, e.g. 192.168.1.20:21118", ""),
+            remote_addr: make_input(cx, "Address (192.168.1.20) or 9-digit ID", ""),
             remote_probe: None,
             remote_trust: None,
             remote_msg: String::new(),
             agent: None,
             agent_fp: None,
+            relay_input: make_input(
+                cx,
+                "relay.example.com:21117",
+                &nexdesk_peer::store::default_dir().and_then(|d| nexdesk_peer::store::load_relay(&d)).unwrap_or_default(),
+            ),
+            agent_id: None,
+            relay_status: String::new(),
+            pending_relay: None,
             agent_request: None,
             share_view_only: false,
             share_clipboard: true,
+            remote_adv: false,
             viewers: Vec::new(),
         };
         if vault_exists {
@@ -436,11 +452,16 @@ impl NexDeskApp {
                     let known = nexdesk_peer::store::default_dir()
                         .map(|d| nexdesk_core::knownhosts::KnownHosts::load(&d.join("known_agents")))
                         .unwrap_or_else(nexdesk_core::knownhosts::KnownHosts::in_memory);
-                    let (host, port) = addr.rsplit_once(':').map(|(h, p)| (h.to_string(), p.parse().unwrap_or(nexdesk_peer::DEFAULT_PORT))).unwrap_or((addr.clone(), nexdesk_peer::DEFAULT_PORT));
-                    let key = nexdesk_core::knownhosts::host_key(&host, port);
+                    let key = if self.pending_relay.is_some() {
+                        nexdesk_core::knownhosts::host_key(&format!("id-{addr}"), nexdesk_peer::DEFAULT_PORT)
+                    } else {
+                        let (host, port) = addr.rsplit_once(':').map(|(h, p)| (h.to_string(), p.parse().unwrap_or(nexdesk_peer::DEFAULT_PORT))).unwrap_or((addr.clone(), nexdesk_peer::DEFAULT_PORT));
+                        nexdesk_core::knownhosts::host_key(&host, port)
+                    };
                     self.remote_probe = None;
                     if matches!(known.lookup(&key, &fp), nexdesk_core::knownhosts::Lookup::Match) {
-                        self.start_viewer(&addr, None);
+                        let relay = self.pending_relay.clone();
+                        self.start_viewer(&addr, relay.as_deref(), None);
                     } else {
                         // unknown or changed: the user must compare the fingerprint first
                         self.remote_trust = Some((addr, fp));
@@ -465,6 +486,8 @@ impl NexDeskApp {
                 changed = true;
                 match ev {
                     AgentEvent::Identity(f) => self.agent_fp = Some(f),
+                    AgentEvent::Id(i) => self.agent_id = Some(i),
+                    AgentEvent::Relay(t) => self.relay_status = t,
                     AgentEvent::Request(f) => {
                         self.agent_request = Some(f);
                         self.nav.screen = Screen::Remote; // make sure the person sees the question
@@ -477,6 +500,8 @@ impl NexDeskApp {
             self.agent = None;
             self.agent_request = None;
             self.agent_fp = None;
+            self.agent_id = None;
+            self.relay_status.clear();
             self.remote_msg = "The sharing agent stopped.".into();
         }
         self.viewers.retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_))));
@@ -486,44 +511,87 @@ impl NexDeskApp {
         self.remote_probe.is_some() || self.agent.is_some()
     }
 
-    fn start_viewer(&mut self, addr: &str, trust: Option<&str>) {
-        match nexdesk_peer::control::launch_viewer(addr, trust, true) {
+    fn start_viewer(&mut self, addr: &str, relay: Option<&str>, trust: Option<&str>) {
+        match nexdesk_peer::control::launch_viewer(addr, relay, trust, true) {
             Ok(c) => {
                 self.viewers.push(c);
                 self.remote_msg = format!("Opened a remote control window for {addr}.");
-                nexdesk_core::logs::console(LogLevel::Info, "remote", &format!("viewer started for {addr}"));
+                nexdesk_core::logs::console(LogLevel::Info, "remote", &format!("viewer started for {addr}{}", if relay.is_some() { " (via relay)" } else { "" }));
             }
             Err(e) => self.remote_msg = e,
         }
     }
 
+    /// The relay server typed in the box, with the default port added; saved for next time.
+    fn relay_setting(&mut self, cx: &mut Context<Self>) -> Result<Option<String>, String> {
+        let raw = self.relay_input.read(cx).value().trim().to_string();
+        let dir = nexdesk_peer::store::default_dir();
+        if raw.is_empty() {
+            if let Some(d) = &dir {
+                let _ = nexdesk_peer::store::save_relay(d, "");
+            }
+            return Ok(None);
+        }
+        if !nexdesk_peer::control::valid_addr(&raw) {
+            return Err("The relay server must look like relay.example.com or relay.example.com:21117.".into());
+        }
+        if let Some(d) = &dir {
+            let _ = nexdesk_peer::store::save_relay(d, &raw);
+        }
+        Ok(Some(if raw.contains(':') { raw } else { format!("{raw}:{}", nexdesk_network::DEFAULT_RELAY_PORT) }))
+    }
+
     fn remote_connect(&mut self, cx: &mut Context<Self>) {
         let raw = self.remote_addr.read(cx).value().trim().to_string();
-        if !nexdesk_peer::control::valid_addr(&raw) {
-            self.remote_msg = "Enter the agent's address, like 192.168.1.20 or pc.lan:21118.".into();
+        let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+        let (addr, relay) = if nexdesk_network::proto::valid_id(&compact) {
+            match self.relay_setting(cx) {
+                Ok(Some(r)) => (compact, Some(r)),
+                Ok(None) => {
+                    self.remote_msg = "To connect by ID, enter the relay server in the box below first.".into();
+                    return;
+                }
+                Err(e) => {
+                    self.remote_msg = e;
+                    return;
+                }
+            }
+        } else if nexdesk_peer::control::valid_addr(&raw) {
+            (nexdesk_peer::control::with_port(&raw), None)
+        } else {
+            self.remote_msg = "Enter a nine digit ID, or an address like 192.168.1.20 or pc.lan:21118.".into();
             return;
-        }
-        let addr = nexdesk_peer::control::with_port(&raw);
+        };
         let (tx, rx) = std::sync::mpsc::channel();
-        let a2 = addr.clone();
+        let (a2, r2) = (addr.clone(), relay.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(nexdesk_peer::control::probe(&a2));
+            let _ = tx.send(nexdesk_peer::control::probe(&a2, r2.as_deref()));
         });
+        self.pending_relay = relay;
         self.remote_probe = Some((addr, rx));
         self.remote_msg = "Contacting the agent...".into();
     }
 
-    fn toggle_agent(&mut self) {
+    fn toggle_agent(&mut self, cx: &mut Context<Self>) {
         if let Some(mut a) = self.agent.take() {
             a.stop();
             self.agent_fp = None;
+            self.agent_id = None;
+            self.relay_status.clear();
             self.agent_request = None;
             self.remote_msg = "Sharing stopped.".into();
             nexdesk_core::logs::console(LogLevel::Info, "remote", "screen sharing stopped");
             return;
         }
         let listen = format!("0.0.0.0:{}", nexdesk_peer::DEFAULT_PORT);
-        match nexdesk_peer::control::Agent::start(&listen, self.share_view_only, self.share_clipboard) {
+        let relay = match self.relay_setting(cx) {
+            Ok(r) => r,
+            Err(e) => {
+                self.remote_msg = e;
+                return;
+            }
+        };
+        match nexdesk_peer::control::Agent::start(&listen, relay.as_deref(), self.share_view_only, self.share_clipboard) {
             Ok(a) => {
                 self.agent = Some(a);
                 self.remote_msg = "Sharing started. Every viewer must be approved here first.".into();
@@ -998,9 +1066,13 @@ impl Render for NexDeskApp {
                 self.remote_probe.is_some(),
                 self.agent.is_some(),
                 self.agent_fp.clone(),
+                self.relay_input.clone(),
+                self.agent_id.clone(),
+                self.relay_status.clone(),
                 self.share_view_only,
                 self.share_clipboard,
                 self.viewers.len(),
+                self.remote_adv,
                 cx,
             )
             .into_any_element(),
@@ -1110,7 +1182,7 @@ impl Render for NexDeskApp {
             main = main.child(remote_dialog(
                 "Trust this computer?",
                 vec![
-                    format!("First connection to {addr}."),
+                    if nexdesk_network::proto::valid_id(&addr) { format!("First connection to the computer with ID {addr}.") } else { format!("First connection to {addr}.") },
                     "Its fingerprint is:".into(),
                     fp.clone(),
                     "Compare it with the fingerprint shown on that computer (Remote Control > Share this computer). Only continue if they are identical.".into(),
@@ -1119,7 +1191,8 @@ impl Render for NexDeskApp {
                 "Cancel",
                 cx.listener(move |this, _e, _w, cx| {
                     if let Some((a, f)) = this.remote_trust.take() {
-                        this.start_viewer(&a, Some(&f));
+                        let relay = this.pending_relay.clone();
+                        this.start_viewer(&a, relay.as_deref(), Some(&f));
                     }
                     cx.notify();
                 }),
@@ -1512,6 +1585,22 @@ fn sidebar_button(
 // Remote Control
 // ============================================================================
 
+/// A text box that takes focus when clicked anywhere inside it.
+fn field(input: Entity<TextInput>, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+    let handle = input.read(cx).focus_handle.clone();
+    div()
+        .flex_1()
+        .h(px(36.))
+        .px_3()
+        .rounded(px(8.))
+        .bg(panel_2())
+        .flex()
+        .items_center()
+        .cursor(CursorStyle::IBeam)
+        .on_mouse_down(MouseButton::Left, move |_e, window, cx| window.focus(&handle, cx))
+        .child(div().w_full().child(input))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn remote_view(
     addr: Entity<TextInput>,
@@ -1519,82 +1608,121 @@ fn remote_view(
     probing: bool,
     sharing: bool,
     fingerprint: Option<String>,
+    relay_input: Entity<TextInput>,
+    agent_id: Option<String>,
+    relay_status: String,
     view_only: bool,
     clipboard: bool,
     open_windows: usize,
+    advanced: bool,
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
-    let card = || div().w_full().p_4().rounded(px(12.)).bg(panel()).flex().flex_col().gap_3();
-    let connect = card()
-        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Connect to a NexDesk computer"))
-        .child(div().text_xs().text_color(muted()).child("End-to-end encrypted with a hybrid post-quantum handshake. The first connection asks you to compare a fingerprint."))
-        .child(
-            div()
-                .flex()
-                .gap_3()
-                .items_center()
-                .child(div().flex_1().h(px(34.)).px_3().rounded(px(8.)).bg(panel_2()).flex().items_center().child(addr))
-                .child(toolbar_button_dyn(
-                    "remote-connect".into(),
-                    if probing { "Connecting..." } else { "Connect" },
-                    !probing,
-                    cx.listener(|this, _e, _w, cx| {
-                        this.remote_connect(cx);
-                        cx.notify();
-                    }),
-                )),
-        )
-        .when(open_windows > 0, |d| d.child(div().text_xs().text_color(muted()).child(format!("{open_windows} remote control window(s) open"))));
+    let card = || div().flex_1().min_w(px(300.)).p_5().rounded(px(12.)).bg(panel()).flex().flex_col().gap_3();
+    let title = |t: &'static str| div().text_base().font_weight(FontWeight::SEMIBOLD).child(t);
+    let hint = |t: String| div().text_xs().text_color(muted()).child(t);
+    let has_relay = !relay_input.read(cx).value().trim().is_empty();
 
-    let mut share = card()
-        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Share this computer"))
-        .child(div().text_xs().text_color(muted()).child("Lets another NexDesk user see and control this screen (X11 or XWayland). You approve every viewer. Prototype: the cryptography has not been independently reviewed yet."));
-    if let Some(fp) = fingerprint {
-        share = share
-            .child(div().text_xs().text_color(muted()).child("This computer's fingerprint (tell it to the other person so they can compare):"))
-            .child(div().text_sm().child(fp));
+    // Left: this computer (like "This Desk")
+    let mut mine = card().child(title("This computer"));
+    mine = match (&agent_id, sharing) {
+        (Some(id), _) => {
+            let spaced = format!("{} {} {}", &id[0..3], &id[3..6], &id[6..9]);
+            mine.child(hint("Your ID - tell it to the person who will connect".into()))
+                .child(div().text_3xl().font_weight(FontWeight::SEMIBOLD).child(spaced))
+        }
+        (None, true) => mine
+            .child(hint("Sharing is on".into()))
+            .child(div().text_sm().child(if has_relay { "Getting your ID..." } else { "No ID yet: add a relay server under Settings below, then turn sharing off and on." })),
+        (None, false) => mine
+            .child(hint("Sharing is off. Turn it on to get an ID.".into()))
+            .child(div().text_3xl().font_weight(FontWeight::SEMIBOLD).text_color(muted()).child("--- --- ---")),
+    };
+    if sharing && !relay_status.is_empty() {
+        mine = mine.child(hint(format!("Server: {relay_status}")));
     }
-    share = share.child(
-        div()
-            .flex()
-            .gap_3()
-            .items_center()
-            .child(toolbar_button_dyn(
-                "share-toggle".into(),
-                if sharing { "Stop sharing" } else { "Start sharing" },
-                true,
-                cx.listener(|this, _e, _w, cx| {
-                    this.toggle_agent();
-                    cx.notify();
-                }),
-            ))
-            .child(toolbar_button_dyn(
-                "share-viewonly".into(),
-                if view_only { "View only: on" } else { "View only: off" },
-                !sharing,
-                cx.listener(|this, _e, _w, cx| {
-                    this.share_view_only = !this.share_view_only;
-                    cx.notify();
-                }),
-            ))
-            .child(toolbar_button_dyn(
-                "share-clip".into(),
-                if clipboard { "Clipboard: shared" } else { "Clipboard: private" },
-                !sharing,
-                cx.listener(|this, _e, _w, cx| {
-                    this.share_clipboard = !this.share_clipboard;
-                    cx.notify();
-                }),
-            )),
+    if sharing {
+        if let Some(fp) = fingerprint {
+            mine = mine.child(hint(format!("Fingerprint (the other person checks it once): {fp}")));
+        }
+    }
+    mine = mine
+        .child(div().flex().child(toolbar_button_dyn(
+            "share-toggle".into(),
+            if sharing { "Turn sharing off" } else { "Turn sharing on" },
+            true,
+            cx.listener(|this, _e, _w, cx| {
+                this.toggle_agent(cx);
+                cx.notify();
+            }),
+        )))
+        .child(hint("You are asked to allow every connection.".into()));
+
+    // Right: connect to another computer (like "Remote Desk")
+    let theirs = card()
+        .child(title("Connect to another computer"))
+        .child(hint("Enter its ID (9 digits) or its address".into()))
+        .child(div().flex().child(field(addr, cx)))
+        .child(div().flex().child(toolbar_button_dyn(
+            "remote-connect".into(),
+            if probing { "Connecting..." } else { "Connect" },
+            !probing,
+            cx.listener(|this, _e, _w, cx| {
+                this.remote_connect(cx);
+                cx.notify();
+            }),
+        )))
+        .when(open_windows > 0, |d| d.child(hint(format!("{open_windows} remote window(s) open"))))
+        .child(hint("The first time, you compare a fingerprint to be sure it is the right computer.".into()));
+
+    // Bottom: settings, hidden by default
+    let mut options = div().w_full().p_4().rounded(px(12.)).bg(panel()).flex().flex_col().gap_3().child(
+        div().flex().items_center().justify_between().child(title("Settings")).child(toolbar_button_dyn(
+            "remote-adv".into(),
+            if advanced { "Hide" } else { "Show" },
+            true,
+            cx.listener(|this, _e, _w, cx| {
+                this.remote_adv = !this.remote_adv;
+                cx.notify();
+            }),
+        )),
     );
+    if advanced {
+        options = options
+            .child(hint("Relay server: lets people reach you by ID over the internet. Leave empty to use only your local network. Set it before turning sharing on.".into()))
+            .child(div().flex().child(field(relay_input, cx)))
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(toolbar_button_dyn(
+                        "share-viewonly".into(),
+                        if view_only { "Others can only watch" } else { "Others can control" },
+                        !sharing,
+                        cx.listener(|this, _e, _w, cx| {
+                            this.share_view_only = !this.share_view_only;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(toolbar_button_dyn(
+                        "share-clip".into(),
+                        if clipboard { "Clipboard shared" } else { "Clipboard private" },
+                        !sharing,
+                        cx.listener(|this, _e, _w, cx| {
+                            this.share_clipboard = !this.share_clipboard;
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .child(hint("Works with Linux X11 / XWayland screens. Encryption is a prototype, not independently reviewed.".into()));
+    }
     div()
         .w_full()
         .flex()
         .flex_col()
         .gap_3()
-        .child(connect)
-        .child(share)
-        .when(!msg.is_empty(), |d| d.child(div().text_sm().text_color(muted()).child(msg.to_string())))
+        .child(div().w_full().flex().flex_wrap().gap_3().child(mine).child(theirs))
+        .when(!msg.is_empty(), |d| d.child(div().text_sm().child(msg.to_string())))
+        .child(options)
 }
 
 /// A modal question with two buttons, drawn like the other popups.

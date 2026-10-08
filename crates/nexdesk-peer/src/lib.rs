@@ -7,7 +7,9 @@ pub mod control;
 pub mod host;
 pub mod inject;
 pub mod link;
+pub mod overlay;
 pub mod screen;
+pub mod shot;
 pub mod store;
 pub mod wire;
 
@@ -24,6 +26,8 @@ pub enum PeerError {
     Proto(&'static str),
     #[error("connection closed")]
     Closed,
+    #[error("{0}")]
+    Relay(&'static str),
     #[error("screen capture: {0}")]
     Capture(String),
 }

@@ -138,6 +138,6 @@ Failures now show the underlying cause (refused / timed out / unreachable / sign
 `docs/ROADMAP.md` (phases), `docs/FEATURE_MATRIX.md` (status of every feature) and `docs/REMOTE.md` (the native remote-control mode).
 
 ## Remote control of Linux machines (prototype)
-`nexdesk-agent` shares an X11 screen; `nexdesk-peer-view HOST:PORT` shows and controls it, over a hybrid post-quantum authenticated channel with a consent prompt. See `docs/PEER.md` (how to try it, what is enforced, what is missing) and `docs/CRYPTO.md`. Tests: `xvfb-run -a cargo test -p nexdesk-peer`.
+`nexdesk-agent` shares an X11 screen; `nexdesk-peer-view HOST:PORT` shows and controls it, over a hybrid post-quantum authenticated channel with a consent prompt. See `docs/PEER.md` (how to try it, what is enforced, what is missing) and `docs/CRYPTO.md`. To reach computers behind NAT by a nine digit ID, run `nexdesk-relay` on a server both sides can reach (see `docs/RELAY.md`). Tests: `xvfb-run -a cargo test -p nexdesk-peer -p nexdesk-network`.
 
 In the manager, open **Remote Control** to connect to or share a computer without a terminal; text clipboard and the pointer image are synchronised too.

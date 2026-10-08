@@ -10,6 +10,18 @@ pub const MAX_CURSOR: u16 = 256;
 /// Largest raw tile (bytes) accepted: 64 MiB.
 pub const MAX_TILE_BYTES: usize = 64 * 1024 * 1024;
 
+/// A monitor (or the whole screen) inside the X screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i16,
+    pub y: i16,
+    pub w: u16,
+    pub h: u16,
+}
+
+/// Most monitors listed.
+pub const MAX_MONITORS: usize = 16;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
     // agent -> viewer
@@ -18,9 +30,13 @@ pub enum Msg {
     /// A rectangle of the screen, BGRX pixels compressed with LZ4 (block format, size implied by w*h*4).
     Tile { x: u16, y: u16, w: u16, h: u16, lz4: Vec<u8> },
     Bye(String),
+    /// The shared monitors and which one is shown now. Sent after `Hello` and whenever the layout changes.
+    Monitors { current: u8, rects: Vec<Rect> },
     /// The remote pointer image: BGRA (premultiplied) pixels, LZ4-compressed, with its hotspot.
     Cursor { hot_x: u16, hot_y: u16, w: u16, h: u16, lz4: Vec<u8> },
     // viewer -> agent
+    /// Show another monitor (index into the last `Monitors` list); the agent answers with a new `Hello`.
+    SelectMonitor(u8),
     MouseMove { x: u16, y: u16 },
     /// 1 = left, 2 = middle, 3 = right.
     MouseButton { button: u8, down: bool },
@@ -38,6 +54,8 @@ const T_HELLO: u8 = 1;
 const T_TILE: u8 = 2;
 const T_BYE: u8 = 3;
 const T_CURSOR: u8 = 4;
+const T_MONITORS: u8 = 5;
+const T_SELECT: u8 = 0x14;
 const T_CLIP: u8 = 0x30;
 const T_MOVE: u8 = 0x10;
 const T_BUTTON: u8 = 0x11;
@@ -72,6 +90,18 @@ impl Msg {
                 let b = s.as_bytes();
                 v.extend_from_slice(&b[..b.len().min(200)]);
             }
+            Msg::Monitors { current, rects } => {
+                v.push(T_MONITORS);
+                v.push(*current);
+                v.push(rects.len().min(MAX_MONITORS) as u8);
+                for r in rects.iter().take(MAX_MONITORS) {
+                    v.extend_from_slice(&r.x.to_be_bytes());
+                    v.extend_from_slice(&r.y.to_be_bytes());
+                    v.extend_from_slice(&r.w.to_be_bytes());
+                    v.extend_from_slice(&r.h.to_be_bytes());
+                }
+            }
+            Msg::SelectMonitor(i) => v.extend_from_slice(&[T_SELECT, *i]),
             Msg::Cursor { hot_x, hot_y, w, h, lz4 } => {
                 v.push(T_CURSOR);
                 for n in [hot_x, hot_y, w, h] {
@@ -147,6 +177,31 @@ impl Msg {
                 Msg::Tile { x, y, w, h, lz4: rest[8..].to_vec() }
             }
             T_BYE => Msg::Bye(String::from_utf8_lossy(rest).chars().filter(|c| !c.is_control()).collect()),
+            T_MONITORS => {
+                let n = *rest.get(1).ok_or_else(|| bad("short monitors"))? as usize;
+                if n == 0 || n > MAX_MONITORS || rest.len() != 2 + n * 8 {
+                    return Err(bad("bad monitor list"));
+                }
+                let current = rest[0];
+                if current as usize >= n {
+                    return Err(bad("bad current monitor"));
+                }
+                let mut rects = Vec::with_capacity(n);
+                for k in 0..n {
+                    let o = 2 + k * 8;
+                    let g = |i: usize| u16::from_be_bytes([rest[o + i], rest[o + i + 1]]);
+                    let (x, y, rw, rh) = (g(0) as i16, g(2) as i16, g(4), g(6));
+                    if rw == 0 || rh == 0 || rw > MAX_DIM || rh > MAX_DIM {
+                        return Err(bad("bad monitor size"));
+                    }
+                    rects.push(Rect { x, y, w: rw, h: rh });
+                }
+                Msg::Monitors { current, rects }
+            }
+            T_SELECT => {
+                exact(1)?;
+                Msg::SelectMonitor(rest[0])
+            }
             T_CURSOR => {
                 if rest.len() < 8 {
                     return Err(bad("short cursor"));
@@ -231,6 +286,8 @@ mod tests {
         rt(Msg::Wheel { dx: -120, dy: 240 });
         rt(Msg::Key { code: 30, down: false });
         rt(Msg::Cursor { hot_x: 1, hot_y: 2, w: 16, h: 16, lz4: vec![1, 2] });
+        rt(Msg::Monitors { current: 1, rects: vec![Rect { x: 0, y: 0, w: 1920, h: 1080 }, Rect { x: -1280, y: 0, w: 1280, h: 1024 }] });
+        rt(Msg::SelectMonitor(2));
         rt(Msg::Clip("héllo\nworld".into()));
         rt(Msg::Ping(u64::MAX));
         rt(Msg::Pong(1));
@@ -260,6 +317,11 @@ mod tests {
         assert!(Msg::decode(&[T_CURSOR, 0, 0, 0, 0, 0, 0, 0, 0]).is_err(), "zero cursor");
         assert!(Msg::decode(&[T_CURSOR, 0, 16, 0, 0, 0, 16, 0, 16]).is_err(), "hotspot outside the image");
         assert!(Msg::decode(&[T_CURSOR, 0, 0, 0, 0, 1, 1, 0, 16]).is_err(), "cursor larger than MAX_CURSOR");
+        assert!(Msg::decode(&[T_MONITORS, 0, 0]).is_err(), "no monitors");
+        assert!(Msg::decode(&[T_MONITORS, 1, 1, 0, 0, 0, 0, 0, 10, 0, 10]).is_err(), "current out of range");
+        assert!(Msg::decode(&[T_MONITORS, 0, 1, 0, 0, 0, 0, 0, 0, 0, 10]).is_err(), "zero width");
+        assert!(Msg::decode(&[T_MONITORS, 0, 2, 0, 0, 0, 0, 0, 10, 0, 10]).is_err(), "count larger than data");
+        assert!(Msg::decode(&[T_SELECT]).is_err() && Msg::decode(&[T_SELECT, 1, 2]).is_err());
         // control characters in Bye are stripped (it is shown to the user)
         let m = Msg::decode(&[T_BYE, b'a', 0x1b, b'b', b'\n']).unwrap();
         assert_eq!(m, Msg::Bye("ab".into()));

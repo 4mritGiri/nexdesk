@@ -1,7 +1,7 @@
 # NexDesk peer protocol (P5a prototype): agent + viewer
 
 Control a Linux **X11** machine from another Linux machine, directly by IP address, with the hybrid post-quantum handshake from `docs/CRYPTO.md`.
-No server is involved yet (ID/relay come in P5c). **Prototype: unreviewed crypto, no Wayland, no Windows host, no audio/files yet.**
+Direct by IP, or by ID through a relay you run (`docs/RELAY.md`); no other server is involved. **Prototype: unreviewed crypto, no Wayland, no Windows host, no audio/files yet.**
 
 ## Try it (two terminals, or two laptops)
 Build: `cargo build --release -p nexdesk-peer` (produces `nexdesk-agent` and `nexdesk-peer-view`).
@@ -31,6 +31,16 @@ Open **Remote Control** in the sidebar.
 * Text clipboard is synchronised both ways (UTF-8, at most 1 MiB per copy) through the same encrypted channel. It is off for view-only sessions, `--no-clipboard` disables it on either side, and clipboard contents are never logged. Images and files are not synchronised yet.
 * The agent sends the real pointer image (XFixes), and the viewer shows it as its cursor over the remote screen.
 
+## Viewer window
+Move the pointer to the top edge of the window (or press a shortcut) to show the toolbar; it hides again after a moment.
+* **1:1 / Fit:** fit scales the remote screen to the window; 1:1 shows real pixels, and pointing at a window edge scrolls when the remote screen is bigger.
+* **Full / Window:** full screen. Shortcut **Ctrl+Alt+Pause**.
+* **Screen n/m:** appears when the remote computer has several monitors; each press shows the next one. The mouse is mapped to the chosen monitor. If monitors are plugged in or out, the viewer is told and starts a fresh picture.
+* **Ctrl+Alt+Del:** sends that key combination to the remote computer (hidden in view-only sessions). Shortcut **Ctrl+Alt+End**. The shortcut keys themselves are not forwarded.
+* **Shot:** saves the remote picture as a PNG in your Pictures folder; a message at the bottom shows the path. Only your local copy is written.
+
+Speed: the agent uses XDamage, so a screen that does not change costs almost nothing (it still checks once a second as a safety net). Changed areas are sent as LZ4-compressed 64x64 tiles. Shared-memory capture and a video codec are still future steps.
+
 ## Resize and reconnect
 * If the shared screen changes size (resolution change, monitor plugged in), the agent sends a new `Hello` and the viewer starts a fresh picture. The session continues.
 * If the connection drops, the viewer window stays open, shows "reconnecting" in the title and retries for about 90 s (1, 2, 4, 8 s steps) to the **same pinned agent identity**; a different identity is never accepted. Queued mouse and key events are discarded on reconnect, so no stale key presses are replayed.
@@ -51,7 +61,7 @@ Open **Remote Control** in the sidebar.
 * Wire format: `Msg` in `src/wire.rs` (hello, tile, cursor, clip, bye, mouse move/button/wheel, key, ping/pong).
 
 ## Tests
-`xvfb-run -a cargo test -p nexdesk-peer` starts a real X server and checks: the screen arrives pixel-exact, later changes arrive, mouse moves the real pointer, an unapproved viewer receives nothing, a wrong pin aborts the handshake, view-only blocks input, clipboard text both ways, the pointer image, the manager flow (probe, `--trust`, consent over stdin/stdout, deny ends the viewer), a screen resize that keeps the session, a viewer that survives an agent restart, plus unit tests for diffing, tile bounds and hostile messages.
+`xvfb-run -a cargo test -p nexdesk-peer` starts a real X server and checks: the screen arrives pixel-exact, later changes arrive, mouse moves the real pointer, an unapproved viewer receives nothing, a wrong pin aborts the handshake, view-only blocks input, clipboard text both ways, the pointer image, the manager flow (probe, `--trust`, consent over stdin/stdout, deny ends the viewer), a screen resize that keeps the session, two monitors with switching and pointer mapping, an idle screen that stops producing tiles, toolbar layout and hit tests, a viewer that survives an agent restart, plus unit tests for diffing, tile bounds and hostile messages.
 
 ## Not done yet
-Wayland host, Windows/macOS host, image/file clipboard, file transfer, audio, multi-monitor, a GUI viewer inside the manager window (the viewer is still its own window), encrypted identity storage, rate limiting beyond the delay, fuzzing.
+Wayland host, Windows/macOS host, image/file clipboard, file transfer, audio, a GUI viewer inside the manager window (the viewer is still its own window), encrypted identity storage, rate limiting beyond the delay, fuzzing.

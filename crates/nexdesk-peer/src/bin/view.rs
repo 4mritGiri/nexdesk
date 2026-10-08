@@ -3,19 +3,21 @@ use std::io::BufRead;
 use std::num::NonZeroU32;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nexdesk_core::knownhosts::{host_key, KnownHosts, Lookup};
-use nexdesk_core::scale::{blit_fit, Fit};
+use nexdesk_core::scale::{Actual, Fit, View};
+use nexdesk_peer::overlay::{self, Action};
 use nexdesk_peer::screen::Screen;
+use nexdesk_peer::wire::Rect;
 use nexdesk_peer::{client, store, Msg, Writer};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::PhysicalKey;
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::platform::scancode::PhysicalKeyExtScancode;
-use winit::window::{CustomCursor, Window, WindowId};
+use winit::window::{CustomCursor, Fullscreen, Window, WindowId};
 use nexdesk_peer::clip::ClipSync;
 use nexdesk_peer::wire::unpack_pixels;
 
@@ -35,16 +37,78 @@ struct App {
     cursor: (f64, f64),
     clipboard: bool,
     clip: Option<ClipSync>,
+    /// 1:1 instead of fit-to-window, and the part of the remote screen shown at the top left.
+    actual: bool,
+    pan: (u32, u32),
+    fullscreen: bool,
+    /// The toolbar is open because the pointer touched the top edge, or for a moment after a shortcut.
+    bar_open: bool,
+    bar_until: Option<Instant>,
+    hover: Option<Action>,
+    bar_click: bool,
+    toast: Option<(String, Instant)>,
+    monitors: Vec<Rect>,
+    current_monitor: usize,
+    mods: ModifiersState,
+    /// A shortcut key whose press was swallowed; its release is swallowed too.
+    swallowed: Option<KeyCode>,
 }
 
+const SHOW_FOR: Duration = Duration::from_secs(3);
+const EDGE_PAN: i32 = 16;
+const PAN_STEP: u32 = 24;
+
 impl App {
-    fn fit(&self) -> Option<Fit> {
+    fn win_size(&self) -> Option<(u32, u32)> {
         let s = self.window.as_ref()?.inner_size();
+        (s.width > 0 && s.height > 0).then_some((s.width, s.height))
+    }
+
+    fn view(&self) -> Option<View> {
+        let (w, h) = self.win_size()?;
         let sc = self.screen.as_ref()?;
-        Fit::new(sc.w, sc.h, s.width, s.height)
+        if self.actual {
+            Actual::new(sc.w, sc.h, w, h, self.pan.0, self.pan.1).map(View::Actual)
+        } else {
+            Fit::new(sc.w, sc.h, w, h).map(View::Fit)
+        }
+    }
+
+    fn labels(&self) -> Vec<(Action, String)> {
+        let mut l = vec![
+            (Action::Scale, if self.actual { "Fit" } else { "1:1" }.to_string()),
+            (Action::Fullscreen, if self.fullscreen { "Window" } else { "Full" }.to_string()),
+        ];
+        if self.monitors.len() > 1 {
+            l.push((Action::Monitor, format!("Screen {}/{}", self.current_monitor + 1, self.monitors.len())));
+        }
+        if !self.view_only {
+            l.push((Action::Cad, "Ctrl+Alt+Del".to_string()));
+        }
+        l.push((Action::Screenshot, "Shot".to_string()));
+        l
+    }
+
+    fn bar_visible(&self) -> bool {
+        self.bar_open || self.bar_until.map(|t| t > Instant::now()).unwrap_or(false)
+    }
+
+    fn say(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), Instant::now() + SHOW_FOR));
+        self.redraw();
+    }
+
+    fn redraw(&self) {
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     fn draw(&mut self) {
+        let view = self.view();
+        let labels = self.labels();
+        let (visible, hover) = (self.bar_visible(), self.hover);
+        let toast = self.toast.as_ref().filter(|(_, t)| *t > Instant::now()).map(|(m, _)| m.clone());
         let (Some(win), Some(surface)) = (self.window.as_ref(), self.surface.as_mut()) else { return };
         let size = win.inner_size();
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
@@ -52,11 +116,114 @@ impl App {
             return;
         }
         let Ok(mut buf) = surface.buffer_mut() else { return };
-        match &self.screen {
-            Some(sc) => blit_fit(&sc.buf, sc.w, sc.h, &mut buf, size.width, size.height),
-            None => buf.fill(0x00_11_13_1d),
+        match (&self.screen, view) {
+            (Some(sc), Some(v)) => v.blit(&sc.buf, &mut buf),
+            _ => buf.fill(0x00_11_13_1d),
+        }
+        let (bw, bh) = (size.width as usize, size.height as usize);
+        if visible {
+            let (bar, items) = overlay::layout(size.width, &labels);
+            overlay::draw_bar(&mut buf, bw, bh, bar, &items, &labels, hover);
+        }
+        if let Some(m) = toast {
+            overlay::draw_toast(&mut buf, bw, bh, &m);
         }
         let _ = buf.present();
+    }
+
+    fn do_action(&mut self, action: Action) {
+        match action {
+            Action::Scale => {
+                self.actual = !self.actual;
+                self.pan = (0, 0);
+            }
+            Action::Fullscreen => self.toggle_fullscreen(),
+            Action::Cad => self.send_cad(),
+            Action::Screenshot => self.screenshot(),
+            Action::Monitor => {
+                if self.monitors.len() > 1 {
+                    let next = (self.current_monitor + 1) % self.monitors.len();
+                    let _ = self.out.send(Msg::SelectMonitor(next as u8));
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        self.fullscreen = !self.fullscreen;
+        if let Some(w) = &self.window {
+            w.set_fullscreen(self.fullscreen.then_some(Fullscreen::Borderless(None)));
+        }
+        self.bar_until = Some(Instant::now() + SHOW_FOR);
+    }
+
+    /// Ctrl+Alt+Del as evdev codes: LEFTCTRL 29, LEFTALT 56, DELETE 111.
+    fn send_cad(&mut self) {
+        if self.view_only {
+            return;
+        }
+        for (code, down) in [(29, true), (56, true), (111, true), (111, false), (56, false), (29, false)] {
+            let _ = self.out.send(Msg::Key { code, down });
+        }
+        self.say("Sent Ctrl+Alt+Del");
+    }
+
+    fn screenshot(&mut self) {
+        let Some(sc) = self.screen.as_ref() else { return };
+        let msg = match nexdesk_peer::shot::save(&sc.buf, sc.w, sc.h, &self.title) {
+            Ok(p) => format!("Saved {}", p.display()),
+            Err(e) => format!("Screenshot failed: {e}"),
+        };
+        self.say(msg);
+    }
+
+    fn pointer_moved(&mut self, x: f64, y: f64) {
+        self.cursor = (x, y);
+        let Some((w, _)) = self.win_size() else { return };
+        let labels = self.labels();
+        let (bar, items) = overlay::layout(w, &labels);
+        if y < f64::from(overlay::HOT_EDGE) {
+            self.bar_open = true;
+        } else if self.bar_open && !overlay::in_bar(bar, x, y) {
+            self.bar_open = false;
+        }
+        let hover = if self.bar_visible() { overlay::hit(&items, x, y) } else { None };
+        if hover != self.hover || self.bar_open {
+            self.hover = hover;
+            self.redraw();
+        }
+        // 1:1 view of a bigger screen: pointing at a window edge scrolls
+        if self.actual {
+            if let (Some(View::Actual(a)), Some((ww, wh))) = (self.view(), self.win_size()) {
+                if a.pannable() {
+                    let (mut px, mut py) = (a.pan_x, a.pan_y);
+                    let (xi, yi) = (x as i32, y as i32);
+                    if xi < EDGE_PAN {
+                        px = px.saturating_sub(PAN_STEP);
+                    } else if xi > ww as i32 - EDGE_PAN {
+                        px += PAN_STEP;
+                    }
+                    if yi < EDGE_PAN && !self.bar_open {
+                        py = py.saturating_sub(PAN_STEP);
+                    } else if yi > wh as i32 - EDGE_PAN {
+                        py += PAN_STEP;
+                    }
+                    let (mx, my) = a.max_pan();
+                    let np = (px.min(mx), py.min(my));
+                    if np != (a.pan_x, a.pan_y) {
+                        self.pan = np;
+                        self.redraw();
+                    }
+                }
+            }
+        }
+    }
+
+    fn over_bar(&self) -> bool {
+        let Some((w, _)) = self.win_size() else { return false };
+        let (bar, _) = overlay::layout(w, &self.labels());
+        self.bar_visible() && overlay::in_bar(bar, self.cursor.0, self.cursor.1)
     }
 }
 
@@ -77,6 +244,31 @@ impl ApplicationHandler<Ev> for App {
         self.window = Some(win);
     }
 
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        let now = Instant::now();
+        let mut next: Option<Instant> = None;
+        if let Some(t) = self.bar_until {
+            if t <= now {
+                self.bar_until = None;
+                self.redraw();
+            } else {
+                next = Some(t);
+            }
+        }
+        if let Some((_, t)) = &self.toast {
+            if *t <= now {
+                self.toast = None;
+                self.redraw();
+            } else {
+                next = Some(next.map_or(*t, |n| n.min(*t)));
+            }
+        }
+        el.set_control_flow(match next {
+            Some(t) => ControlFlow::WaitUntil(t),
+            None => ControlFlow::Wait,
+        });
+    }
+
     fn user_event(&mut self, el: &ActiveEventLoop, ev: Ev) {
         match ev {
             Ev::Msg(Msg::Hello { view_only, width, height }) => {
@@ -88,9 +280,15 @@ impl ApplicationHandler<Ev> for App {
                     }
                 }
                 self.screen = Some(Screen::new(width, height));
+                self.pan = (0, 0);
                 if let Some(w) = &self.window {
                     w.set_title(&format!("{}{}", self.title, if view_only { " (view only)" } else { "" }));
                 }
+            }
+            Ev::Msg(Msg::Monitors { current, rects }) => {
+                self.current_monitor = usize::from(current).min(rects.len().saturating_sub(1));
+                self.monitors = rects;
+                self.redraw();
             }
             Ev::Msg(m @ Msg::Tile { .. }) => {
                 if let Some(s) = self.screen.as_mut() {
@@ -99,9 +297,7 @@ impl ApplicationHandler<Ev> for App {
                         el.exit();
                     }
                 }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                self.redraw();
             }
             Ev::Msg(Msg::Clip(t)) => {
                 if let Some(c) = &self.clip {
@@ -137,29 +333,43 @@ impl ApplicationHandler<Ev> for App {
         match event {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::RedrawRequested => self.draw(),
-            WindowEvent::Resized(_) => {
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-            _ if self.view_only => {}
+            WindowEvent::Resized(_) => self.redraw(),
+            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor = (position.x, position.y);
-                if let Some(f) = self.fit() {
-                    let (x, y) = f.to_remote(position.x, position.y);
+                self.pointer_moved(position.x, position.y);
+                if self.over_bar() || self.view_only {
+                    return;
+                }
+                if let Some(v) = self.view() {
+                    let (x, y) = v.to_remote(position.x, position.y);
                     let _ = self.out.send(Msg::MouseMove { x, y });
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                let pressed = state == ElementState::Pressed;
+                if button == MouseButton::Left && self.over_bar() && pressed {
+                    self.bar_click = true;
+                    if let Some(a) = self.hover {
+                        self.do_action(a);
+                    }
+                    return;
+                }
+                if !pressed && self.bar_click {
+                    self.bar_click = false;
+                    return;
+                }
+                if self.view_only {
+                    return;
+                }
                 let b = match button {
                     MouseButton::Left => 1,
                     MouseButton::Middle => 2,
                     MouseButton::Right => 3,
                     _ => return,
                 };
-                let _ = self.out.send(Msg::MouseButton { button: b, down: state == ElementState::Pressed });
+                let _ = self.out.send(Msg::MouseButton { button: b, down: pressed });
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, .. } if !self.view_only && !self.over_bar() => {
                 let (dx, dy) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (x * 120.0, y * 120.0),
                     MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
@@ -167,16 +377,78 @@ impl ApplicationHandler<Ev> for App {
                 let _ = self.out.send(Msg::Wheel { dx: dx.clamp(-32768.0, 32767.0) as i16, dy: dy.clamp(-32768.0, 32767.0) as i16 });
             }
             WindowEvent::KeyboardInput { event, .. } if !event.repeat => {
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    // winit's raw scancode on Linux is the X11 keycode = evdev code + 8
-                    if let Some(sc) = PhysicalKey::Code(code).to_scancode() {
-                        if sc >= 8 {
-                            let _ = self.out.send(Msg::Key { code: (sc - 8) as u16, down: event.state == ElementState::Pressed });
+                let PhysicalKey::Code(code) = event.physical_key else { return };
+                let down = event.state == ElementState::Pressed;
+                // viewer shortcuts: Ctrl+Alt+Pause = full screen, Ctrl+Alt+End = Ctrl+Alt+Del on the remote side
+                if !down && self.swallowed == Some(code) {
+                    self.swallowed = None;
+                    return;
+                }
+                if down && self.mods.control_key() && self.mods.alt_key() {
+                    match code {
+                        KeyCode::Pause => {
+                            self.swallowed = Some(code);
+                            self.toggle_fullscreen();
+                            self.redraw();
+                            return;
                         }
+                        KeyCode::End => {
+                            self.swallowed = Some(code);
+                            self.send_cad();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                if self.view_only {
+                    return;
+                }
+                // winit's raw scancode on Linux is the X11 keycode = evdev code + 8
+                if let Some(sc) = PhysicalKey::Code(code).to_scancode() {
+                    if sc >= 8 {
+                        let _ = self.out.send(Msg::Key { code: (sc - 8) as u16, down });
                     }
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Where the agent is: a direct address, or an ID reached through a relay.
+#[derive(Clone)]
+enum Target {
+    Direct(String),
+    Relay { relay: String, id: String },
+}
+
+impl Target {
+    fn connect(
+        &self,
+        me: nexdesk_crypto::Identity,
+        accept: impl FnOnce(&nexdesk_crypto::IdentityPublic) -> bool,
+    ) -> Result<(nexdesk_peer::Reader, Writer, nexdesk_crypto::IdentityPublic), nexdesk_peer::PeerError> {
+        match self {
+            Target::Direct(a) => client::connect(a, me, accept),
+            Target::Relay { relay, id } => client::connect_relay(relay, id, me, accept),
+        }
+    }
+
+    /// Key under which the agent's identity is pinned.
+    fn pin_key(&self) -> String {
+        match self {
+            Target::Direct(a) => {
+                let (h, p) = a.rsplit_once(':').map(|(h, p)| (h, p.parse().ok())).unwrap_or((a.as_str(), None));
+                host_key(h, p.unwrap_or(nexdesk_peer::DEFAULT_PORT))
+            }
+            Target::Relay { id, .. } => host_key(&format!("id-{id}"), nexdesk_peer::DEFAULT_PORT),
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Target::Direct(a) => a.clone(),
+            Target::Relay { id, .. } => format!("ID {id}"),
         }
     }
 }
@@ -188,7 +460,7 @@ fn supervise(
     first: (nexdesk_peer::Reader, Writer),
     rx: mpsc::Receiver<Msg>,
     proxy: winit::event_loop::EventLoopProxy<Ev>,
-    addr: String,
+    target: Target,
     agent_fp: String,
     dir: std::path::PathBuf,
 ) {
@@ -203,7 +475,7 @@ fn supervise(
                 let attempt = store::load_or_create_identity(&dir, "viewer-identity")
                     .map_err(|e| e.to_string())
                     .and_then(|me| {
-                        client::connect(&addr, me, |a| a.fingerprint_string() == agent_fp).map_err(|e| e.to_string())
+                        target.connect(me, |a| a.fingerprint_string() == agent_fp).map_err(|e| e.to_string())
                     });
                 match attempt {
                     Ok((r, w, _)) => {
@@ -306,16 +578,18 @@ fn die(m: &str) -> ! {
 fn main() {
     let mut forget = false;
     let mut addr = None;
+    let mut relay = None::<String>;
     let (mut probe, mut clipboard, mut trust) = (false, true, None::<String>);
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--forget" => forget = true,
             "--probe" => probe = true,
+            "--relay" => relay = Some(it.next().unwrap_or_else(|| die("--relay needs HOST:PORT"))),
             "--no-clipboard" => clipboard = false,
             "--trust" => trust = Some(it.next().unwrap_or_else(|| die("--trust needs a fingerprint"))),
             "-h" | "--help" => {
-                println!("nexdesk-peer-view HOST:PORT [--forget] [--no-clipboard] [--trust SHA256:..] [--probe]\n  --forget  drop the pinned identity of this agent first\n  --trust   pin the agent if its fingerprint is exactly this\n  --probe   print \"FINGERPRINT <fp>\" and exit (no session)");
+                println!("nexdesk-peer-view HOST:PORT [--relay RELAY:PORT] [--forget] [--no-clipboard] [--trust SHA256:..] [--probe]\n  --relay   treat the address as a nine digit ID and reach it through this relay\n  --forget  drop the pinned identity of this agent first\n  --trust   pin the agent if its fingerprint is exactly this\n  --probe   print \"FINGERPRINT <fp>\" and exit (no session)");
                 return;
             }
             _ => addr = Some(a),
@@ -325,13 +599,23 @@ fn main() {
     let dir = store::default_dir().unwrap_or_else(|| die("HOME is not set"));
     let me = store::load_or_create_identity(&dir, "viewer-identity").unwrap_or_else(|e| die(&e.to_string()));
     let mut known = KnownHosts::load(&dir.join("known_agents"));
-    let key = host_key(addr.rsplit_once(':').map(|x| x.0).unwrap_or(&addr), addr.rsplit_once(':').and_then(|x| x.1.parse().ok()).unwrap_or(nexdesk_peer::DEFAULT_PORT));
+    let target = match relay {
+        Some(r) => {
+            if !nexdesk_network::proto::valid_id(&addr) {
+                die("with --relay the address must be the agent's nine digit ID");
+            }
+            let r = if r.contains(':') { r } else { format!("{r}:{}", nexdesk_network::DEFAULT_RELAY_PORT) };
+            Target::Relay { relay: r, id: addr.clone() }
+        }
+        None => Target::Direct(addr.clone()),
+    };
+    let key = target.pin_key();
     if forget {
         let _ = known.forget(&key);
     }
 
     let mut pin_error = None;
-    let result = client::connect(&addr, me, |agent| {
+    let result = target.connect(me, |agent| {
         let fp = agent.fingerprint_string();
         if probe {
             println!("FINGERPRINT {fp}");
@@ -367,22 +651,34 @@ fn main() {
     };
     eprintln!("connected to {} - waiting for the agent's user to approve if asked", peer.fingerprint_string());
 
-    let addr_for_retry = addr.clone();
+    let target_for_retry = target.clone();
     let el = EventLoop::<Ev>::with_user_event().build().unwrap_or_else(|e| die(&e.to_string()));
     let proxy = el.create_proxy();
     let (tx, rx) = mpsc::channel::<Msg>();
     let agent_fp = peer.fingerprint_string();
-    std::thread::spawn(move || supervise((reader, writer), rx, proxy, addr_for_retry, agent_fp, dir));
+    std::thread::spawn(move || supervise((reader, writer), rx, proxy, target_for_retry, agent_fp, dir));
     let mut app = App {
         window: None,
         surface: None,
         screen: None,
         out: tx,
         view_only: false,
-        title: format!("nexdesk - {addr}"),
+        title: format!("nexdesk - {}", target.label()),
         cursor: (0.0, 0.0),
         clipboard,
         clip: None,
+        actual: false,
+        pan: (0, 0),
+        fullscreen: false,
+        bar_open: false,
+        bar_until: None,
+        hover: None,
+        bar_click: false,
+        toast: None,
+        monitors: Vec::new(),
+        current_monitor: 0,
+        mods: ModifiersState::default(),
+        swallowed: None,
     };
     let _ = el.run_app(&mut app);
 }

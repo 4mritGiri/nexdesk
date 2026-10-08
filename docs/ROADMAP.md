@@ -34,7 +34,7 @@ Policy file, audit log, Kerberos/SSO, `.deb` + Flatpak, signed releases, smartca
 Own host agent + protocol + rendezvous/relay server so Linux/macOS machines, machines behind NAT and Windows Home can be controlled by ID.
 * **P5a** direct IP, Linux X11 host agent, viewer engine, pinned-key handshake, accept prompt, clipboard, software codec. **Done so far (prototype, `docs/PEER.md`)**: agent + viewer over the hybrid handshake, X11 capture with tile diff + LZ4, mouse/keyboard/wheel via XTEST, consent/allow-list/view-only, pinning, end-to-end test on Xvfb. **Left**: clipboard, cursor shape, resize, reconnect, manager UI entry, encrypted identity store, XShm/video codec.
 * **P5b** Wayland host (portal/PipeWire/libei), Windows host, audio, files, chat, multi-monitor, recording, TCP tunnels, unattended service.
-* **P5c** `nexdesk-hbb` rendezvous + relay, IDs, NAT hole punching, 2FA, self-hosting docs, shared address book.
+* **P5c** rendezvous + relay, IDs, NAT hole punching, 2FA, self-hosting docs, shared address book. **Done so far (prototype, `docs/RELAY.md`)**: `nexdesk-network` relay, connect by 9 digit ID, end-to-end handshake through the relay, limits. Left: hole punching, relay auth, failover, Docker image, 2FA.
 * **P5d** Windows login screen/UAC service, privacy mode, hardware codecs, macOS host.
 * **P6** mobile and web clients, enterprise server tier (OIDC/LDAP, web console, audit).
 Security design (hybrid post-quantum handshake X25519+ML-KEM, dual signatures, consent-by-default, audit, supply chain): `docs/SECURITY_DESIGN.md`. The crypto crate (`crates/nexdesk-crypto`, see `docs/CRYPTO.md`) is written first and reviewed before anything else in P5. **Step 1 done (prototype, unreviewed)**: hybrid handshake + record layer + tests.

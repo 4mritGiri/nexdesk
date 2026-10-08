@@ -1,4 +1,6 @@
 //! Keyboard and mouse injection on X11 through the XTEST extension.
+use std::sync::Mutex;
+
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::Window;
 use x11rb::protocol::xtest::ConnectionExt as _;
@@ -15,8 +17,8 @@ const MOTION: u8 = 6;
 pub struct Injector {
     conn: RustConnection,
     root: Window,
-    width: u16,
-    height: u16,
+    /// The shared area (x, y, w, h) in root coordinates; mouse positions are relative to it.
+    region: Mutex<(i16, i16, u16, u16)>,
 }
 
 fn cap(e: impl std::fmt::Display) -> PeerError {
@@ -30,7 +32,7 @@ impl Injector {
         let (root, width, height) = (s.root, s.width_in_pixels, s.height_in_pixels);
         // fail early if the extension is missing
         conn.xtest_get_version(2, 2).map_err(cap)?.reply().map_err(cap)?;
-        Ok(Self { conn, root, width, height })
+        Ok(Self { conn, root, region: Mutex::new((0, 0, width, height)) })
     }
 
     fn fake(&self, kind: u8, detail: u8, x: i16, y: i16) -> Result<(), PeerError> {
@@ -39,10 +41,19 @@ impl Injector {
         Ok(())
     }
 
+    /// Choose the monitor the viewer is looking at.
+    pub fn set_region(&self, x: i16, y: i16, w: u16, h: u16) {
+        if let Ok(mut r) = self.region.lock() {
+            *r = (x, y, w, h);
+        }
+    }
+
+    /// Move the pointer to (x, y) inside the shared area.
     pub fn move_to(&self, x: u16, y: u16) -> Result<(), PeerError> {
-        let x = x.min(self.width.saturating_sub(1)) as i16;
-        let y = y.min(self.height.saturating_sub(1)) as i16;
-        self.fake(MOTION, 0, x, y)
+        let (ox, oy, w, h) = self.region.lock().map(|r| *r).unwrap_or((0, 0, 1, 1));
+        let x = i32::from(ox) + i32::from(x.min(w.saturating_sub(1)));
+        let y = i32::from(oy) + i32::from(y.min(h.saturating_sub(1)));
+        self.fake(MOTION, 0, x.clamp(0, i32::from(i16::MAX)) as i16, y.clamp(0, i32::from(i16::MAX)) as i16)
     }
 
     /// 1 = left, 2 = middle, 3 = right (X11 numbering).

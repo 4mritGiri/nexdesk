@@ -1,0 +1,14 @@
+[package]
+name = "nexdesk-network"
+description = "NexDesk rendezvous and relay: lets a viewer reach an agent behind NAT by ID (carries only end-to-end encrypted bytes)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nexdesk-relay"
+path = "src/bin/relay.rs"
+
+[dependencies]
+getrandom = "0.2"
+thiserror = "1"

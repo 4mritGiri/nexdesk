@@ -45,6 +45,37 @@ pub fn load_or_create_identity(dir: &Path, name: &str) -> Result<Identity, PeerE
     }
 }
 
+/// The agent's relay ID (nine digits), created once and kept in `dir/agent-id`.
+pub fn load_or_create_id(dir: &Path) -> Result<String, PeerError> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("agent-id");
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        let s = s.trim().to_string();
+        if nexdesk_network::proto::valid_id(&s) {
+            return Ok(s);
+        }
+    }
+    let id = nexdesk_network::proto::random_id().map_err(|_| PeerError::Proto("no random numbers available"))?;
+    std::fs::write(&path, format!("{id}\n"))?;
+    Ok(id)
+}
+
+/// The relay server this computer uses, one line in `dir/relay` (`host:port`), if configured.
+pub fn load_relay(dir: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(dir.join("relay")).ok()?;
+    let s = s.trim();
+    (!s.is_empty() && crate::control::valid_addr(s)).then(|| s.to_string())
+}
+
+pub fn save_relay(dir: &Path, relay: &str) -> Result<(), PeerError> {
+    if !relay.is_empty() && !crate::control::valid_addr(relay) {
+        return Err(PeerError::Proto("not a valid relay address"));
+    }
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join("relay"), format!("{relay}\n"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
