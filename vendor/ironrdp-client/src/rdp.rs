@@ -56,6 +56,8 @@ pub enum RdpOutputEvent {
         height: NonZeroU16,
     },
     ConnectionFailure(ironrdp_connector::ConnectorError),
+    /// NexDesk patch: which step of connecting is running (for display and logs).
+    Stage(&'static str),
     PointerDefault,
     PointerHidden,
     PointerPosition {
@@ -212,7 +214,7 @@ impl RdpClient {
         loop {
             let (connection_result, framed) = match &self.config.transport {
                 Transport::Direct => {
-                    match connect_direct(&self.config, &self.input_event_sender, cliprdr_factory).await {
+                    match connect_direct(&self.config, &self.input_event_sender, cliprdr_factory, &self.output_event_sender).await {
                         Ok(r) => r,
                         Err(e) => {
                             let _ = self
@@ -449,15 +451,31 @@ trait AsyncReadWrite: AsyncRead + AsyncWrite {}
 impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite {}
 type UpgradedFramed = ironrdp_tokio::TokioFramed<Box<dyn AsyncReadWrite + Unpin + Send + Sync>>;
 
+/// NexDesk patch: longest wait for the TCP connection to the RDP server.
+const TCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Direct TCP → TLS connection (no gateway).
 async fn connect_direct(
     config: &Config,
     input_sender: &mpsc::UnboundedSender<RdpInputEvent>,
     cliprdr_factory: CliprdrFactoryRef<'_>,
+    stages: &mpsc::Sender<RdpOutputEvent>,
 ) -> ConnectorResult<(ConnectionResult, UpgradedFramed)> {
     let dest = config.destination.to_string();
-    let stream = TcpStream::connect(&dest)
+    let _ = stages.try_send(RdpOutputEvent::Stage("Reaching the computer"));
+    // NexDesk patch: without a limit, a host that silently drops packets (asleep, wrong IP, firewall)
+    // leaves the session on "Connecting..." for the operating system's TCP timeout (minutes).
+    let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(&dest))
         .await
+        .map_err(|_| {
+            ironrdp_connector::custom_err!(
+                "TCP connect",
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("no answer from {dest} within {} seconds (timed out)", TCP_CONNECT_TIMEOUT.as_secs()),
+                )
+            )
+        })?
         .map_err(|e| ironrdp_connector::custom_err!("TCP connect", e))?;
     let client_addr = stream
         .local_addr()
@@ -466,7 +484,7 @@ async fn connect_direct(
 
     let connector = build_connector(config, client_addr, input_sender, cliprdr_factory);
 
-    tls_handshake_and_finalize(framed, connector, config).await
+    tls_handshake_and_finalize(framed, connector, config, Some(stages)).await
 }
 
 /// RDS gateway TCP → gateway auth → TLS connection.
@@ -496,7 +514,7 @@ async fn connect_gateway(
 
     let connector = build_connector(config, client_addr, input_sender, cliprdr_factory);
 
-    tls_handshake_and_finalize(framed, connector, config).await
+    tls_handshake_and_finalize(framed, connector, config, None).await
 }
 
 /// RDCleanPath WebSocket → RDCleanPath handshake connection.
@@ -558,23 +576,50 @@ async fn tls_handshake_and_finalize<S>(
     mut framed: ironrdp_tokio::TokioFramed<S>,
     mut connector: ironrdp_connector::ClientConnector,
     config: &Config,
+    stages: Option<&mpsc::Sender<RdpOutputEvent>>,
 ) -> ConnectorResult<(ConnectionResult, UpgradedFramed)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
 {
-    let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector).await?;
+    // NexDesk patch: every step has a time limit and a name, so a silent server shows
+    // "timed out while <step>" instead of waiting forever.
+    let stage = |name: &'static str| {
+        info!(stage = name, "RDP connect");
+        if let Some(s) = stages {
+            let _ = s.try_send(RdpOutputEvent::Stage(name));
+        }
+    };
+    let timed_out = |what: &str, secs: u64| {
+        ironrdp_connector::custom_err!(
+            "connect",
+            std::io::Error::new(std::io::ErrorKind::TimedOut, format!("timed out after {secs} s while {what}"))
+        )
+    };
+    stage("Negotiating with the computer");
+    let should_upgrade = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        ironrdp_tokio::connect_begin(&mut framed, &mut connector),
+    )
+    .await
+    .map_err(|_| timed_out("negotiating the connection (the computer accepted the TCP connection but did not answer)", 20))??;
 
-    debug!("TLS upgrade");
+    stage("Securing the connection (TLS)");
 
     let (initial_stream, leftover_bytes) = framed.into_inner();
 
-    let (tls_stream, tls_cert) = match &config.tls_verifier {
-        Some(verifier) => {
-            ironrdp_tls::upgrade_with_verifier(initial_stream, config.destination.name(), verifier.clone()).await
+    let tls_fut = async {
+        match &config.tls_verifier {
+            Some(verifier) => {
+                ironrdp_tls::upgrade_with_verifier(initial_stream, config.destination.name(), verifier.clone()).await
+            }
+            None => ironrdp_tls::upgrade(initial_stream, config.destination.name()).await,
         }
-        None => ironrdp_tls::upgrade(initial_stream, config.destination.name()).await,
-    }
-    .map_err(|e| ironrdp_connector::custom_err!("TLS upgrade", e))?;
+    };
+    // The certificate prompt can wait for the user, so this step gets a long limit.
+    let (tls_stream, tls_cert) = tokio::time::timeout(std::time::Duration::from_secs(180), tls_fut)
+        .await
+        .map_err(|_| timed_out("setting up the secure connection or waiting for the certificate answer", 180))?
+        .map_err(|e| ironrdp_connector::custom_err!("TLS upgrade", e))?;
 
     let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
 
@@ -585,16 +630,22 @@ where
         .ok_or_else(|| ironrdp_connector::general_err!("unable to extract tls server public key"))?
         .to_owned();
 
-    let connection_result = ironrdp_tokio::connect_finalize(
-        upgraded,
-        connector,
-        &mut upgraded_framed,
-        &mut ReqwestNetworkClient::new(),
-        (&config.destination).into(),
-        server_public_key,
-        config.kerberos_config.clone(),
+    stage("Signing in");
+    let connection_result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        ironrdp_tokio::connect_finalize(
+            upgraded,
+            connector,
+            &mut upgraded_framed,
+            &mut ReqwestNetworkClient::new(),
+            (&config.destination).into(),
+            server_public_key,
+            config.kerberos_config.clone(),
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| timed_out("signing in (the computer stopped answering during login)", 60))??;
+    stage("Waiting for the first picture");
 
     Ok((connection_result, upgraded_framed))
 }

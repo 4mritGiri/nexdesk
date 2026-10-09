@@ -7,6 +7,28 @@ pub const MAX_DIM: u16 = 16384;
 pub const MAX_CLIP: usize = 1024 * 1024;
 /// Largest cursor image edge accepted.
 pub const MAX_CURSOR: u16 = 256;
+/// Longest chat message accepted, in bytes.
+pub const MAX_CHAT: usize = 2000;
+/// Largest piece of a file in one message.
+pub const MAX_CHUNK: usize = 48 * 1024;
+/// A chat line made safe to send: no control characters, at most `MAX_CHAT` bytes.
+pub fn clean_chat(t: &str) -> String {
+    let mut out = String::new();
+    for c in t.chars().filter(|c| !c.is_control()) {
+        if out.len() + c.len_utf8() > MAX_CHAT {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Files per transfer, size of one file and of one transfer.
+pub const MAX_FILES: u32 = 10_000;
+pub const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024 * 1024;
+pub const MAX_BATCH_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// Longest relative path of one file.
+pub const MAX_PATH: usize = 400;
 /// Largest raw tile (bytes) accepted: 64 MiB.
 pub const MAX_TILE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -43,7 +65,22 @@ pub enum Msg {
     Wheel { dx: i16, dy: i16 },
     /// Linux evdev key code (KEY_*), the same on every Linux viewer and host.
     Key { code: u16, down: bool },
+    /// Ask to send `count` files (`total` bytes). `first` is the name of the first one, for the question
+    /// shown to the user. Nothing is written until the other side answers yes.
+    FilesOffer { batch: u32, count: u32, total: u64, first: String },
+    /// One file of an accepted batch: size and a relative path ('/' separated, never absolute).
+    FileStart { batch: u32, id: u32, size: u64, path: String },
+    FileChunk { id: u32, data: Vec<u8> },
+    FileEnd { id: u32 },
     // both
+    /// A chat line (UTF-8, at most `MAX_CHAT` bytes, control characters removed). Never logged.
+    Chat(String),
+    /// Answer to `FilesOffer`.
+    FilesAnswer { batch: u32, accept: bool },
+    /// The receiver has stored `bytes` bytes of file `id` so far (lets the sender keep a window in flight).
+    FileAck { id: u32, bytes: u64 },
+    /// Stop a transfer, either side.
+    FileAbort { batch: u32, reason: String },
     /// Clipboard text (UTF-8, at most `MAX_CLIP` bytes). Never logged.
     Clip(String),
     Ping(u64),
@@ -61,6 +98,14 @@ const T_MOVE: u8 = 0x10;
 const T_BUTTON: u8 = 0x11;
 const T_WHEEL: u8 = 0x12;
 const T_KEY: u8 = 0x13;
+const T_CHAT: u8 = 0x40;
+const T_OFFER: u8 = 0x50;
+const T_ANSWER: u8 = 0x51;
+const T_FSTART: u8 = 0x52;
+const T_FCHUNK: u8 = 0x53;
+const T_FEND: u8 = 0x54;
+const T_FACK: u8 = 0x55;
+const T_FABORT: u8 = 0x56;
 const T_PING: u8 = 0x20;
 const T_PONG: u8 = 0x21;
 
@@ -129,6 +174,49 @@ impl Msg {
                 v.extend_from_slice(&code.to_be_bytes());
                 v.push(*down as u8);
             }
+            Msg::Chat(t) => {
+                v.push(T_CHAT);
+                v.extend_from_slice(t.as_bytes());
+            }
+            Msg::FilesOffer { batch, count, total, first } => {
+                v.push(T_OFFER);
+                v.extend_from_slice(&batch.to_be_bytes());
+                v.extend_from_slice(&count.to_be_bytes());
+                v.extend_from_slice(&total.to_be_bytes());
+                v.extend_from_slice(first.as_bytes());
+            }
+            Msg::FilesAnswer { batch, accept } => {
+                v.push(T_ANSWER);
+                v.extend_from_slice(&batch.to_be_bytes());
+                v.push(*accept as u8);
+            }
+            Msg::FileStart { batch, id, size, path } => {
+                v.push(T_FSTART);
+                v.extend_from_slice(&batch.to_be_bytes());
+                v.extend_from_slice(&id.to_be_bytes());
+                v.extend_from_slice(&size.to_be_bytes());
+                v.extend_from_slice(path.as_bytes());
+            }
+            Msg::FileChunk { id, data } => {
+                v.push(T_FCHUNK);
+                v.extend_from_slice(&id.to_be_bytes());
+                v.extend_from_slice(data);
+            }
+            Msg::FileEnd { id } => {
+                v.push(T_FEND);
+                v.extend_from_slice(&id.to_be_bytes());
+            }
+            Msg::FileAck { id, bytes } => {
+                v.push(T_FACK);
+                v.extend_from_slice(&id.to_be_bytes());
+                v.extend_from_slice(&bytes.to_be_bytes());
+            }
+            Msg::FileAbort { batch, reason } => {
+                v.push(T_FABORT);
+                v.extend_from_slice(&batch.to_be_bytes());
+                let b = reason.as_bytes();
+                v.extend_from_slice(&b[..b.len().min(200)]);
+            }
             Msg::Ping(n) => {
                 v.push(T_PING);
                 v.extend_from_slice(&n.to_be_bytes());
@@ -145,6 +233,18 @@ impl Msg {
         let (&tag, rest) = b.split_first().ok_or_else(|| bad("empty message"))?;
         let u16at = |i: usize| -> Result<u16, PeerError> {
             rest.get(i..i + 2).map(|s| u16::from_be_bytes([s[0], s[1]])).ok_or_else(|| bad("short message"))
+        };
+        let u32at = |i: usize| -> Result<u32, PeerError> {
+            rest.get(i..i + 4).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]])).ok_or_else(|| bad("short message"))
+        };
+        let u64at = |i: usize| -> Result<u64, PeerError> {
+            rest.get(i..i + 8)
+                .map(|s| {
+                    let mut n = [0u8; 8];
+                    n.copy_from_slice(s);
+                    u64::from_be_bytes(n)
+                })
+                .ok_or_else(|| bad("short message"))
         };
         let exact = |n: usize| if rest.len() == n { Ok(()) } else { Err(bad("wrong message length")) };
         let flag = |i: usize| -> Result<bool, PeerError> {
@@ -238,6 +338,60 @@ impl Msg {
                 exact(3)?;
                 Msg::Key { code: u16at(0)?, down: flag(2)? }
             }
+            T_CHAT => {
+                if rest.len() > MAX_CHAT {
+                    return Err(bad("chat line too long"));
+                }
+                let t = String::from_utf8(rest.to_vec()).map_err(|_| bad("chat is not UTF-8"))?;
+                Msg::Chat(t.chars().filter(|c| !c.is_control()).collect())
+            }
+            T_OFFER => {
+                if rest.len() < 16 || rest.len() > 16 + MAX_PATH {
+                    return Err(bad("bad file offer"));
+                }
+                let (batch, count, total) = (u32at(0)?, u32at(4)?, u64at(8)?);
+                if count == 0 || count > MAX_FILES || total > MAX_BATCH_BYTES {
+                    return Err(bad("file offer out of range"));
+                }
+                let first = String::from_utf8_lossy(&rest[16..]).chars().filter(|c| !c.is_control()).collect();
+                Msg::FilesOffer { batch, count, total, first }
+            }
+            T_ANSWER => {
+                exact(5)?;
+                Msg::FilesAnswer { batch: u32at(0)?, accept: flag(4)? }
+            }
+            T_FSTART => {
+                if rest.len() < 17 || rest.len() > 16 + MAX_PATH {
+                    return Err(bad("bad file start"));
+                }
+                let size = u64at(8)?;
+                if size > MAX_FILE_SIZE {
+                    return Err(bad("file too large"));
+                }
+                let path = String::from_utf8(rest[16..].to_vec()).map_err(|_| bad("file name is not UTF-8"))?;
+                Msg::FileStart { batch: u32at(0)?, id: u32at(4)?, size, path }
+            }
+            T_FCHUNK => {
+                if rest.len() < 5 || rest.len() > 4 + MAX_CHUNK {
+                    return Err(bad("bad file chunk"));
+                }
+                Msg::FileChunk { id: u32at(0)?, data: rest[4..].to_vec() }
+            }
+            T_FEND => {
+                exact(4)?;
+                Msg::FileEnd { id: u32at(0)? }
+            }
+            T_FACK => {
+                exact(12)?;
+                Msg::FileAck { id: u32at(0)?, bytes: u64at(4)? }
+            }
+            T_FABORT => {
+                if rest.len() < 4 || rest.len() > 4 + 200 {
+                    return Err(bad("bad abort"));
+                }
+                let reason = String::from_utf8_lossy(&rest[4..]).chars().filter(|c| !c.is_control()).collect();
+                Msg::FileAbort { batch: u32at(0)?, reason }
+            }
             T_PING | T_PONG => {
                 exact(8)?;
                 let mut n = [0u8; 8];
@@ -291,6 +445,41 @@ mod tests {
         rt(Msg::Clip("héllo\nworld".into()));
         rt(Msg::Ping(u64::MAX));
         rt(Msg::Pong(1));
+        rt(Msg::Chat("hi there \u{1F600}".into()));
+        rt(Msg::FilesOffer { batch: 7, count: 3, total: 1 << 33, first: "docs/a.txt".into() });
+        rt(Msg::FilesAnswer { batch: 7, accept: true });
+        rt(Msg::FileStart { batch: 7, id: 2, size: 99, path: "docs/a.txt".into() });
+        rt(Msg::FileChunk { id: 2, data: vec![1, 2, 3] });
+        rt(Msg::FileEnd { id: 2 });
+        rt(Msg::FileAck { id: 2, bytes: 4096 });
+        rt(Msg::FileAbort { batch: 7, reason: "no space".into() });
+    }
+
+    #[test]
+    fn transfer_messages_reject_hostile_input() {
+        let mut o = vec![T_OFFER];
+        o.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0]); // batch 1, count 0
+        o.extend_from_slice(&0u64.to_be_bytes());
+        assert!(Msg::decode(&o).is_err(), "zero files");
+        let mut o = vec![T_OFFER];
+        o.extend_from_slice(&1u32.to_be_bytes());
+        o.extend_from_slice(&1u32.to_be_bytes());
+        o.extend_from_slice(&u64::MAX.to_be_bytes());
+        assert!(Msg::decode(&o).is_err(), "absurd total");
+        let mut c = vec![T_FCHUNK, 0, 0, 0, 1];
+        c.resize(5 + MAX_CHUNK + 1, 0);
+        assert!(Msg::decode(&c).is_err(), "oversized chunk");
+        assert!(Msg::decode(&[T_FCHUNK, 0, 0, 0, 1]).is_err(), "empty chunk");
+        let mut s = vec![T_FSTART];
+        s.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1]);
+        s.extend_from_slice(&u64::MAX.to_be_bytes());
+        s.push(b'a');
+        assert!(Msg::decode(&s).is_err(), "file larger than the cap");
+        assert!(Msg::decode(&[T_ANSWER, 0, 0, 0, 1, 2]).is_err(), "flag");
+        let mut ch = vec![T_CHAT];
+        ch.resize(1 + MAX_CHAT + 1, b'a');
+        assert!(Msg::decode(&ch).is_err(), "chat cap");
+        assert_eq!(Msg::decode(&[T_CHAT, b'a', 0x1b, b'[', b'b']).unwrap(), Msg::Chat("a[b".into()), "control characters stripped");
     }
 
     #[test]

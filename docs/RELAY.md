@@ -18,6 +18,10 @@ Agent: `nexdesk-agent --relay relay.example.com:21117` (prints `this computer's 
 Viewer: `nexdesk-peer-view --relay relay.example.com:21117 123456789`.
 In the manager: Remote Control, type the relay server in the box, press Start sharing; the ID is shown. To connect, type the nine digit ID instead of an address.
 
+**Which address goes in the manager's relay box:** the real address of the computer that runs `nexdesk-relay` (for example `192.168.1.20:21117`), the same on every computer. `0.0.0.0:21117` is only what the relay *listens* on; as a destination it means "this computer", so it never reaches a relay elsewhere (the manager now refuses it). On one local network you do not need a relay: connect to the other computer's address instead.
+
+**ID buttons (Remote Control page):** *Copy ID* puts the nine digits on the clipboard; *New ID* replaces the saved ID and restarts sharing. The fingerprint does not change, so people who already pinned this computer are not warned; they only need the new ID.
+
 ## What the relay knows and limits
 * Sees: client addresses, IDs, when and how much traffic flows. Logs addresses and IDs only, never content.
 * An ID cannot be taken over while its owner is registered. If the owner reappears after a crash, the relay frees the ID within 45 s (heartbeat silence).

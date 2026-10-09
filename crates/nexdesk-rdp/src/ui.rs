@@ -302,6 +302,25 @@ pub enum BarHit {
     Scale,
     /// Freeze the view and block input.
     Pause,
+    /// Session tab `i`, its close button, and the "+" button.
+    Tab(usize),
+    TabClose(usize),
+    NewTab,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TabState {
+    Connecting,
+    Live,
+    Paused,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+pub struct TabInfo {
+    pub title: String,
+    pub active: bool,
+    pub state: TabState,
 }
 
 /// Floating pill at the top centre of the full-screen session, styled like the GNOME Files
@@ -315,6 +334,8 @@ pub struct Toolbar {
     pub paused: bool,
     /// 1:1 (pannable) view instead of fit-to-window.
     pub actual: bool,
+    /// One entry per open session, in tab order.
+    pub tabs: Vec<TabInfo>,
     shown_until: Option<Instant>,
 }
 
@@ -323,7 +344,8 @@ const TOOL_STEP: i32 = 32;
 
 impl Toolbar {
     pub fn new(title: String) -> Self {
-        Self { title, pinned: false, docked: false, paused: false, actual: false, shown_until: None }
+        let tabs = vec![TabInfo { title: title.clone(), active: true, state: TabState::Live }];
+        Self { title, pinned: false, docked: false, paused: false, actual: false, tabs, shown_until: None }
     }
 
     /// Keep (or make) the bar visible for a little while.
@@ -353,7 +375,8 @@ impl Toolbar {
         if self.docked {
             return (0, 0, win_w, h);
         }
-        let w = (540 * u).min(win_w);
+        let extra = self.tabs.len().saturating_sub(1) as i32 * 150 * u;
+        let w = (540 * u + extra).min(win_w);
         ((win_w - w) / 2, 0, w, h)
     }
 
@@ -379,6 +402,25 @@ impl Toolbar {
         v
     }
 
+    /// Tab rectangles as (x, width), and the x of the "+" button.
+    fn tab_layout(&self, win_w: i32, u: i32) -> (Vec<(i32, i32)>, i32) {
+        let (x, _, w, _) = self.rect(win_w, u);
+        let tab_left = x + 26 * u + 2 * 28 * u + 24 * u;
+        let tools_left = self
+            .buttons(win_w, u)
+            .iter()
+            .filter(|b| matches!(b.0, BarHit::Cad | BarHit::Shot | BarHit::Scale | BarHit::Pause | BarHit::Pin))
+            .map(|b| b.1 - b.2)
+            .min()
+            .unwrap_or(x + w);
+        let room = (tools_left - 10 * u - tab_left).max(0);
+        let n = self.tabs.len().max(1) as i32;
+        let plus = 30 * u;
+        let each = ((room - plus) / n - 4 * u).clamp(40 * u, 190 * u);
+        let tabs = (0..n).map(|i| (tab_left + i * (each + 4 * u), each)).collect();
+        (tabs, tab_left + n * (each + 4 * u))
+    }
+
     pub fn hit(&self, win_w: i32, u: i32, px: f64, py: f64) -> BarHit {
         let (x, y, w, h) = self.rect(win_w, u);
         let (px, py) = (px as i32, py as i32);
@@ -388,6 +430,18 @@ impl Toolbar {
         for (hit, cx, half) in self.buttons(win_w, u) {
             if (px - cx).abs() <= half {
                 return hit;
+            }
+        }
+        let (tabs, plus_x) = self.tab_layout(win_w, u);
+        let (tab_y0, tab_y1) = (y + h / 2 - 14 * u, y + h / 2 + 14 * u);
+        if py >= tab_y0 && py < tab_y1 {
+            for (i, (tx, tw)) in tabs.iter().enumerate() {
+                if px >= *tx && px < tx + tw {
+                    return if px >= tx + tw - 24 * u { BarHit::TabClose(i) } else { BarHit::Tab(i) };
+                }
+            }
+            if px >= plus_x && px < plus_x + 28 * u {
+                return BarHit::NewTab;
             }
         }
         BarHit::Bar
@@ -404,7 +458,9 @@ impl Toolbar {
             BarHit::Shot => "Copy screen to clipboard",
             BarHit::Scale => if self.actual { "Fit to window" } else { "Actual size (1:1)" },
             BarHit::Pause => if self.paused { "Resume" } else { "Pause" },
-            BarHit::None | BarHit::Bar => return None,
+            BarHit::TabClose(_) => "Close tab",
+            BarHit::NewTab => "New connection: pick one in the NexDesk window",
+            BarHit::Tab(_) | BarHit::None | BarHit::Bar => return None,
         })
     }
 
@@ -473,36 +529,63 @@ impl Toolbar {
                 }
             }
         }
-        // Session tab: sits right after the window buttons, like a browser tab.
+        // Session tabs: right after the window buttons, like browser tabs.
         let k = u.max(1);
-        let tab_left = x + 26 * u + 2 * 28 * u + 24 * u;
-        let tools_left = buttons
-            .iter()
-            .filter(|b| matches!(b.0, BarHit::Cad | BarHit::Shot | BarHit::Scale | BarHit::Pause | BarHit::Pin))
-            .map(|b| b.1 - b.2)
-            .min()
-            .unwrap_or(x + w);
-        let room = (tools_left - 10 * u - tab_left).max(0);
-        let mut label = self.title.clone();
-        if self.paused {
-            label = format!("{label} (paused)");
-        }
-        let pad = 12 * u;
-        let dot_w = 18 * u;
-        let label = truncate(&label, (room - 2 * pad - dot_w).max(0), k);
-        let tw = text_width(&label, k);
-        let tab_w = (tw + 2 * pad + dot_w).min(room);
-        if tab_w > 2 * pad {
+        let (tab_rects, plus_x) = self.tab_layout(c.w as i32, u);
+        for (i, ((tx, tw), info)) in tab_rects.iter().zip(self.tabs.iter()).enumerate() {
             let (tab_h, tab_y) = (28 * u, cy - 14 * u);
-            c.rrect(tab_left, tab_y, tab_w, tab_h, 9 * u, 0x00_38_38_38);
-            c.rect(tab_left + 10 * u, tab_y + tab_h - 2 * u, tab_w - 20 * u, 2 * u, if self.paused { WARN } else { ACCENT_HI });
-            c.circle(tab_left + pad + 3 * u, cy, 4 * u, if self.paused { WARN } else { GREEN });
-            c.text(tab_left + pad + dot_w - 2 * u, cy - 4 * k, &label, k, if self.paused { WARN } else { FG });
+            let hot = matches!(hover, BarHit::Tab(j) | BarHit::TabClose(j) if j == i);
+            let bg = if info.active { 0x00_3a_3a_3a } else if hot { 0x00_33_33_33 } else { BAR };
+            c.rrect(*tx, tab_y, *tw, tab_h, 9 * u, bg);
+            let dot = match info.state {
+                TabState::Connecting => DOT_OFF,
+                TabState::Live => GREEN,
+                TabState::Paused => WARN,
+                TabState::Failed => RED,
+            };
+            if info.active {
+                c.rect(tx + 10 * u, tab_y + tab_h - 2 * u, tw - 20 * u, 2 * u, if info.state == TabState::Paused { WARN } else { ACCENT_HI });
+            }
+            c.circle(tx + 12 * u, cy, 4 * u, dot);
+            let close_w = 24 * u;
+            let label_room = (tw - 12 * u - 14 * u - close_w).max(0);
+            let mut label = info.title.clone();
+            if info.state == TabState::Paused {
+                label.push_str(" (paused)");
+            }
+            let label = truncate(&label, label_room, k);
+            c.text(tx + 22 * u, cy - 4 * k, &label, k, if info.active { FG } else { DIM });
+            // close "x"
+            let (xc, xr) = (tx + tw - 13 * u, 5 * u);
+            if matches!(hover, BarHit::TabClose(j) if j == i) {
+                c.circle(xc, cy, 9 * u, BAR_HOVER);
+            }
+            let xcol = if matches!(hover, BarHit::TabClose(j) if j == i) { FG } else { DIM };
+            c.line(xc - xr / 2 * 1, cy - xr / 2 * 1, xc + xr / 2, cy + xr / 2, u.max(1), xcol);
+            c.line(xc - xr / 2, cy + xr / 2, xc + xr / 2, cy - xr / 2, u.max(1), xcol);
+        }
+        {
+            let pc = plus_x + 14 * u;
+            if hover == BarHit::NewTab {
+                c.circle(pc, cy, 12 * u, BAR_HOVER);
+            }
+            let col = if hover == BarHit::NewTab { FG } else { DIM };
+            c.rect(pc - 5 * u, cy - u / 2, 10 * u, u.max(1), col);
+            c.rect(pc - u / 2, cy - 5 * u, u.max(1), 10 * u, col);
         }
 
         // Tooltip under the hovered button.
         if let Some(tip) = self.tip(hover) {
-            if let Some(&(_, cx, _)) = buttons.iter().find(|b| b.0 == hover) {
+            let anchor = buttons
+                .iter()
+                .find(|b| b.0 == hover)
+                .map(|b| b.1)
+                .or_else(|| match hover {
+                    BarHit::TabClose(i) => tab_rects.get(i).map(|(tx, tw)| tx + tw - 13 * u),
+                    BarHit::NewTab => Some(plus_x + 14 * u),
+                    _ => None,
+                });
+            if let Some(cx) = anchor {
                 let tw = text_width(tip, k);
                 let (bw, bh) = (tw + 16 * u, 22 * u);
                 let bx = (cx - bw / 2).clamp(2 * u, (c.w as i32 - bw - 2 * u).max(2 * u));
@@ -777,6 +860,19 @@ mod tests {
         let mut rgb = Vec::new();
         for p in &buf { rgb.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]); }
         image::RgbImage::from_raw(w as u32, h as u32, rgb).unwrap().save(format!("{dir}/preview.png")).unwrap();
+    }
+
+    #[test]
+    fn tab_hits() {
+        let mut t = Toolbar::new("a".into());
+        t.docked = true;
+        t.tabs.push(TabInfo { title: "b".into(), active: false, state: TabState::Live });
+        let (tabs, plus) = t.tab_layout(1920, 1);
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(t.hit(1920, 1, (tabs[1].0 + 10) as f64, 20.0), BarHit::Tab(1));
+        assert_eq!(t.hit(1920, 1, (tabs[0].0 + tabs[0].1 - 8) as f64, 20.0), BarHit::TabClose(0));
+        assert_eq!(t.hit(1920, 1, (plus + 8) as f64, 20.0), BarHit::NewTab);
+        assert_eq!(t.hit(1920, 1, (plus + 8) as f64, 2.0), BarHit::Bar);
     }
 
     #[test]

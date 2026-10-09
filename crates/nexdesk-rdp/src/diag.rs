@@ -18,7 +18,13 @@ pub fn chain(e: &dyn Error) -> String {
 /// A plain-language hint for the most common failures, if we recognise one.
 pub fn hint(msg: &str) -> Option<&'static str> {
     let m = msg.to_ascii_lowercase();
-    if m.contains("refused") {
+    if m.contains("while negotiating") {
+        Some("The computer accepted the connection but did not answer as an RDP server. Check that the port is really Remote Desktop (3389 by default). On Linux, check that Desktop Sharing / gnome-remote-desktop is switched on and that its RDP login (set in Settings > Sharing > Remote Desktop) is used, not your Linux password. Windows Home cannot host RDP.")
+    } else if m.contains("while setting up the secure") {
+        Some("The secure (TLS) setup did not finish. A certificate question may be waiting, or the server does not support TLS here.")
+    } else if m.contains("while signing in") {
+        Some("The computer stopped answering during login. Check the user name and password (on Ubuntu/GNOME the RDP user name and password from Settings > Sharing > Remote Desktop, not your Linux login) and that the screen is not waiting on a local prompt.")
+    } else if m.contains("refused") {
         Some("The computer answered but nothing listens on the RDP port. On that Windows PC turn on Settings > System > Remote Desktop (Pro/Enterprise/Server editions only; Windows Home cannot host RDP) and check the port (default 3389).")
     } else if m.contains("timed out") || m.contains("timeout") {
         Some("No answer. The computer may be asleep or off, on another network, or a firewall drops port 3389. On Windows allow 'Remote Desktop' in Windows Defender Firewall for the Private profile.")

@@ -130,9 +130,9 @@ Architecture and rules: `docs/REMOTE.md`. RDP stays the way to reach Windows Pro
 | Windows login screen / UAC | Hard | **Planned P5d** | SYSTEM service helper |
 | Privacy mode, block remote input | Hard | **Planned P5d** | |
 | Audio | Medium | **Planned P5b** | Opus |
-| File transfer (queue, resume) | Medium | **Planned P5b** | reuse clipfiles sanitising |
+| File transfer (queue, resume) | Medium | **Partial** | NexDesk-to-NexDesk upload by drag and drop, consent + safe saving; download, file manager and resume planned |
 | Clipboard text/images/files | Easy | **Text done (P5a prototype)**, images/files planned | text via `nexdesk-clipboard` X11 transport |
-| Chat | Easy | **Planned P5b** | |
+| Chat | Easy | **Done** (NexDesk peer sessions) | viewer overlay and manager card |
 | TCP tunnelling | Medium | **Planned P5b** | off by default |
 | Multi-monitor, custom resolution | Medium | **Monitor switching done (prototype)**, custom resolution planned | RandR monitor list, one monitor shown at a time |
 | Codec / quality / FPS selection, hardware encoders | Hard | **Planned P5a, hardware P5d** | |

@@ -23,6 +23,17 @@ pub fn valid_addr(a: &str) -> bool {
         && a.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_' | '[' | ']'))
 }
 
+/// True for `0.0.0.0` / `::` (with or without a port): addresses a server *listens* on, which mean
+/// "this computer" when used as a destination. Typing one as the relay never reaches a relay on another computer.
+pub fn is_wildcard_host(addr: &str) -> bool {
+    let host = match addr.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None if addr.matches(':').count() > 1 => addr, // bare IPv6
+        None => addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr),
+    };
+    matches!(host, "0.0.0.0" | "::" | "0:0:0:0:0:0:0:0")
+}
+
 /// `SHA256:` followed by base64 characters.
 pub fn valid_fingerprint(f: &str) -> bool {
     f.strip_prefix("SHA256:")
@@ -92,6 +103,10 @@ pub enum AgentEvent {
     Relay(String),
     /// A viewer asks to connect; answer with `Agent::answer`.
     Request(String),
+    /// The connected viewer wants to send files: (file count, bytes, first name). Answer with `answer_files`.
+    Files(u32, u64, String),
+    /// A chat line from the viewer.
+    Chat(String),
     Exited,
 }
 
@@ -134,6 +149,14 @@ impl Agent {
                     Some(("ID", i)) if nexdesk_network::proto::valid_id(i.trim()) => AgentEvent::Id(i.trim().into()),
                     Some(("RELAY", t)) => AgentEvent::Relay(t.chars().filter(|c| !c.is_control()).take(120).collect()),
                     Some(("REQUEST", f)) if valid_fingerprint(f.trim()) => AgentEvent::Request(f.trim().into()),
+                    Some(("CHAT", t)) => AgentEvent::Chat(t.chars().filter(|c| !c.is_control()).take(crate::wire::MAX_CHAT).collect()),
+                    Some(("FILES", t)) => {
+                        let mut p = t.splitn(3, ' ');
+                        match (p.next().and_then(|c| c.parse().ok()), p.next().and_then(|b| b.parse().ok())) {
+                            (Some(c), Some(b)) => AgentEvent::Files(c, b, p.next().unwrap_or("").chars().filter(|c| !c.is_control()).take(120).collect()),
+                            _ => continue,
+                        }
+                    }
                     _ => continue,
                 };
                 if tx.send(ev).is_err() {
@@ -148,6 +171,20 @@ impl Agent {
     pub fn answer(&mut self, yes: bool) {
         let _ = writeln!(self.stdin, "{}", if yes { "yes" } else { "no" });
         let _ = self.stdin.flush();
+    }
+
+    pub fn answer_files(&mut self, yes: bool) {
+        let _ = writeln!(self.stdin, "files {}", if yes { "yes" } else { "no" });
+        let _ = self.stdin.flush();
+    }
+
+    /// Send a chat line to the connected viewer.
+    pub fn send_chat(&mut self, text: &str) {
+        let t = crate::wire::clean_chat(text);
+        if !t.is_empty() {
+            let _ = writeln!(self.stdin, "chat {t}");
+            let _ = self.stdin.flush();
+        }
     }
 
     pub fn stop(&mut self) {
@@ -176,6 +213,8 @@ mod tests {
         for bad in ["", "SHA256:", "MD5:abc", "SHA256:a b", "SHA256:--x;"] {
             assert!(!valid_fingerprint(bad), "{bad:?}");
         }
+        assert!(is_wildcard_host("0.0.0.0") && is_wildcard_host("0.0.0.0:21117") && is_wildcard_host("[::]:21117") && is_wildcard_host("::"));
+        assert!(!is_wildcard_host("192.168.1.20:21117") && !is_wildcard_host("relay.example.com") && !is_wildcard_host("[::1]:21117"));
         assert_eq!(with_port("pc"), "pc:21118");
         assert_eq!(with_port("pc:99"), "pc:99");
     }

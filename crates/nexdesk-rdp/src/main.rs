@@ -2,7 +2,9 @@
 mod app;
 mod diag;
 mod grab;
+mod ipc;
 mod keymap;
+mod session;
 mod shot;
 mod tls;
 mod ui;
@@ -10,9 +12,6 @@ mod ui;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use ironrdp_client::config::{ClipboardType, ConfigBuilder, Destination};
-use ironrdp_client::rdp::{RdpClient, RdpOutputEvent};
-use ironrdp_pdu::rdp::capability_sets::MajorPlatformType;
 use nexdesk_core::rdpfile::RdpFile;
 use winit::event_loop::EventLoop;
 
@@ -41,6 +40,7 @@ OPTIONS:
   --forget-host          delete the pinned certificate for this host, then continue
   --perf <lan|balanced|slow>  speed preset (default: from the .rdp file, else balanced). balanced turns off
                          wallpaper/menu animations/full-window drag; slow also turns off themes and uses 16-bit colour
+  --new-window           open this connection in its own window instead of a tab of the open window
   --native-frame         use the system title bar instead of NexDesk's own header bar
   --x11 / --wayland      force the window system (default: automatic). File drops from the
                          local desktop need --x11 on Wayland (the winit toolkit lacks Wayland DnD)
@@ -48,7 +48,9 @@ OPTIONS:
 
 The password is read from $NEXDESK_PASSWORD or prompted (never passed as an argument).
 In full screen, move the mouse to the top edge to show the connection bar (pin, minimise, restore, close).
-Hotkeys: Ctrl+Alt+End = Ctrl+Alt+Del on the remote; Ctrl+Alt+Break = toggle full screen. Logs: NEXDESK_LOG=debug
+Hotkeys: Ctrl+Alt+End = Ctrl+Alt+Del on the remote; Ctrl+Alt+Break = toggle full screen;
+         Ctrl+Alt+PageDown / PageUp = next / previous session tab.
+Several connections share one window as tabs (use --new-window to open a separate one). Logs: NEXDESK_LOG=debug
 ";
 
 struct Args {
@@ -68,6 +70,7 @@ struct Args {
     backend: Option<Backend>,
     speed: Option<nexdesk_core::profiles::Speed>,
     native_frame: bool,
+    new_window: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -94,6 +97,7 @@ fn parse_args() -> Result<Option<Args>> {
         backend: None,
         speed: None,
         native_frame: false,
+        new_window: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -123,6 +127,7 @@ fn parse_args() -> Result<Option<Args>> {
                 );
             }
             "--native-frame" => a.native_frame = true,
+            "--new-window" => a.new_window = true,
             "--x11" => a.backend = Some(Backend::X11),
             "--wayland" => a.backend = Some(Backend::Wayland),
             "--tls" => {
@@ -133,16 +138,6 @@ fn parse_args() -> Result<Option<Args>> {
         }
     }
     Ok(Some(a))
-}
-
-fn platform() -> MajorPlatformType {
-    if cfg!(windows) {
-        MajorPlatformType::WINDOWS
-    } else if cfg!(target_os = "macos") {
-        MajorPlatformType::MACINTOSH
-    } else {
-        MajorPlatformType::UNIX
-    }
 }
 
 fn main() -> Result<()> {
@@ -177,8 +172,6 @@ fn main() -> Result<()> {
         .clone()
         .or_else(|| file.username().map(str::to_owned))
         .context("no username given: use -u or put it in the .rdp file")?;
-    let user_for_log = user.clone();
-    nexdesk_core::logs::set_context_host(&host);
     let domain = args
         .domain
         .clone()
@@ -196,58 +189,36 @@ fn main() -> Result<()> {
         Err(_) => rpassword::prompt_password(format!("Password for {user}@{host}: "))?,
     };
 
-    let mut builder = ConfigBuilder::new()
-        .with_destination(Destination::new(host.clone())?)
-        .with_username(user)
-        .with_password(password)
-        .with_client_build(0)
-        .with_client_dir("C:\\Windows\\System32\\mstscax.dll")
-        .with_client_name("nexdesk")
-        .with_platform(platform())
-        .with_desktop_width(width)
-        .with_desktop_height(height)
-        .with_clipboard(if args.clipboard {
-            ClipboardType::Enable
-        } else {
-            ClipboardType::Disable
-        });
-    if let Some(d) = domain {
-        builder = builder.with_domain(d);
-    }
-    {
-        use ironrdp_pdu::rdp::client_info::PerformanceFlags as P;
-        use nexdesk_core::profiles::Speed;
-        let speed = args.speed.unwrap_or_else(|| match &file_speed {
-            Some(v) => Speed::parse(v).unwrap_or_default(),
-            None => Speed::Balanced,
-        });
-        let balanced = P::DISABLE_WALLPAPER | P::DISABLE_FULLWINDOWDRAG | P::DISABLE_MENUANIMATIONS | P::ENABLE_FONT_SMOOTHING;
-        let flags = match speed {
-            Speed::Lan => P::ENABLE_FONT_SMOOTHING | P::ENABLE_DESKTOP_COMPOSITION,
-            Speed::Balanced => balanced,
-            Speed::Slow => balanced | P::DISABLE_THEMING | P::DISABLE_CURSOR_SHADOW | P::DISABLE_CURSORSETTINGS,
-        };
-        builder = builder.with_performance_flags(flags);
-        if speed == Speed::Slow {
-            builder = builder.with_color_depth(16);
-        }
-    }
-    let mut config = builder.build()?;
-
-    // ---- TLS: pin / verify the server certificate (stock IronRDP accepts anything)
-    let known_path = nexdesk_core::knownhosts::default_path();
-    let key = nexdesk_core::knownhosts::host_key(config.destination().name(), config.destination().port());
-    let mut known = match &known_path {
-        Some(p) => nexdesk_core::knownhosts::KnownHosts::load(p),
-        None => nexdesk_core::knownhosts::KnownHosts::in_memory(),
+    use nexdesk_core::profiles::Speed;
+    let speed = args.speed.unwrap_or_else(|| match &file_speed {
+        Some(v) => Speed::parse(v).unwrap_or_default(),
+        None => Speed::Balanced,
+    });
+    let spec = ipc::Spec {
+        host: host.clone(),
+        user,
+        domain,
+        password,
+        width,
+        height,
+        dynamic_resize: args.dynamic_resize,
+        fullscreen: args.fullscreen || file.get_int("screen mode id") == Some(2),
+        capture_keys: args.capture_keys,
+        clipboard: args.clipboard,
+        drop_paste: args.drop_paste,
+        tls: args.tls,
+        speed,
+        forget_host: args.forget_host,
+        profile: std::env::var("NEXDESK_PROFILE").ok().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| host.clone()),
     };
-    if args.forget_host {
-        match known.forget(&key) {
-            Ok(true) => eprintln!("forgot the pinned certificate for {key}"),
-            Ok(false) => eprintln!("no pinned certificate for {key}"),
-            Err(e) => eprintln!("cannot update known_hosts: {e}"),
+
+    // A viewer window is already open: add this connection to it as a tab and wait until it closes.
+    if !args.new_window {
+        if let Some(code) = ipc::forward(&spec) {
+            std::process::exit(code);
         }
     }
+    let listener = if args.new_window { None } else { ipc::bind() };
 
     let mut builder = EventLoop::<UserEvent>::with_user_event();
     #[cfg(target_os = "linux")]
@@ -264,91 +235,19 @@ fn main() -> Result<()> {
     }
     let event_loop = builder.build()?;
     let proxy = event_loop.create_proxy();
-
-    if args.tls == tls::Policy::Insecure {
-        nexdesk_core::logs::alarm(nexdesk_core::logs::Level::Warn, "Certificate verification disabled (--tls insecure)", &host, "");
+    #[cfg(unix)]
+    if let Some(l) = listener {
+        ipc::serve(l, proxy.clone());
     }
-    if args.tls != tls::Policy::Insecure {
-        let prompt_proxy = proxy.clone();
-        let prompt: tls::Prompt = std::sync::Arc::new(move |info| {
-            let (tx, rx) = std::sync::mpsc::channel();
-            if prompt_proxy.send_event(UserEvent::CertPrompt(info, tx)).is_err() {
-                return false;
-            }
-            rx.recv_timeout(std::time::Duration::from_secs(300)).unwrap_or(false)
-        });
-        let verifier = tls::PolicyVerifier::new(
-            config.destination().name(),
-            config.destination().port(),
-            args.tls,
-            known,
-            prompt,
-        );
-        config.set_tls_verifier(verifier);
-    } else {
-        eprintln!("WARNING: --tls insecure: the server certificate is NOT verified");
-    }
+    #[cfg(not(unix))]
+    let _ = listener;
 
-    // Protocol engine runs on its own tokio runtime; the UI thread owns the window.
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<RdpOutputEvent>(64);
-    let mut client = RdpClient::new(config, out_tx);
-    let input_tx = client.input_sender();
-
-    // ---- Clipboard: real Linux backend instead of IronRDP's no-op stub
-    let mut clip_handle = None;
-    if args.clipboard {
-        let sink_tx = input_tx.clone();
-        let clip = nexdesk_clipboard::LinuxClipboard::new(
-            std::sync::Arc::new(move |m| {
-                let _ = sink_tx.send(ironrdp_client::rdp::RdpInputEvent::Clipboard(m));
-            }),
-            nexdesk_clipboard::Config::default(),
-        );
-        client.set_clipboard_factory(clip.backend_factory());
-        clip_handle = Some(clip.handle());
-    }
-
-    let ui_proxy = proxy.clone();
-    std::thread::Builder::new()
-        .name("rdp-engine".into())
-        .spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime");
-            rt.block_on(async move {
-                let forward = async {
-                    while let Some(ev) = out_rx.recv().await {
-                        if proxy.send_event(UserEvent::Rdp(ev)).is_err() {
-                            break;
-                        }
-                    }
-                };
-                tokio::join!(client.run(), forward);
-            });
-        })?;
-
-    let mut app = App::new(
-        app::Options {
-            title: format!("nexdesk - {host}"),
-            host_label: host.clone(),
-            initial_size: (u32::from(width), u32::from(height)),
-            dynamic_resize: args.dynamic_resize,
-            native_frame: args.native_frame,
-            log_profile: std::env::var("NEXDESK_PROFILE").unwrap_or_else(|_| host.clone()),
-            log_user: user_for_log,
-            start_fullscreen: args.fullscreen || file.get_int("screen mode id") == Some(2),
-            capture_keys: args.capture_keys,
-            drop_paste: args.drop_paste,
-            proxy: ui_proxy,
-        },
-        input_tx,
-        clip_handle,
-    );
+    let mut app = App::new(app::Options { native_frame: args.native_frame, proxy }, spec);
     event_loop.run_app(&mut app)?;
 
     // Leave without running destructors: the window system, clipboard threads and the
     // protocol runtime are torn down in an unsafe order otherwise (this used to end in SIGSEGV).
+    ipc::cleanup();
     let code = match app.failure.take() {
         Some(msg) => {
             eprintln!("Error: {msg}");

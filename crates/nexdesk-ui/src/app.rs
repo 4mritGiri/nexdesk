@@ -44,8 +44,84 @@ gpui::actions!(
         InputPaste,
         InputCopy,
         InputCut,
+        InputSelectHome,
+        InputSelectEnd,
+        InputWordLeft,
+        InputWordRight,
+        InputSelectWordLeft,
+        InputSelectWordRight,
+        InputDeleteWordBack,
+        InputDeleteWordForward,
+        InputSubmit,
     ]
 );
+
+gpui::actions!(nexdesk_app, [AppEscape, AppConfirm]);
+
+fn char_class(c: char) -> u8 {
+    if c.is_whitespace() {
+        0
+    } else if c.is_alphanumeric() || c == '_' {
+        1
+    } else {
+        2
+    }
+}
+
+/// Start of the word before `offset`: skip spaces, then one run of the same kind of character.
+fn word_back(s: &str, offset: usize) -> usize {
+    let mut pos = offset.min(s.len());
+    let mut chars = s[..pos].char_indices().rev().peekable();
+    while let Some(&(i, c)) = chars.peek() {
+        if char_class(c) == 0 {
+            pos = i;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if let Some(&(_, c)) = chars.peek() {
+        let class = char_class(c);
+        for (i, c) in chars {
+            if char_class(c) != class {
+                break;
+            }
+            pos = i;
+        }
+    }
+    pos
+}
+
+/// End of the word after `offset`: skip spaces, then one run of the same kind of character.
+fn word_fwd(s: &str, offset: usize) -> usize {
+    let mut pos = offset.min(s.len());
+    let mut chars = s[pos..].char_indices().peekable();
+    while let Some(&(i, c)) = chars.peek() {
+        if char_class(c) == 0 {
+            pos = offset + i + c.len_utf8();
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if let Some(&(_, c)) = chars.peek() {
+        let class = char_class(c);
+        for (i, c) in chars {
+            if char_class(c) != class {
+                break;
+            }
+            pos = offset + i + c.len_utf8();
+        }
+    }
+    pos
+}
+
+/// Raised by a text field when Enter is pressed in it.
+pub enum TextInputEvent {
+    Submit,
+}
+
+impl gpui::EventEmitter<TextInputEvent> for TextInput {}
 
 // ============================================================================
 // Application
@@ -118,11 +194,17 @@ pub struct NexDeskApp {
     /// Relay used by the connection attempt in progress (ID connections only).
     pending_relay: Option<String>,
     agent_request: Option<String>,
+    /// The connected viewer wants to send files: (count, bytes, first name).
+    files_request: Option<(u32, u64, String)>,
+    chat_log: Vec<(bool, String)>,
+    chat_input: Entity<TextInput>,
     share_view_only: bool,
     share_clipboard: bool,
     /// Show the relay server and sharing options on the Remote Control page.
     remote_adv: bool,
     viewers: Vec<std::process::Child>,
+    /// Focus anchor for the window itself, so Esc/Enter work when no text field has focus.
+    root_focus: FocusHandle,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -176,7 +258,7 @@ fn make_input(cx: &mut Context<NexDeskApp>, placeholder: &'static str, value: &s
 impl NexDeskApp {
     pub fn new(
         engine_path: std::path::PathBuf,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let password_input = cx.new(|cx| TextInput::new(cx, true, "Password"));
@@ -245,14 +327,38 @@ impl NexDeskApp {
             relay_status: String::new(),
             pending_relay: None,
             agent_request: None,
+            files_request: None,
+            chat_log: Vec::new(),
+            chat_input: make_input(cx, "Message to the person connected", ""),
             share_view_only: false,
             share_clipboard: true,
             remote_adv: false,
             viewers: Vec::new(),
+            root_focus: cx.focus_handle(),
         };
         if vault_exists {
-            me.open_vault_dialog(VaultDlg::Unlock, _window, cx);
+            me.open_vault_dialog(VaultDlg::Unlock, window, cx);
+        } else {
+            window.focus(&me.root_focus, cx); // so Esc and Enter reach the window even before anything is clicked
         }
+        // Enter inside a field does what its button does.
+        let (a, c, p) = (me.remote_addr.clone(), me.chat_input.clone(), me.password_input.clone());
+        cx.subscribe(&a, |this, _, _: &TextInputEvent, cx| {
+            this.remote_connect(cx);
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&c, |this, _, _: &TextInputEvent, cx| {
+            this.send_chat(cx);
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(&p, window, |this, _, _: &TextInputEvent, window, cx| {
+            if this.password_dialog {
+                this.connect_selected(window, cx);
+            }
+        })
+        .detach();
         me
     }
 
@@ -492,6 +598,17 @@ impl NexDeskApp {
                         self.agent_request = Some(f);
                         self.nav.screen = Screen::Remote; // make sure the person sees the question
                     }
+                    AgentEvent::Files(c, b, n) => {
+                        self.files_request = Some((c, b, n));
+                        self.nav.screen = Screen::Remote;
+                    }
+                    AgentEvent::Chat(t) => {
+                        self.chat_log.push((false, t));
+                        if self.chat_log.len() > 100 {
+                            self.chat_log.remove(0);
+                        }
+                        self.nav.screen = Screen::Remote;
+                    }
                     AgentEvent::Exited => exited = true,
                 }
             }
@@ -499,6 +616,7 @@ impl NexDeskApp {
         if exited {
             self.agent = None;
             self.agent_request = None;
+            self.files_request = None;
             self.agent_fp = None;
             self.agent_id = None;
             self.relay_status.clear();
@@ -599,6 +717,28 @@ impl NexDeskApp {
             }
             Err(e) => self.remote_msg = e,
         }
+    }
+
+    fn answer_files(&mut self, yes: bool) {
+        if let Some(a) = self.agent.as_mut() {
+            a.answer_files(yes);
+        }
+        self.files_request = None;
+    }
+
+    fn send_chat(&mut self, cx: &mut Context<Self>) {
+        let text = self.chat_input.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if let Some(a) = self.agent.as_mut() {
+            a.send_chat(&text);
+            self.chat_log.push((true, nexdesk_peer::wire::clean_chat(&text)));
+            if self.chat_log.len() > 100 {
+                self.chat_log.remove(0);
+            }
+        }
+        self.chat_input.update(cx, |i, cx| i.set_value("", cx));
     }
 
     fn answer_request(&mut self, yes: bool) {
@@ -713,6 +853,14 @@ impl NexDeskApp {
         let width = make_input(cx, "1920", &p.width.to_string());
         let height = make_input(cx, "1080", &p.height.to_string());
         let first = host.read(cx).focus_handle.clone();
+        for input in [&name, &host, &user, &domain, &pre_cmd, &post_cmd, &width, &height] {
+            cx.subscribe(input, |this, _, _: &TextInputEvent, cx| {
+                if this.editor.is_some() {
+                    this.save_editor(cx);
+                }
+            })
+            .detach();
+        }
 
         self.editor = Some(Editor {
             original,
@@ -731,6 +879,42 @@ impl NexDeskApp {
         });
         window.focus(&first, cx);
         cx.notify();
+    }
+
+    /// Esc: close the top-most popup. A connection request is refused, never accepted.
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.files_request.is_some() {
+            self.answer_files(false);
+        } else if self.agent_request.is_some() {
+            self.answer_request(false);
+        } else if self.remote_trust.is_some() {
+            self.remote_trust = None;
+            self.remote_msg = "Cancelled. Nothing was connected.".into();
+        } else if self.info_dialog.is_some() {
+            self.info_dialog = None;
+        } else if self.menu_open {
+            self.menu_open = false;
+        } else if self.password_dialog {
+            self.cancel_password_dialog(window, cx);
+        } else if self.editor.is_some() {
+            self.editor = None;
+        } else if self.vault_dialog.is_some() && self.vault_dialog != Some(VaultDlg::ShowRecoveryKey) {
+            self.vault_dialog = None;
+        } else {
+            return;
+        }
+        window.focus(&self.root_focus, cx);
+        cx.notify();
+    }
+
+    /// Enter on a popup with only an informational purpose closes it. Questions about letting
+    /// someone in are never answered by a stray Enter.
+    fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.info_dialog.is_some() {
+            self.info_dialog = None;
+            window.focus(&self.root_focus, cx);
+            cx.notify();
+        }
     }
 
     fn cancel_editor(&mut self, cx: &mut Context<Self>) {
@@ -1073,6 +1257,8 @@ impl Render for NexDeskApp {
                 self.share_clipboard,
                 self.viewers.len(),
                 self.remote_adv,
+                self.chat_log.clone(),
+                self.chat_input.clone(),
                 cx,
             )
             .into_any_element(),
@@ -1203,6 +1389,27 @@ impl Render for NexDeskApp {
                 }),
             ));
         }
+        if let Some((count, bytes, first)) = self.files_request.clone() {
+            let size = if bytes >= 1 << 30 { format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64) } else { format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64) };
+            main = main.child(remote_dialog(
+                "Receive files?",
+                vec![
+                    format!("The connected computer wants to send you {count} file(s), {size} in total."),
+                    format!("First: {first}"),
+                    "They are saved in Downloads/NexDesk. Existing files are never replaced. Only accept files you expect.".into(),
+                ],
+                "Accept",
+                "Decline",
+                cx.listener(|this, _e, _w, cx| {
+                    this.answer_files(true);
+                    cx.notify();
+                }),
+                cx.listener(|this, _e, _w, cx| {
+                    this.answer_files(false);
+                    cx.notify();
+                }),
+            ));
+        }
         if let Some(fp) = self.agent_request.clone() {
             main = main.child(remote_dialog(
                 "Allow remote control?",
@@ -1239,6 +1446,10 @@ impl Render for NexDeskApp {
         div()
             .size_full()
             .relative()
+            .key_context("NexDesk")
+            .track_focus(&self.root_focus)
+            .on_action(cx.listener(|this, _: &AppEscape, window, cx| this.escape(window, cx)))
+            .on_action(cx.listener(|this, _: &AppConfirm, window, cx| this.confirm(window, cx)))
             // Solid layer under everything, so nothing from the desktop shows through the window.
             .child(div().absolute().inset_0().bg(bg()).when(rounded, |d| d.rounded(px(12.))))
             .child(main)
@@ -1617,6 +1828,8 @@ fn remote_view(
     clipboard: bool,
     open_windows: usize,
     advanced: bool,
+    chat: Vec<(bool, String)>,
+    chat_input: Entity<TextInput>,
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
     let card = || div().flex_1().min_w(px(300.)).p_5().rounded(px(12.)).bg(panel()).flex().flex_col().gap_3();
@@ -1676,6 +1889,45 @@ fn remote_view(
         .when(open_windows > 0, |d| d.child(hint(format!("{open_windows} remote window(s) open"))))
         .child(hint("The first time, you compare a fingerprint to be sure it is the right computer.".into()));
 
+    // Chat with whoever is connected to this computer (only while sharing)
+    let chat_card = sharing.then(|| {
+        let mut lines = div().flex().flex_col().gap_1().min_h(px(60.));
+        if chat.is_empty() {
+            lines = lines.child(hint("Messages between you and the person connected appear here.".into()));
+        }
+        for (mine, t) in chat.iter().rev().take(12).rev() {
+            lines = lines.child(
+                div().text_sm().child(format!("{} {t}", if *mine { "You:" } else { "Them:" })),
+            );
+        }
+        div()
+            .w_full()
+            .p_4()
+            .rounded(px(12.))
+            .bg(panel())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(title("Chat"))
+            .child(lines)
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(div().flex_1().child(field(chat_input, cx)))
+                    .child(toolbar_button_dyn(
+                        "chat-send".into(),
+                        "Send",
+                        true,
+                        cx.listener(|this, _e, _w, cx| {
+                            this.send_chat(cx);
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .child(hint("Files sent to you are saved in Downloads/NexDesk after you accept them.".into()))
+    });
+
     // Bottom: settings, hidden by default
     let mut options = div().w_full().p_4().rounded(px(12.)).bg(panel()).flex().flex_col().gap_3().child(
         div().flex().items_center().justify_between().child(title("Settings")).child(toolbar_button_dyn(
@@ -1724,6 +1976,7 @@ fn remote_view(
         .gap_3()
         .child(div().w_full().flex().flex_wrap().gap_3().child(mine).child(theirs))
         .when(!msg.is_empty(), |d| d.child(div().text_sm().child(msg.to_string())))
+        .children(chat_card)
         .child(options)
 }
 
@@ -3022,38 +3275,127 @@ fn menu_popover(cx: &mut Context<NexDeskApp>) -> impl IntoElement {
         )
 }
 
-fn info_dialog(d: InfoDialog, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
-    let (title, rows): (&str, Vec<(&str, &str)>) = match d {
-        InfoDialog::Shortcuts => (
-            "Keyboard Shortcuts",
+/// One key as a small raised "keycap".
+fn keycap(label: &str) -> impl IntoElement {
+    div()
+        .px_2()
+        .h(px(24.))
+        .min_w(px(26.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(panel_2())
+        .border_1()
+        .border_color(border())
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(label.to_string())
+}
+
+/// "Ctrl+Alt+End" becomes three keycaps joined by "+"; " / " separates alternatives.
+fn keys(spec: &str) -> gpui::Div {
+    let mut row = div().flex().flex_wrap().items_center().gap_1();
+    for (n, alt) in spec.split(" / ").enumerate() {
+        if n > 0 {
+            row = row.child(div().text_xs().text_color(muted()).px_1().child("or"));
+        }
+        for (i, k) in alt.split('+').enumerate() {
+            if i > 0 {
+                row = row.child(div().text_xs().text_color(muted()).child("+"));
+            }
+            row = row.child(keycap(k.trim()));
+        }
+    }
+    row
+}
+
+fn shortcut_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
+    vec![
+        (
+            "Anywhere in NexDesk",
             vec![
-                ("Ctrl+Alt+Break", "Toggle full screen in a session"),
-                ("Ctrl+Alt+End", "Send Ctrl+Alt+Del to the remote computer"),
-                ("Mouse to the top edge", "Show the toolbar in full screen"),
-                ("Super / Alt+Tab", "Go to the remote computer while in full screen"),
-                ("Double-click a connection", "Connect"),
-                ("Ctrl+C / Ctrl+V", "Copy and paste text, images and files both ways"),
+                ("Esc", "Close the open window or menu (a connection request is refused)"),
+                ("Enter", "Confirm in a text field; closes this information window"),
+                ("Tab / Shift+Tab", "Move between fields"),
             ],
         ),
-        InfoDialog::About => (
-            "About NexDesk",
+        (
+            "Editing text",
             vec![
+                ("Shift+Left / Shift+Right", "Select one character"),
+                ("Ctrl+Left / Ctrl+Right", "Move one word"),
+                ("Ctrl+Shift+Left / Ctrl+Shift+Right", "Select one word"),
+                ("Home / End", "Start or end of the text"),
+                ("Shift+Home / Shift+End", "Select to the start or end"),
+                ("Ctrl+A", "Select all"),
+                ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy, cut, paste"),
+                ("Ctrl+Backspace / Ctrl+Delete", "Delete a word"),
+            ],
+        ),
+        (
+            "In a remote desktop (RDP) window",
+            vec![
+                ("Ctrl+Alt+Break", "Full screen on or off"),
+                ("Ctrl+Alt+End", "Send Ctrl+Alt+Del to the remote computer"),
+                ("Ctrl+Alt+PageDown / Ctrl+Alt+PageUp", "Next or previous tab"),
+                ("Middle-click a tab", "Close that tab"),
+                ("Mouse to the top edge", "Show the toolbar in full screen"),
+            ],
+        ),
+        (
+            "In a NexDesk Remote Control window",
+            vec![
+                ("Ctrl+Alt+Pause", "Full screen on or off"),
+                ("Ctrl+Alt+End", "Send Ctrl+Alt+Del"),
+                ("Ctrl+Alt+C", "Open or close the chat"),
+                ("Drop files on the window", "Send them to the other computer"),
+            ],
+        ),
+    ]
+}
+
+fn info_dialog(d: InfoDialog, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+    let (title, width): (&str, f32) = match d {
+        InfoDialog::Shortcuts => ("Keyboard Shortcuts", 700.),
+        InfoDialog::About => ("About NexDesk", 560.),
+    };
+    let mut body = div().flex().flex_col().gap_4();
+    match d {
+        InfoDialog::Shortcuts => {
+            for (section, rows) in shortcut_sections() {
+                let mut group = div().flex().flex_col().gap_2().child(
+                    div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(accent_hover()).child(section.to_uppercase()),
+                );
+                for (k, v) in rows {
+                    group = group.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_4()
+                            .child(div().w(px(290.)).flex_none().child(keys(k)))
+                            .child(div().flex_1().text_sm().text_color(muted()).child(v)),
+                    );
+                }
+                body = body.child(group);
+            }
+        }
+        InfoDialog::About => {
+            for (k, v) in [
                 ("Version", env!("CARGO_PKG_VERSION")),
                 ("Protocol engine", "IronRDP (Rust)"),
                 ("Interface", "GPUI"),
                 ("Data", "~/.config/nexdesk and ~/.local/share/nexdesk"),
-            ],
-        ),
-    };
-    let mut body = div().flex().flex_col().gap_2();
-    for (k, v) in rows {
-        body = body.child(
-            div()
-                .flex()
-                .gap_4()
-                .child(div().w(px(180.)).flex_none().text_sm().font_weight(FontWeight::SEMIBOLD).child(k))
-                .child(div().flex_1().text_sm().text_color(muted()).child(v)),
-        );
+            ] {
+                body = body.child(
+                    div()
+                        .flex()
+                        .gap_4()
+                        .child(div().w(px(160.)).flex_none().text_sm().font_weight(FontWeight::SEMIBOLD).child(k))
+                        .child(div().flex_1().text_sm().text_color(muted()).child(v)),
+                );
+            }
+        }
     }
     div()
         .absolute()
@@ -3065,7 +3407,8 @@ fn info_dialog(d: InfoDialog, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
         .justify_center()
         .child(
             div()
-                .w(px(560.))
+                .w(px(width))
+                .max_h(px(640.))
                 .p_6()
                 .rounded(px(16.))
                 .bg(popover())
@@ -3076,7 +3419,7 @@ fn info_dialog(d: InfoDialog, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                 .flex_col()
                 .gap_4()
                 .child(popup_header(
-                    560.,
+                    width,
                     popup_close("pc-info", cx, |this, _w, cx| {
                         this.info_dialog = None;
                         cx.notify();
@@ -3084,17 +3427,22 @@ fn info_dialog(d: InfoDialog, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                     None,
                     title,
                 ))
-                .child(body)
+                .child(div().id("info-scroll").flex_1().overflow_y_scroll().child(body))
                 .child(
-                    div().flex().justify_end().child(toolbar_button_dyn(
-                        "info-close".into(),
-                        "Close",
-                        true,
-                        cx.listener(|this, _e, _w, cx| {
-                            this.info_dialog = None;
-                            cx.notify();
-                        }),
-                    )),
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(div().text_xs().text_color(muted()).child("Press Esc or Enter to close"))
+                        .child(toolbar_button_dyn(
+                            "info-close".into(),
+                            "Close",
+                            true,
+                            cx.listener(|this, _e, _w, cx| {
+                                this.info_dialog = None;
+                                cx.notify();
+                            }),
+                        )),
                 ),
         )
 }
@@ -3598,17 +3946,80 @@ impl TextInput {
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         let offset = offset.min(self.content.len());
-        let cursor = self.cursor_offset();
+        // The end of the selection that stays put while the other end moves.
+        let anchor = if self.selection_reversed { self.selected_range.end } else { self.selected_range.start };
 
-        if offset < cursor {
-            self.selected_range = offset..cursor;
+        if offset < anchor {
+            self.selected_range = offset..anchor;
             self.selection_reversed = true;
         } else {
-            self.selected_range = cursor..offset;
+            self.selected_range = anchor..offset;
             self.selection_reversed = false;
         }
 
         cx.notify();
+    }
+
+    fn prev_word(&self, offset: usize) -> usize {
+        word_back(&self.content, offset)
+    }
+
+    fn next_word(&self, offset: usize) -> usize {
+        word_fwd(&self.content, offset)
+    }
+
+    fn select_home(&mut self, _a: &InputSelectHome, _w: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_end(&mut self, _a: &InputSelectEnd, _w: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    fn word_left(&mut self, _a: &InputWordLeft, _w: &mut Window, cx: &mut Context<Self>) {
+        let to = self.prev_word(if self.selected_range.is_empty() { self.cursor_offset() } else { self.selected_range.start });
+        self.move_to(to, cx);
+    }
+
+    fn word_right(&mut self, _a: &InputWordRight, _w: &mut Window, cx: &mut Context<Self>) {
+        let to = self.next_word(if self.selected_range.is_empty() { self.cursor_offset() } else { self.selected_range.end });
+        self.move_to(to, cx);
+    }
+
+    fn select_word_left(&mut self, _a: &InputSelectWordLeft, _w: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.prev_word(self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(&mut self, _a: &InputSelectWordRight, _w: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_word(self.cursor_offset()), cx);
+    }
+
+    fn delete_word_back(&mut self, _a: &InputDeleteWordBack, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let c = self.cursor_offset();
+            if c == 0 {
+                window.play_system_bell();
+                return;
+            }
+            self.selected_range = self.prev_word(c)..c;
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_word_forward(&mut self, _a: &InputDeleteWordForward, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let c = self.cursor_offset();
+            if c >= self.content.len() {
+                window.play_system_bell();
+                return;
+            }
+            self.selected_range = c..self.next_word(c);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn submit(&mut self, _a: &InputSubmit, _w: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::Submit);
     }
 
     fn left(&mut self, _action: &InputLeft, _window: &mut Window, cx: &mut Context<Self>) {
@@ -4143,6 +4554,15 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::delete_word_back))
+            .on_action(cx.listener(Self::delete_word_forward))
+            .on_action(cx.listener(Self::submit))
             .line_height(px(24.))
             .text_size(px(15.))
             .child(
@@ -4185,6 +4605,28 @@ pub fn run(engine_path: std::path::PathBuf) {
             KeyBinding::new("ctrl-x", InputCut, Some("NexDeskTextInput")),
             KeyBinding::new("home", InputHome, Some("NexDeskTextInput")),
             KeyBinding::new("end", InputEnd, Some("NexDeskTextInput")),
+            KeyBinding::new("shift-home", InputSelectHome, Some("NexDeskTextInput")),
+            KeyBinding::new("shift-end", InputSelectEnd, Some("NexDeskTextInput")),
+            KeyBinding::new("ctrl-left", InputWordLeft, Some("NexDeskTextInput")),
+            KeyBinding::new("ctrl-right", InputWordRight, Some("NexDeskTextInput")),
+            KeyBinding::new("alt-left", InputWordLeft, Some("NexDeskTextInput")),
+            KeyBinding::new("alt-right", InputWordRight, Some("NexDeskTextInput")),
+            KeyBinding::new("ctrl-shift-left", InputSelectWordLeft, Some("NexDeskTextInput")),
+            KeyBinding::new("ctrl-shift-right", InputSelectWordRight, Some("NexDeskTextInput")),
+            KeyBinding::new("alt-shift-left", InputSelectWordLeft, Some("NexDeskTextInput")),
+            KeyBinding::new("alt-shift-right", InputSelectWordRight, Some("NexDeskTextInput")),
+            KeyBinding::new("ctrl-backspace", InputDeleteWordBack, Some("NexDeskTextInput")),
+            KeyBinding::new("alt-backspace", InputDeleteWordBack, Some("NexDeskTextInput")),
+            KeyBinding::new("ctrl-delete", InputDeleteWordForward, Some("NexDeskTextInput")),
+            KeyBinding::new("ctrl-home", InputHome, Some("NexDeskTextInput")),
+            KeyBinding::new("ctrl-end", InputEnd, Some("NexDeskTextInput")),
+            KeyBinding::new("up", InputHome, Some("NexDeskTextInput")),
+            KeyBinding::new("down", InputEnd, Some("NexDeskTextInput")),
+            KeyBinding::new("shift-up", InputSelectHome, Some("NexDeskTextInput")),
+            KeyBinding::new("shift-down", InputSelectEnd, Some("NexDeskTextInput")),
+            KeyBinding::new("enter", InputSubmit, Some("NexDeskTextInput")),
+            KeyBinding::new("escape", AppEscape, None),
+            KeyBinding::new("enter", AppConfirm, Some("NexDesk")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1120.), px(720.)), cx);
@@ -4205,4 +4647,27 @@ pub fn run(engine_path: std::path::PathBuf) {
 
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod word_tests {
+    use super::*;
+
+    #[test]
+    fn words_are_found_in_both_directions() {
+        let t = "foo  bar.baz é";
+        assert_eq!(word_fwd(t, 0), 3);
+        assert_eq!(word_fwd(t, 3), 8);
+        assert_eq!(word_fwd(t, 8), 9, "punctuation is its own word");
+        assert_eq!(word_fwd(t, 9), 12);
+        assert_eq!(word_fwd(t, 12), t.len());
+        assert_eq!(word_fwd(t, t.len()), t.len());
+        assert_eq!(word_back(t, t.len()), 13);
+        assert_eq!(word_back(t, 13), 9);
+        assert_eq!(word_back(t, 9), 8);
+        assert_eq!(word_back(t, 8), 5);
+        assert_eq!(word_back(t, 5), 0);
+        assert_eq!(word_back(t, 0), 0);
+        assert_eq!(word_back("   ", 3), 0);
+    }
 }

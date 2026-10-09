@@ -213,16 +213,34 @@ impl ClientConnector {
     }
 }
 
-/// NexDesk patch: true when the MCS payload starts with a licensing security header.
-fn input_is_license_pdu(input: &[u8]) -> bool {
-    use ironrdp_pdu::{mcs, rdp::headers::BasicSecurityHeaderFlags};
-    let Ok(ctx) = mcs::decode_send_data_indication(input) else {
-        return true; // not our business: let the normal path report the error
+/// NexDesk patch: what the first PDU after the secure settings exchange really is.
+enum FirstPdu {
+    License,
+    /// Message-channel traffic (auto-detect, heartbeat): ignore and keep waiting.
+    Ignorable,
+    /// Anything else, normally the Demand Active PDU of a server that skips licensing.
+    Other,
+}
+
+fn classify_first_pdu(input: &[u8]) -> FirstPdu {
+    use ironrdp_pdu::rdp::server_license::LicensePdu;
+    use ironrdp_pdu::rdp::headers::BasicSecurityHeaderFlags as F;
+    let Ok(ctx) = ironrdp_pdu::mcs::decode_send_data_indication(input) else {
+        return FirstPdu::License; // let the normal path report the error
     };
-    match ctx.user_data {
-        [lo, hi, ..] => BasicSecurityHeaderFlags::from_bits_truncate(u16::from_le_bytes([*lo, *hi]))
-            .contains(BasicSecurityHeaderFlags::LICENSE_PKT),
-        _ => true,
+    if ctx.decode_user_data::<LicensePdu>().is_ok() {
+        return FirstPdu::License;
+    }
+    let flags = match ctx.user_data {
+        [lo, hi, ..] => F::from_bits_truncate(u16::from_le_bytes([*lo, *hi])),
+        _ => return FirstPdu::License,
+    };
+    let head: Vec<String> = ctx.user_data.iter().take(16).map(|b| format!("{b:02x}")).collect();
+    tracing::warn!(channel = ctx.channel_id, head = %head.join(" "), "first PDU after secure settings is not a license PDU");
+    if flags.intersects(F::AUTODETECT_REQ | F::AUTODETECT_RSP | F::HEARTBEAT) {
+        FirstPdu::Ignorable
+    } else {
+        FirstPdu::Other
     }
 }
 
@@ -645,19 +663,29 @@ impl Sequence for ClientConnector {
             } => {
                 debug!("Licensing Exchange");
 
-                // NexDesk patch: some servers skip licensing and send the Demand Active PDU
-                // straight away (FreeRDP and Remmina accept that). Without this the connection
-                // fails with "invalid securityHeaderFlags".
-                if license_exchange.is_waiting_first_pdu() && !input_is_license_pdu(input) {
-                    tracing::warn!("server skipped licensing; continuing with capabilities exchange");
-                    self.state = ClientConnectorState::CapabilitiesExchange {
-                        connection_activation: ConnectionActivationSequence::new(
-                            self.config.clone(),
-                            io_channel_id,
-                            user_channel_id,
-                        ),
-                    };
-                    return self.step(input, output);
+                if license_exchange.is_waiting_first_pdu() {
+                    match classify_first_pdu(input) {
+                        FirstPdu::License => {}
+                        FirstPdu::Ignorable => {
+                            self.state = ClientConnectorState::LicensingExchange {
+                                io_channel_id,
+                                user_channel_id,
+                                license_exchange,
+                            };
+                            return Ok(Written::Nothing);
+                        }
+                        FirstPdu::Other => {
+                            tracing::warn!("server skipped licensing; continuing with capabilities exchange");
+                            self.state = ClientConnectorState::CapabilitiesExchange {
+                                connection_activation: ConnectionActivationSequence::new(
+                                    self.config.clone(),
+                                    io_channel_id,
+                                    user_channel_id,
+                                ),
+                            };
+                            return self.step(input, output);
+                        }
+                    }
                 }
 
                 advance_licensing_exchange(license_exchange, io_channel_id, user_channel_id, input, output)?
@@ -989,5 +1017,43 @@ fn create_client_info_pdu(config: &Config, client_addr: &SocketAddr) -> rdp::Cli
     ClientInfoPdu {
         security_header,
         client_info,
+    }
+}
+
+#[cfg(test)]
+mod nexdesk_license_skip_tests {
+    use super::*;
+
+    fn indication(user_data: &[u8]) -> Vec<u8> {
+        let pdu = X224(mcs::McsMessage::SendDataIndication(mcs::SendDataIndication {
+            initiator_id: 1002,
+            channel_id: 1003,
+            user_data: Cow::Borrowed(user_data),
+        }));
+        encode_vec(&pdu).unwrap()
+    }
+
+    #[test]
+    fn demand_active_instead_of_license_is_recognised() {
+        // ShareControlHeader: totalLength=0x0102, pduType=DemandActive(0x0011), pduSource=1002 ...
+        let mut data = vec![0x02, 0x01, 0x11, 0x00, 0xea, 0x03];
+        data.extend_from_slice(&[0u8; 20]);
+        assert!(matches!(classify_first_pdu(&indication(&data)), FirstPdu::Other));
+    }
+
+    #[test]
+    fn message_channel_traffic_is_ignored() {
+        // BasicSecurityHeader: flags = SEC_AUTODETECT_REQ (0x1000), flagsHi = 0
+        let data = [0x00, 0x10, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00];
+        assert!(matches!(classify_first_pdu(&indication(&data)), FirstPdu::Ignorable));
+    }
+
+    #[test]
+    fn real_license_error_message_passes_through() {
+        // SEC_LICENSE_PKT, ERROR_ALERT, STATUS_VALID_CLIENT, ST_NO_TRANSITION, empty blob
+        let data = [
+            0x80, 0x00, 0x00, 0x00, 0xff, 0x03, 0x10, 0x00, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        ];
+        assert!(matches!(classify_first_pdu(&indication(&data)), FirstPdu::License));
     }
 }

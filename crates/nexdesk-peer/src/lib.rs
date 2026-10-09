@@ -11,6 +11,7 @@ pub mod overlay;
 pub mod screen;
 pub mod shot;
 pub mod store;
+pub mod xfer;
 pub mod wire;
 
 pub use link::{Reader, Writer};

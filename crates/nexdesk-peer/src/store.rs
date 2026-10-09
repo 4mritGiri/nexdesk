@@ -60,6 +60,14 @@ pub fn load_or_create_id(dir: &Path) -> Result<String, PeerError> {
     Ok(id)
 }
 
+/// Replace the saved relay ID with a new random one and return it. The identity key (fingerprint) is unchanged.
+pub fn new_id(dir: &Path) -> Result<String, PeerError> {
+    std::fs::create_dir_all(dir)?;
+    let id = nexdesk_network::proto::random_id().map_err(|_| PeerError::Proto("no random numbers available"))?;
+    std::fs::write(dir.join("agent-id"), format!("{id}\n"))?;
+    Ok(id)
+}
+
 /// The relay server this computer uses, one line in `dir/relay` (`host:port`), if configured.
 pub fn load_relay(dir: &Path) -> Option<String> {
     let s = std::fs::read_to_string(dir.join("relay")).ok()?;

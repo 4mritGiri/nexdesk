@@ -33,8 +33,18 @@ pub struct Policy {
     /// A viewer approved a moment ago may reconnect without being asked again for this long
     /// (its identity is re-verified by the handshake). `Duration::ZERO` always asks.
     pub reconnect_grace: Duration,
+    /// Asked once per incoming transfer with a one-line summary; `None` refuses all transfers.
+    pub files: Option<FilesPrompt>,
+    /// Called with every chat line the viewer sends.
+    pub on_chat: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// Where accepted files are stored (default: the user's Downloads/NexDesk).
+    pub download_dir: Option<std::path::PathBuf>,
+    outbox: Mutex<Option<mpsc::Sender<Msg>>>,
     recent: Mutex<Option<(String, Instant)>>,
 }
+
+pub type FilesPrompt = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+const FILES_CONSENT_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Policy {
     pub fn new(
@@ -43,7 +53,25 @@ impl Policy {
         allow: Vec<String>,
         prompt: Option<Box<dyn Fn(&IdentityPublic) -> bool + Send + Sync>>,
     ) -> Self {
-        Self { view_only, clipboard, allow, prompt, reconnect_grace: Duration::from_secs(60), recent: Mutex::new(None) }
+        Self { view_only, clipboard, allow, prompt, reconnect_grace: Duration::from_secs(60),
+            files: None,
+            on_chat: None,
+            download_dir: None,
+            outbox: Mutex::new(None),
+            recent: Mutex::new(None),
+        }
+    }
+
+    /// Send a chat line to the connected viewer. False when nobody is connected.
+    pub fn send_chat(&self, text: &str) -> bool {
+        let t = crate::wire::clean_chat(text);
+        if t.is_empty() {
+            return false;
+        }
+        match self.outbox.lock() {
+            Ok(o) => o.as_ref().map(|tx| tx.send(Msg::Chat(t)).is_ok()).unwrap_or(false),
+            Err(_) => false,
+        }
     }
 
     fn remember(&self, fp: &str) {
@@ -349,6 +377,14 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
     } else {
         None
     };
+    if let Ok(mut o) = policy.outbox.lock() {
+        *o = Some(tx.clone());
+    }
+    let receiver = Arc::new(Mutex::new(crate::xfer::Receiver::new(
+        policy.download_dir.clone().or_else(crate::xfer::download_dir).unwrap_or_else(|| std::env::temp_dir().join("NexDesk")),
+    )));
+    let files_prompt = if policy.view_only { None } else { policy.files.clone() };
+    let on_chat = policy.on_chat.clone();
     let reader_done = done.clone();
     let input = std::thread::Builder::new().name("agent-input".into()).spawn(move || {
         loop {
@@ -362,6 +398,82 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
                 Ok(Msg::Clip(t)) => {
                     if let Some(c) = &clip {
                         c.set_remote(t);
+                    }
+                }
+                Ok(Msg::Chat(t)) => {
+                    if let Some(f) = &on_chat {
+                        f(&t);
+                    }
+                }
+                Ok(Msg::FilesOffer { batch, count, total, first }) => {
+                    let refused = |tx: &mpsc::Sender<Msg>| {
+                        let _ = tx.send(Msg::FilesAnswer { batch, accept: false });
+                    };
+                    let Some(prompt) = files_prompt.clone() else {
+                        refused(&tx);
+                        continue;
+                    };
+                    let offered = receiver.lock().map(|mut r| r.offer(batch, count, total)).unwrap_or(Err("busy"));
+                    if offered.is_err() {
+                        refused(&tx);
+                        continue;
+                    }
+                    // ask without blocking the input loop: pings and input keep flowing
+                    let (tx2, receiver2) = (tx.clone(), receiver.clone());
+                    let summary = format!("{count}|{total}|{first}");
+                    let _ = std::thread::Builder::new().name("agent-files-consent".into()).spawn(move || {
+                        let (rtx, rrx) = mpsc::channel();
+                        std::thread::spawn(move || {
+                            let _ = rtx.send(prompt(&summary));
+                        });
+                        let ok = rrx.recv_timeout(FILES_CONSENT_TIMEOUT).unwrap_or(false);
+                        if let Ok(mut r) = receiver2.lock() {
+                            r.answer(batch, ok);
+                        }
+                        let _ = tx2.send(Msg::FilesAnswer { batch, accept: ok });
+                    });
+                }
+                Ok(Msg::FileStart { batch, id, size, path }) => {
+                    let r = receiver.lock().map(|mut r| r.start(batch, id, size, &path)).unwrap_or(Err("busy".into()));
+                    if let Err(e) = r {
+                        if let Ok(mut r) = receiver.lock() {
+                            r.abort();
+                        }
+                        let _ = tx.send(Msg::FileAbort { batch, reason: e });
+                    }
+                }
+                Ok(Msg::FileChunk { id, data }) => {
+                    let r = receiver.lock().map(|mut r| r.chunk(id, &data)).unwrap_or(Err("busy".into()));
+                    match r {
+                        Ok(Some(bytes)) => {
+                            let _ = tx.send(Msg::FileAck { id, bytes });
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            if let Ok(mut r) = receiver.lock() {
+                                r.abort();
+                            }
+                            let _ = tx.send(Msg::FileAbort { batch: 0, reason: e });
+                        }
+                    }
+                }
+                Ok(Msg::FileEnd { id }) => {
+                    let r = receiver.lock().map(|mut r| r.end(id)).unwrap_or(Err("busy".into()));
+                    match r {
+                        Ok((_, size)) => {
+                            let _ = tx.send(Msg::FileAck { id, bytes: size });
+                        }
+                        Err(e) => {
+                            if let Ok(mut r) = receiver.lock() {
+                                r.abort();
+                            }
+                            let _ = tx.send(Msg::FileAbort { batch: 0, reason: e });
+                        }
+                    }
+                }
+                Ok(Msg::FileAbort { .. }) => {
+                    if let Ok(mut r) = receiver.lock() {
+                        r.abort();
                     }
                 }
                 Ok(m) => {
@@ -380,6 +492,9 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
             if reader_done.load(Ordering::Relaxed) {
                 break;
             }
+        }
+        if let Ok(mut r) = receiver.lock() {
+            r.abort(); // connection ended: remove half-written files
         }
         reader_done.store(true, Ordering::Relaxed);
     })?;
@@ -447,6 +562,9 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
     })();
     done.store(true, Ordering::Relaxed);
     writer.shutdown();
+    if let Ok(mut o) = policy.outbox.lock() {
+        *o = None;
+    }
     let _ = input.join();
     match result {
         Err(PeerError::Io(_)) | Err(PeerError::Closed) => Ok(()), // viewer went away

@@ -60,8 +60,16 @@ Speed: the agent uses XDamage, so a screen that does not change costs almost not
 * Input: XTEST (`FakeInput`). Wheel = X buttons 4-7.
 * Wire format: `Msg` in `src/wire.rs` (hello, tile, cursor, clip, bye, mouse move/button/wheel, key, ping/pong).
 
+## File transfer and chat
+* Upload only (viewer to the sharing computer): drop files or folders on the viewer window. The agent's user must accept every transfer (60 s, then it counts as no); view-only sessions refuse all transfers.
+* The receiver saves under `Downloads/NexDesk`, never overwrites (`name (1).ext`), never follows a symlink out of that folder, rejects absolute paths, `..`, backslashes and control characters, enforces the announced sizes exactly, writes `.part` files with mode 0600 and deletes them if the connection drops. Limits: 10,000 files, 8 GiB per file, 64 GiB per transfer.
+* Flow control: 48 KiB chunks, at most 4 MiB unacknowledged. File names and contents are never logged.
+* Chat: both ways, toolbar button or Ctrl+Alt+C in the viewer (typing goes to the chat while it is open, not to the remote computer); in the manager on the Remote Control page. Lines are limited to 2000 bytes, control characters removed, never logged.
+* Manager protocol (`--stdio-control`): out `FILES <n> <bytes> <first name>`, `CHAT <text>`; in `files yes|no`, `chat <text>`.
+* Not yet: downloading from the remote computer, a file manager, resume.
+
 ## Tests
-`xvfb-run -a cargo test -p nexdesk-peer` starts a real X server and checks: the screen arrives pixel-exact, later changes arrive, mouse moves the real pointer, an unapproved viewer receives nothing, a wrong pin aborts the handshake, view-only blocks input, clipboard text both ways, the pointer image, the manager flow (probe, `--trust`, consent over stdin/stdout, deny ends the viewer), a screen resize that keeps the session, two monitors with switching and pointer mapping, an idle screen that stops producing tiles, toolbar layout and hit tests, a viewer that survives an agent restart, plus unit tests for diffing, tile bounds and hostile messages.
+`xvfb-run -a cargo test -p nexdesk-peer` starts a real X server and checks: the screen arrives pixel-exact, later changes arrive, mouse moves the real pointer, an unapproved viewer receives nothing, a wrong pin aborts the handshake, view-only blocks input, clipboard text both ways, the pointer image, the manager flow (probe, `--trust`, consent over stdin/stdout, deny ends the viewer), a screen resize that keeps the session, two monitors with switching and pointer mapping, an idle screen that stops producing tiles, toolbar layout and hit tests, a viewer that survives an agent restart, a folder upload with decline, no-overwrite and hostile-path refusal plus chat both ways, plus unit tests for diffing, tile bounds and hostile messages.
 
 ## Not done yet
-Wayland host, Windows/macOS host, image/file clipboard, file transfer, audio, a GUI viewer inside the manager window (the viewer is still its own window), encrypted identity storage, rate limiting beyond the delay, fuzzing.
+Wayland host, Windows/macOS host, image/file clipboard, file download and a file manager, audio, a GUI viewer inside the manager window (the viewer is still its own window), encrypted identity storage, rate limiting beyond the delay, fuzzing.

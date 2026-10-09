@@ -16,8 +16,11 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use nexdesk_clipboard::ClipboardHandle;
+use crate::ipc::Spec;
 use crate::tls::CertInfo;
-use crate::ui::{self, BarHit, Canvas, Modal, ModalHit, Toast, Toolbar};
+use crate::ui::{self, BarHit, Canvas, Modal, ModalHit, TabInfo, TabState, Toast, Toolbar};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Cursor, CursorIcon, CustomCursor, Fullscreen, ResizeDirection, Window, WindowId};
@@ -26,28 +29,22 @@ use crate::grab::KeyboardGrab;
 use crate::keymap;
 
 pub enum UserEvent {
-    Rdp(RdpOutputEvent),
-    /// The TLS verifier needs the user to decide about an unknown/changed server certificate.
-    CertPrompt(CertInfo, Sender<bool>),
+    /// Output of session `id`.
+    Rdp(u64, RdpOutputEvent),
+    /// The TLS verifier of session `id` needs the user to decide about an unknown/changed certificate.
+    CertPrompt(u64, CertInfo, Sender<bool>),
     /// A short message for the toast (sent by background jobs such as the screenshot saver).
     Toast(String),
+    /// Another nexdesk-rdp process hands over a connection to open as a new tab.
+    NewSession { spec: Spec, ack: Sender<Result<u64, String>>, end: Sender<Result<(), String>> },
+    /// The process that handed over session `id` went away: close its tab.
+    CloseSession(u64),
 }
 
 pub struct Options {
-    pub title: String,
-    pub host_label: String,
-    pub initial_size: (u32, u32),
-    pub dynamic_resize: bool,
-    pub start_fullscreen: bool,
-    pub capture_keys: bool,
-    /// After a file drop, press Ctrl+V on the remote so the files land in the focused folder.
-    pub drop_paste: bool,
     /// Use the system title bar instead of NexDesk's own header bar.
     pub native_frame: bool,
-    /// Names for the activity log.
-    pub log_profile: String,
-    pub log_user: String,
-    /// Lets background threads post toasts back to the window.
+    /// Lets background threads post events back to the window.
     pub proxy: EventLoopProxy<UserEvent>,
 }
 
@@ -57,8 +54,40 @@ struct Frame {
     h: u32,
 }
 
-pub struct App {
+/// State of a session tab that is not on screen. The visible session lives directly in `App`
+/// (so the drawing and input code stays simple) and is swapped with one of these on tab change.
+struct Parked {
+    id: u64,
+    input_tx: UnboundedSender<RdpInputEvent>,
+    db: Database,
+    frame: Option<Frame>,
+    frozen: Option<Frame>,
+    pan: (u32, u32),
+    pan_tick: Option<Instant>,
+    pending_resize: Option<(Instant, u16, u16)>,
+    dynamic_resize: bool,
+    modal: Option<Modal>,
+    clipboard: Option<ClipboardHandle>,
+    drop_paste: bool,
+    drop_batch: Vec<PathBuf>,
+    drop_deadline: Option<Instant>,
+    paste_at: Option<Instant>,
+    log_profile: String,
+    log_user: String,
+    connected_logged: bool,
+    server_cursor: Cursor,
+    server_cursor_hidden: bool,
+    paused: bool,
+    actual: bool,
     title: String,
+    end: Option<Sender<Result<(), String>>>,
+    clip_active: Option<Arc<AtomicBool>>,
+    failed: bool,
+    stage: String,
+    stage_at: Instant,
+}
+
+pub struct App {
     initial_size: (u32, u32),
     dynamic_resize: bool,
     input_tx: UnboundedSender<RdpInputEvent>,
@@ -99,19 +128,34 @@ pub struct App {
     last_header_click: Option<Instant>,
     /// Set when the session ended abnormally; `main` turns this into an error exit.
     pub failure: Option<String>,
+
+    // ---- tabs
+    cur_id: u64,
+    next_id: u64,
+    /// Tab order (includes the visible session).
+    order: Vec<u64>,
+    parked: Vec<Parked>,
+    /// True while a background tab's event is being handled (no window side effects then).
+    bg: bool,
+    /// Tab to go back to when the session being handled in the background closes.
+    return_to: Option<u64>,
+    end: Option<Sender<Result<(), String>>>,
+    clip_active: Option<Arc<AtomicBool>>,
+    failed: bool,
+    /// What the connection attempt is doing right now, shown instead of a bare "Connecting...".
+    stage: String,
+    stage_at: Instant,
+    first: Option<Spec>,
+    close_all_rx: Option<Receiver<bool>>,
 }
 
 impl App {
-    pub fn new(
-        o: Options,
-        input_tx: UnboundedSender<RdpInputEvent>,
-        clipboard: Option<ClipboardHandle>,
-    ) -> Self {
+    pub fn new(o: Options, first: Spec) -> Self {
+        let (placeholder, _) = tokio::sync::mpsc::unbounded_channel();
         Self {
-            title: o.title,
-            initial_size: o.initial_size,
-            dynamic_resize: o.dynamic_resize,
-            input_tx,
+            initial_size: (u32::from(first.width), u32::from(first.height)),
+            dynamic_resize: false,
+            input_tx: placeholder,
             db: Database::new(),
             window: None,
             context: None,
@@ -123,30 +167,317 @@ impl App {
             cursor_in: false,
             proxy: o.proxy,
             pending_resize: None,
-            start_fullscreen: o.start_fullscreen,
-            capture_keys: o.capture_keys,
+            start_fullscreen: first.fullscreen,
+            capture_keys: first.capture_keys,
             focused: false,
             grab: KeyboardGrab::new(),
-            toolbar: Toolbar::new(o.host_label),
+            toolbar: Toolbar::new(String::new()),
             bar_was_visible: false,
             modal: None,
             toast: None,
             cursor: (0.0, 0.0),
-            clipboard,
-            drop_paste: o.drop_paste,
+            clipboard: None,
+            drop_paste: true,
             drop_batch: Vec::new(),
             drop_deadline: None,
             paste_at: None,
             native_frame: o.native_frame,
-            log_profile: o.log_profile,
-            log_user: o.log_user,
+            log_profile: String::new(),
+            log_user: String::new(),
             connected_logged: false,
             server_cursor: Cursor::Icon(CursorIcon::Default),
             server_cursor_hidden: false,
             cursor_overridden: false,
             last_header_click: None,
             failure: None,
+            cur_id: 0,
+            next_id: 1,
+            order: Vec::new(),
+            parked: Vec::new(),
+            bg: false,
+            return_to: None,
+            end: None,
+            clip_active: None,
+            failed: false,
+            stage: String::new(),
+            stage_at: Instant::now(),
+            first: Some(first),
+            close_all_rx: None,
         }
+    }
+
+    // ------------------------------------------------------------------ tabs
+
+    /// Exchange the visible session's state with a parked one.
+    fn swap_with(&mut self, p: &mut Parked) {
+        use std::mem::swap;
+        swap(&mut self.cur_id, &mut p.id);
+        swap(&mut self.input_tx, &mut p.input_tx);
+        swap(&mut self.db, &mut p.db);
+        swap(&mut self.frame, &mut p.frame);
+        swap(&mut self.frozen, &mut p.frozen);
+        swap(&mut self.pan, &mut p.pan);
+        swap(&mut self.pan_tick, &mut p.pan_tick);
+        swap(&mut self.pending_resize, &mut p.pending_resize);
+        swap(&mut self.dynamic_resize, &mut p.dynamic_resize);
+        swap(&mut self.modal, &mut p.modal);
+        swap(&mut self.clipboard, &mut p.clipboard);
+        swap(&mut self.drop_paste, &mut p.drop_paste);
+        swap(&mut self.drop_batch, &mut p.drop_batch);
+        swap(&mut self.drop_deadline, &mut p.drop_deadline);
+        swap(&mut self.paste_at, &mut p.paste_at);
+        swap(&mut self.log_profile, &mut p.log_profile);
+        swap(&mut self.log_user, &mut p.log_user);
+        swap(&mut self.connected_logged, &mut p.connected_logged);
+        swap(&mut self.server_cursor, &mut p.server_cursor);
+        swap(&mut self.server_cursor_hidden, &mut p.server_cursor_hidden);
+        swap(&mut self.toolbar.paused, &mut p.paused);
+        swap(&mut self.toolbar.actual, &mut p.actual);
+        swap(&mut self.toolbar.title, &mut p.title);
+        swap(&mut self.end, &mut p.end);
+        swap(&mut self.clip_active, &mut p.clip_active);
+        swap(&mut self.failed, &mut p.failed);
+        swap(&mut self.stage, &mut p.stage);
+        swap(&mut self.stage_at, &mut p.stage_at);
+        // Only the visible tab forwards local clipboard changes to its server.
+        if let Some(a) = &p.clip_active {
+            a.store(false, Ordering::Relaxed);
+        }
+        if let Some(a) = &self.clip_active {
+            a.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn has_session(&self, id: u64) -> bool {
+        self.order.contains(&id)
+    }
+
+    /// Make session `id` the visible one without any window side effects.
+    fn swap_in(&mut self, id: u64) {
+        if id == self.cur_id {
+            return;
+        }
+        if let Some(i) = self.parked.iter().position(|p| p.id == id) {
+            let mut p = self.parked.swap_remove(i);
+            self.swap_with(&mut p);
+            self.parked.push(p);
+        }
+    }
+
+    /// User-visible tab switch.
+    fn switch_to(&mut self, id: u64) {
+        if id == self.cur_id || !self.has_session(id) {
+            return;
+        }
+        self.release_all_keys();
+        self.swap_in(id);
+        self.cursor_overridden = false;
+        self.apply_server_cursor();
+        self.update_window_title();
+        self.sync_tabs();
+        self.redraw();
+    }
+
+    fn update_window_title(&self) {
+        if let Some(w) = &self.window {
+            w.set_title(&format!("nexdesk - {}", self.toolbar.title));
+        }
+    }
+
+    fn tab_state(failed: bool, paused: bool, has_frame: bool) -> TabState {
+        if failed {
+            TabState::Failed
+        } else if paused {
+            TabState::Paused
+        } else if has_frame {
+            TabState::Live
+        } else {
+            TabState::Connecting
+        }
+    }
+
+    fn sync_tabs(&mut self) {
+        let mut tabs = Vec::with_capacity(self.order.len());
+        for id in &self.order {
+            if *id == self.cur_id {
+                tabs.push(TabInfo {
+                    title: self.toolbar.title.clone(),
+                    active: true,
+                    state: Self::tab_state(self.failed, self.toolbar.paused, self.frame.is_some()),
+                });
+            } else if let Some(p) = self.parked.iter().find(|p| p.id == *id) {
+                tabs.push(TabInfo { title: p.title.clone(), active: false, state: Self::tab_state(p.failed, p.paused, p.frame.is_some()) });
+            }
+        }
+        self.toolbar.tabs = tabs;
+    }
+
+    /// Open a new session as a tab. Returns its id.
+    fn add_session(&mut self, spec: &Spec, end: Option<Sender<Result<(), String>>>) -> Result<u64, String> {
+        let id = self.next_id;
+        let started = crate::session::start(id, spec, self.proxy.clone()).map_err(|e| format!("{e:#}"))?;
+        self.next_id += 1;
+        let mut p = Parked {
+            id,
+            input_tx: started.input_tx,
+            db: Database::new(),
+            frame: None,
+            frozen: None,
+            pan: (0, 0),
+            pan_tick: None,
+            pending_resize: None,
+            dynamic_resize: spec.dynamic_resize,
+            modal: None,
+            clipboard: started.clip,
+            drop_paste: spec.drop_paste,
+            drop_batch: Vec::new(),
+            drop_deadline: None,
+            paste_at: None,
+            log_profile: spec.profile.clone(),
+            log_user: spec.user.clone(),
+            connected_logged: false,
+            server_cursor: Cursor::Icon(CursorIcon::Default),
+            server_cursor_hidden: false,
+            paused: false,
+            actual: false,
+            title: spec.profile.clone(),
+            end,
+            clip_active: Some(started.clip_active),
+            failed: false,
+            stage: String::new(),
+            stage_at: Instant::now(),
+        };
+        if self.order.is_empty() {
+            self.swap_with(&mut p); // p now holds the empty placeholder; dropped
+        } else {
+            self.release_all_keys();
+            self.parked.push(p);
+            self.order.push(id);
+            self.swap_in(id);
+            self.cursor_overridden = false;
+            self.apply_server_cursor();
+        }
+        if !self.order.contains(&id) {
+            self.order.push(id);
+        }
+        self.update_window_title();
+        self.sync_tabs();
+        self.redraw();
+        Ok(id)
+    }
+
+    /// Close the visible session. Goes to `prefer` if given and still open, else a neighbour.
+    /// When it was the last one the window closes.
+    fn close_current(&mut self, el: &ActiveEventLoop, prefer: Option<u64>) {
+        let id = self.cur_id;
+        if let Some(m) = self.modal.take() {
+            if let Some(r) = m.reply {
+                let _ = r.send(false);
+            }
+        }
+        let _ = self.input_tx.send(RdpInputEvent::Close);
+        if let Some(end) = self.end.take() {
+            let _ = end.send(if self.failed { Err("the session ended with an error".to_string()) } else { Ok(()) });
+        }
+        let pos = self.order.iter().position(|x| *x == id).unwrap_or(0);
+        self.order.retain(|x| *x != id);
+        let next = prefer
+            .filter(|p| self.order.contains(p))
+            .or_else(|| self.order.get(pos).or_else(|| self.order.last()).copied());
+        match next {
+            None => {
+                self.cur_id = 0;
+                self.toolbar.tabs.clear();
+                el.exit();
+            }
+            Some(n) => {
+                if let Some(i) = self.parked.iter().position(|p| p.id == n) {
+                    let mut p = self.parked.swap_remove(i);
+                    self.swap_with(&mut p); // p now holds the closed session; dropped here
+                }
+                self.cursor_overridden = false;
+                self.apply_server_cursor();
+                self.update_window_title();
+                self.sync_tabs();
+                self.redraw();
+            }
+        }
+    }
+
+    /// Close any tab (visible or not) by id.
+    fn close_tab(&mut self, el: &ActiveEventLoop, id: u64) {
+        if !self.has_session(id) {
+            return;
+        }
+        let back = if id == self.cur_id { None } else { Some(self.cur_id) };
+        if id != self.cur_id {
+            self.release_all_keys();
+            self.swap_in(id);
+        }
+        nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Disconnected", &self.log_profile, &self.toolbar.title, &self.log_user, "closed by user");
+        self.close_current(el, back);
+    }
+
+    /// Close every session and the window.
+    fn close_all(&mut self, el: &ActiveEventLoop) {
+        while !self.order.is_empty() {
+            let id = self.cur_id;
+            nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Disconnected", &self.log_profile, &self.toolbar.title, &self.log_user, "closed by user");
+            // The last one calls el.exit(); the others hop to a neighbour first.
+            self.close_current(el, None);
+            if self.cur_id == id {
+                break;
+            }
+        }
+        el.exit();
+    }
+
+    /// Ask before closing a window that has several sessions.
+    fn request_close_window(&mut self, el: &ActiveEventLoop) {
+        if self.order.len() <= 1 {
+            self.close_all(el);
+            return;
+        }
+        if self.close_all_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.close_all_rx = Some(rx);
+        self.modal = Some(Modal {
+            heading: "Close all sessions?".into(),
+            lines: vec![
+                (format!("{} remote sessions are open in this window.", self.order.len()), ui::FG),
+                ("Closing the window disconnects all of them.".into(), ui::DIM),
+            ],
+            accent: ui::WARN,
+            accept: Some("Close all".into()),
+            reject: "Keep open".into(),
+            reply: Some(tx),
+        });
+        self.redraw();
+    }
+
+    /// Run `f` for session `id`, which may be a background tab.
+    fn with_session(&mut self, el: &ActiveEventLoop, id: u64, f: impl FnOnce(&mut Self, &ActiveEventLoop)) {
+        if !self.has_session(id) {
+            return; // late event of a tab that is already closed
+        }
+        if id == self.cur_id {
+            f(self, el);
+            return;
+        }
+        let prev = self.cur_id;
+        self.swap_in(id);
+        self.bg = true;
+        self.return_to = Some(prev);
+        f(self, el);
+        self.bg = false;
+        self.return_to = None;
+        if self.cur_id != prev && self.has_session(prev) {
+            self.swap_in(prev);
+        }
+        self.sync_tabs();
+        self.redraw();
     }
 
     fn send_ops(&mut self, ops: impl IntoIterator<Item = Operation>) {
@@ -299,6 +630,9 @@ impl App {
     }
 
     fn redraw(&self) {
+        if self.bg {
+            return;
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -373,7 +707,7 @@ impl App {
     }
 
     fn apply_server_cursor(&self) {
-        if self.cursor_overridden {
+        if self.cursor_overridden || self.bg {
             return;
         }
         if let Some(w) = &self.window {
@@ -412,10 +746,9 @@ impl App {
         self.redraw();
     }
 
+    /// The red dot / window close: ends the window (asks first when several sessions are open).
     fn close_session(&mut self, el: &ActiveEventLoop) {
-        nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Disconnected", &self.log_profile, &self.toolbar.title, &self.log_user, "closed by user");
-        let _ = self.input_tx.send(RdpInputEvent::Close);
-        el.exit();
+        self.request_close_window(el);
     }
 
     fn resolve_modal(&mut self, accept: bool, el: &ActiveEventLoop) {
@@ -424,8 +757,16 @@ impl App {
             if let Some(r) = m.reply {
                 let _ = r.send(accept);
             }
-            if was_error {
-                el.exit(); // a plain error box: closing it ends the program
+            if let Some(rx) = self.close_all_rx.take() {
+                if rx.try_recv().unwrap_or(false) {
+                    self.close_all(el);
+                    return;
+                }
+            } else if was_error {
+                // a plain error box: closing it ends that session's tab
+                let id = self.cur_id;
+                self.close_tab(el, id);
+                return;
             }
             self.redraw();
         }
@@ -436,6 +777,8 @@ impl App {
             el.exit();
             return;
         }
+        self.failed = true;
+        self.sync_tabs();
         self.modal = Some(Modal {
             heading: heading.to_owned(),
             lines: ui::wrap_words(msg, 70).into_iter().map(|l| (l, ui::FG)).collect(),
@@ -445,6 +788,25 @@ impl App {
             reply: None,
         });
         self.redraw();
+    }
+
+    /// "+": new connections are chosen in the NexDesk manager and open here as tabs.
+    /// Ask the manager to come to the front (or start it). Wayland compositors refuse to raise a
+    /// window that was not asked for by the focused application, so this window also steps aside
+    /// (minimises); the manager is then what the person sees. It comes back when a tab is added.
+    fn new_tab_hint(&mut self) {
+        if !crate::ipc::focus_manager() {
+            let name = if cfg!(windows) { "nexdesk.exe" } else { "nexdesk" };
+            if let Some(m) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(name))) {
+                if m.is_file() {
+                    let _ = std::process::Command::new(m).spawn();
+                }
+            }
+        }
+        self.release_all_keys();
+        if let Some(w) = &self.window {
+            w.set_minimized(true);
+        }
     }
 
     fn bar_action(&mut self, hit: BarHit, el: &ActiveEventLoop) {
@@ -472,6 +834,18 @@ impl App {
                 self.show_toast(if self.toolbar.actual { "Actual size: move the pointer to a window edge to scroll" } else { "Fit to window" });
             }
             BarHit::Pause => self.set_paused(!self.toolbar.paused),
+            BarHit::Tab(i) => {
+                if let Some(id) = self.order.get(i).copied() {
+                    self.switch_to(id);
+                }
+            }
+            BarHit::TabClose(i) => {
+                if let Some(id) = self.order.get(i).copied() {
+                    self.close_tab(el, id);
+                }
+                return;
+            }
+            BarHit::NewTab => self.new_tab_hint(),
             _ => {}
         }
         self.redraw();
@@ -512,10 +886,16 @@ impl App {
         {
             let mut c = Canvas { buf: &mut buffer, w: size.width as usize, h: size.height as usize };
             if self.frame.is_none() && self.modal.is_none() {
-                let msg = "Connecting...";
+                let msg = if self.stage.is_empty() { "Connecting...".to_string() } else { format!("{}...", self.stage) };
+                let msg = msg.as_str();
                 let k = 3 * u;
                 let tx = (size.width as i32 - ui::text_width(msg, k)) / 2;
                 c.text(tx, size.height as i32 / 2 - 4 * k, msg, k, ui::DIM);
+                if self.stage.starts_with("Waiting for the first") {
+                    let hint = "Signed in. The computer has not sent a picture yet (is its screen locked or asleep?)";
+                    let hk = (k / 2).max(1);
+                    c.text((size.width as i32 - ui::text_width(hint, hk)) / 2, size.height as i32 / 2 + 2 * k, hint, hk, ui::DIM);
+                }
             }
             if let Some(View::Actual(a)) = &view {
                 // slim scroll indicators for the 1:1 view
@@ -557,6 +937,17 @@ impl App {
             self.toggle_fullscreen();
             return;
         }
+        // Local hotkeys: Ctrl+Alt+PageDown / PageUp switch session tabs.
+        if ctrl && alt && state == ElementState::Pressed && matches!(code, KeyCode::PageDown | KeyCode::PageUp) {
+            let n = self.order.len();
+            if n > 1 {
+                let pos = self.order.iter().position(|x| *x == self.cur_id).unwrap_or(0);
+                let next = if code == KeyCode::PageDown { (pos + 1) % n } else { (pos + n - 1) % n };
+                let id = self.order[next];
+                self.switch_to(id);
+            }
+            return;
+        }
         // Local hotkey: Ctrl+Alt+End sends Ctrl+Alt+Del (the real one is grabbed by the local OS).
         if code == KeyCode::End && state == ElementState::Pressed {
             if ctrl && alt {
@@ -575,90 +966,48 @@ impl App {
     }
 }
 
-impl ApplicationHandler<UserEvent> for App {
-    fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
+impl App {
+    fn show_cert_prompt(&mut self, info: CertInfo, reply: Sender<bool>) {
+        let changed = info.pinned.is_some();
+        let mut lines: Vec<(String, u32)> = Vec::new();
+        if changed {
+            lines.push(("This computer's certificate is different from the one you trusted before.".into(), ui::DANGER));
+            lines.push(("Someone may be intercepting the connection. Continue only if the server was reinstalled.".into(), ui::DANGER));
+        } else {
+            lines.push(("NexDesk cannot verify who this computer is.".into(), ui::WARN));
+            lines.push(("Connect only if you recognise the fingerprint below.".into(), ui::DIM));
         }
-        let attrs = Window::default_attributes()
-            .with_title(self.title.clone())
-            .with_decorations(self.native_frame)
-            .with_inner_size(LogicalSize::new(self.initial_size.0, self.initial_size.1))
-            .with_fullscreen(
-                self.start_fullscreen
-                    .then_some(Fullscreen::Borderless(None)),
-            );
-        // Window class / app id: lets the dock match the window to the .desktop entry (name + icon).
-        #[cfg(target_os = "linux")]
-        let attrs = {
-            use winit::platform::wayland::WindowAttributesExtWayland;
-            use winit::platform::x11::WindowAttributesExtX11;
-            let attrs = WindowAttributesExtWayland::with_name(attrs, "nexdesk", "nexdesk");
-            WindowAttributesExtX11::with_name(attrs, "nexdesk", "nexdesk")
-        };
-        let window = match el.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                self.failure = Some(format!("cannot create window: {e}"));
-                el.exit();
-                return;
+        lines.push((String::new(), ui::FG));
+        lines.push((format!("Computer:  {}", info.host), ui::FG));
+        lines.push((format!("Subject:  {}", info.subject), ui::FG));
+        lines.push((String::new(), ui::FG));
+        lines.push(("Fingerprint (SHA-256):".into(), ui::DIM));
+        for l in ui::wrap(&info.fingerprint, 48) {
+            lines.push((format!("  {l}"), ui::ACCENT));
+        }
+        if let Some(old) = &info.pinned {
+            lines.push((String::new(), ui::FG));
+            lines.push(("Previously trusted:".into(), ui::DIM));
+            for l in ui::wrap(old, 48) {
+                lines.push((format!("  {l}"), ui::DIM));
             }
-        };
-        let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
-        let surface =
-            softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
-        self.window = Some(window);
-        self.context = Some(context);
-        self.surface = Some(surface);
+        }
+        self.modal = Some(Modal {
+            heading: if changed { "Certificate changed".into() } else { "Trust this computer?".into() },
+            lines,
+            accent: if changed { ui::DANGER } else { ui::WARN },
+            accept: Some(if changed { "Trust new certificate".into() } else { "Trust and connect".into() }),
+            reject: "Cancel".into(),
+            reply: Some(reply),
+        });
+        if let Some(w) = &self.window {
+            w.focus_window();
+        }
+        self.redraw();
     }
 
-    fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
-        let ev = match event {
-            UserEvent::Rdp(ev) => ev,
-            UserEvent::Toast(t) => {
-                self.show_toast(t);
-                return;
-            }
-            UserEvent::CertPrompt(info, reply) => {
-                let changed = info.pinned.is_some();
-                let mut lines: Vec<(String, u32)> = Vec::new();
-                if changed {
-                    lines.push(("This computer's certificate is different from the one you trusted before.".into(), ui::DANGER));
-                    lines.push(("Someone may be intercepting the connection. Continue only if the server was reinstalled.".into(), ui::DANGER));
-                } else {
-                    lines.push(("NexDesk cannot verify who this computer is.".into(), ui::WARN));
-                    lines.push(("Connect only if you recognise the fingerprint below.".into(), ui::DIM));
-                }
-                lines.push((String::new(), ui::FG));
-                lines.push((format!("Computer:  {}", info.host), ui::FG));
-                lines.push((format!("Subject:  {}", info.subject), ui::FG));
-                lines.push((String::new(), ui::FG));
-                lines.push(("Fingerprint (SHA-256):".into(), ui::DIM));
-                for l in ui::wrap(&info.fingerprint, 48) {
-                    lines.push((format!("  {l}"), ui::ACCENT));
-                }
-                if let Some(old) = &info.pinned {
-                    lines.push((String::new(), ui::FG));
-                    lines.push(("Previously trusted:".into(), ui::DIM));
-                    for l in ui::wrap(old, 48) {
-                        lines.push((format!("  {l}"), ui::DIM));
-                    }
-                }
-                self.modal = Some(Modal {
-                    heading: if changed { "Certificate changed".into() } else { "Trust this computer?".into() },
-                    lines,
-                    accent: if changed { ui::DANGER } else { ui::WARN },
-                    accept: Some(if changed { "Trust new certificate".into() } else { "Trust and connect".into() }),
-                    reject: "Cancel".into(),
-                    reply: Some(reply),
-                });
-                if let Some(w) = &self.window {
-                    w.focus_window();
-                }
-                self.redraw();
-                return;
-            }
-        };
+    /// Output of the visible session (background tabs are swapped in first by `with_session`).
+    fn handle_rdp(&mut self, el: &ActiveEventLoop, ev: RdpOutputEvent) {
         match ev {
             RdpOutputEvent::Image {
                 buffer,
@@ -674,9 +1023,13 @@ impl ApplicationHandler<UserEvent> for App {
                     w: u32::from(width.get()),
                     h: u32::from(height.get()),
                 });
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                self.redraw();
+            }
+            RdpOutputEvent::Stage(name) => {
+                self.stage = name.to_string();
+                self.stage_at = Instant::now();
+                nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Step", &self.log_profile, &self.toolbar.title, &self.log_user, name);
+                self.redraw();
             }
             RdpOutputEvent::PointerHidden => {
                 self.server_cursor_hidden = true;
@@ -736,18 +1089,98 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                 }
-                el.exit();
+                let back = self.return_to;
+                self.close_current(el, back);
             }
+        }
+    }
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let attrs = Window::default_attributes()
+            .with_title("nexdesk")
+            .with_decorations(self.native_frame)
+            .with_inner_size(LogicalSize::new(self.initial_size.0, self.initial_size.1))
+            .with_fullscreen(
+                self.start_fullscreen
+                    .then_some(Fullscreen::Borderless(None)),
+            );
+        // Window class / app id: lets the dock match the window to the .desktop entry (name + icon).
+        #[cfg(target_os = "linux")]
+        let attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            use winit::platform::x11::WindowAttributesExtX11;
+            let attrs = WindowAttributesExtWayland::with_name(attrs, "nexdesk", "nexdesk");
+            WindowAttributesExtX11::with_name(attrs, "nexdesk", "nexdesk")
+        };
+        let window = match el.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                self.failure = Some(format!("cannot create window: {e}"));
+                el.exit();
+                return;
+            }
+        };
+        let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
+        let surface =
+            softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
+        self.window = Some(window);
+        self.context = Some(context);
+        self.surface = Some(surface);
+        if let Some(spec) = self.first.take() {
+            if let Err(msg) = self.add_session(&spec, None) {
+                let msg = format!("cannot start the connection: {msg}");
+                self.failure = Some(msg.clone());
+                el.exit();
+                eprintln!("Error: {msg}");
+            }
+        }
+    }
+
+    fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::Toast(t) => self.show_toast(t),
+            UserEvent::NewSession { spec, ack, end } => {
+                let r = self.add_session(&spec, Some(end));
+                if let Ok(id) = &r {
+                    nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Started", &spec.profile, &spec.host, &spec.user, &format!("opened as tab {id}"));
+                    if let Some(w) = &self.window {
+                        w.set_minimized(false);
+                        w.focus_window();
+                    }
+                }
+                let _ = ack.send(r);
+            }
+            UserEvent::CloseSession(id) => self.close_tab(el, id),
+            UserEvent::CertPrompt(id, info, reply) => {
+                if !self.has_session(id) {
+                    let _ = reply.send(false);
+                    return;
+                }
+                self.switch_to(id);
+                self.show_cert_prompt(info, reply);
+            }
+            UserEvent::Rdp(id, ev) => self.with_session(el, id, |app, el| app.handle_rdp(el, ev)),
         }
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         self.toolbar.docked = self.docked();
+        self.sync_tabs();
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(m) = self.modal.take() {
-                    if let Some(r) = m.reply {
-                        let _ = r.send(false);
+                if self.close_all_rx.is_some() {
+                    return;
+                }
+                if self.order.len() <= 1 {
+                    if let Some(m) = self.modal.take() {
+                        if let Some(r) = m.reply {
+                            let _ = r.send(false);
+                        }
                     }
                 }
                 self.close_session(el);
@@ -868,6 +1301,12 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 let hit = self.bar_hit();
+                if let (BarHit::Tab(i) | BarHit::TabClose(i), ElementState::Released, MouseButton::Middle) = (hit, state, button) {
+                    if let Some(id) = self.order.get(i).copied() {
+                        self.close_tab(el, id);
+                    }
+                    return;
+                }
                 if hit != BarHit::None {
                     if state == ElementState::Pressed && button == MouseButton::Left && hit == BarHit::Bar && self.docked() {
                         // empty part of the header: drag the window, double-click maximises

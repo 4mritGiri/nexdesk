@@ -32,6 +32,15 @@ pub enum Policy {
 }
 
 impl Policy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AcceptNew => "accept-new",
+            Self::Strict => "strict",
+            Self::Insecure => "insecure",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "ask" => Self::Ask,

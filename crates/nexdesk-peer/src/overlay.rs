@@ -11,6 +11,8 @@ pub enum Action {
     Screenshot,
     /// Show the next monitor of the remote computer.
     Monitor,
+    /// Open or close the chat panel.
+    Chat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +113,35 @@ pub fn draw_toast(buf: &mut [u32], w: usize, h: usize, msg: &str) {
     text(buf, w, h, x + 12, y + 12, &msg, FG);
 }
 
+/// Chat panel at the bottom left: the last lines (`true` = mine) and the line being typed.
+pub fn draw_chat(buf: &mut [u32], w: usize, h: usize, lines: &[(bool, String)], input: &str) {
+    const ROWS: usize = 8;
+    let pw = (w as i32 - 24).clamp(120, 420);
+    let cols = ((pw - 20) / 8).max(4) as usize;
+    // wrap each message to the panel width, keep the newest rows
+    let mut rows: Vec<(bool, String)> = Vec::new();
+    for (mine, t) in lines {
+        let chars: Vec<char> = format!("{} {t}", if *mine { "me:" } else { "them:" }).chars().collect();
+        for part in chars.chunks(cols) {
+            rows.push((*mine, part.iter().map(|c| if (*c as u32) < 128 { *c } else { '?' }).collect()));
+        }
+    }
+    let start = rows.len().saturating_sub(ROWS);
+    let rows = &rows[start..];
+    let ph = 10 + ROWS as i32 * 12 + 34;
+    let (px, py) = (12, (h as i32 - ph - 12).max(0));
+    rect(buf, w, h, px - 1, py - 1, pw + 2, ph + 2, BORDER);
+    rect(buf, w, h, px, py, pw, ph, BG);
+    for (i, (mine, t)) in rows.iter().enumerate() {
+        text(buf, w, h, px + 10, py + 8 + i as i32 * 12, t, if *mine { 0x00_9a_a5_ff } else { FG });
+    }
+    let iy = py + ph - 28;
+    rect(buf, w, h, px + 6, iy, pw - 12, 22, BTN);
+    let typed: Vec<char> = input.chars().collect();
+    let shown: String = typed[typed.len().saturating_sub(cols - 1)..].iter().map(|c| if (*c as u32) < 128 { *c } else { '?' }).collect();
+    text(buf, w, h, px + 12, iy + 7, &format!("{shown}_"), FG);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +184,13 @@ mod tests {
         let mut buf = vec![0u32; 50 * 40];
         draw_bar(&mut buf, 50, 40, bar, &items, &labels(), Some(Action::Scale));
         draw_toast(&mut buf, 50, 40, "a very long message that does not fit into this tiny window at all");
+    }
+
+    #[test]
+    fn chat_panel_draws_inside_the_window_even_when_tiny() {
+        let (w, h) = (150, 60);
+        let mut buf = vec![0u32; w * h];
+        draw_chat(&mut buf, w, h, &[(true, "hello \u{1F600} world, this is a long line".into()), (false, "hi".into())], "typing é");
+        draw_chat(&mut buf, 10, 10, &[], "");
     }
 }

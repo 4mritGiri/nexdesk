@@ -1,6 +1,8 @@
 //! `nexdesk-peer-view HOST:PORT`: window that shows a remote agent's screen and forwards input.
 use std::io::BufRead;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering as AO};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,6 +12,7 @@ use nexdesk_core::scale::{Actual, Fit, View};
 use nexdesk_peer::overlay::{self, Action};
 use nexdesk_peer::screen::Screen;
 use nexdesk_peer::wire::Rect;
+use nexdesk_peer::xfer;
 use nexdesk_peer::{client, store, Msg, Writer};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -25,6 +28,10 @@ enum Ev {
     Msg(Msg),
     Status(String),
     Gone(String),
+    /// A message from the file sender thread.
+    Note(String),
+    /// The sender thread finished.
+    SendDone,
 }
 
 struct App {
@@ -52,6 +59,17 @@ struct App {
     mods: ModifiersState,
     /// A shortcut key whose press was swallowed; its release is swallowed too.
     swallowed: Option<KeyCode>,
+    proxy: winit::event_loop::EventLoopProxy<Ev>,
+    /// Files dropped in the last moments; sent together once the drop is over.
+    dropped: Vec<PathBuf>,
+    drop_at: Option<Instant>,
+    /// Answers for the running file transfer, if any.
+    xfer: Option<mpsc::Sender<xfer::Event>>,
+    xfer_cancel: Arc<AtomicBool>,
+    batch: u32,
+    chat_open: bool,
+    chat_input: String,
+    chat: Vec<(bool, String)>,
 }
 
 const SHOW_FOR: Duration = Duration::from_secs(3);
@@ -86,6 +104,7 @@ impl App {
             l.push((Action::Cad, "Ctrl+Alt+Del".to_string()));
         }
         l.push((Action::Screenshot, "Copy screen".to_string()));
+        l.push((Action::Chat, if self.chat_open { "Close chat" } else { "Chat" }.to_string()));
         l
     }
 
@@ -125,6 +144,9 @@ impl App {
             let (bar, items) = overlay::layout(size.width, &labels);
             overlay::draw_bar(&mut buf, bw, bh, bar, &items, &labels, hover);
         }
+        if self.chat_open {
+            overlay::draw_chat(&mut buf, bw, bh, &self.chat, &self.chat_input);
+        }
         if let Some(m) = toast {
             overlay::draw_toast(&mut buf, bw, bh, &m);
         }
@@ -140,6 +162,7 @@ impl App {
             Action::Fullscreen => self.toggle_fullscreen(),
             Action::Cad => self.send_cad(),
             Action::Screenshot => self.screenshot(),
+            Action::Chat => self.chat_open = !self.chat_open,
             Action::Monitor => {
                 if self.monitors.len() > 1 {
                     let next = (self.current_monitor + 1) % self.monitors.len();
@@ -177,6 +200,82 @@ impl App {
             Err(e) => format!("Copy failed: {e}"),
         };
         self.say(msg);
+    }
+
+    /// Send everything that was dropped on the window to the remote computer (it must agree first).
+    fn start_send(&mut self) {
+        let paths = std::mem::take(&mut self.dropped);
+        self.drop_at = None;
+        if paths.is_empty() {
+            return;
+        }
+        if self.view_only {
+            return self.say("This session is view only: files cannot be sent");
+        }
+        if self.xfer.is_some() {
+            return self.say("A transfer is already running");
+        }
+        let items = match xfer::collect(&paths) {
+            Ok(i) => i,
+            Err(e) => return self.say(format!("Cannot send: {e}")),
+        };
+        self.batch = self.batch.wrapping_add(1);
+        let (batch, out, proxy) = (self.batch, self.out.clone(), self.proxy.clone());
+        let (etx, erx) = mpsc::channel();
+        self.xfer = Some(etx);
+        self.xfer_cancel.store(false, AO::Relaxed);
+        let cancel = self.xfer_cancel.clone();
+        let total: u64 = items.iter().map(|i| i.size).sum();
+        let _ = proxy.send_event(Ev::Note(format!("Waiting for the other side to accept {} file(s)", items.len())));
+        let started = std::thread::Builder::new().name("file-send".into()).spawn(move || {
+            let last = std::cell::Cell::new(Instant::now());
+            let p2 = proxy.clone();
+            let progress = move |done: u64, tot: u64| {
+                if last.get().elapsed() >= Duration::from_millis(400) {
+                    last.set(Instant::now());
+                    let _ = p2.send_event(Ev::Note(format!("Sending files: {}%", if tot == 0 { 100 } else { done * 100 / tot })));
+                }
+            };
+            let msg = match xfer::send(batch, &items, &out, &erx, &progress, &cancel) {
+                Ok(n) => format!("Sent {n} file(s), {} KB", total / 1024),
+                Err(e) => format!("Transfer stopped: {e}"),
+            };
+            let _ = proxy.send_event(Ev::Note(msg));
+            let _ = proxy.send_event(Ev::SendDone);
+        });
+        if started.is_err() {
+            self.xfer = None;
+            self.say("Cannot start the transfer");
+        }
+    }
+
+    fn chat_key(&mut self, event: &winit::event::KeyEvent) {
+        if event.state != ElementState::Pressed {
+            return;
+        }
+        match &event.logical_key {
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => {
+                let t = nexdesk_peer::wire::clean_chat(self.chat_input.trim());
+                if !t.is_empty() {
+                    if self.out.send(Msg::Chat(t.clone())).is_ok() {
+                        self.chat.push((true, t));
+                    }
+                    self.chat_input.clear();
+                }
+            }
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) => self.chat_open = false,
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Backspace) => {
+                self.chat_input.pop();
+            }
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space) => self.chat_input.push(' '),
+            winit::keyboard::Key::Character(c) if !self.mods.control_key() && !self.mods.alt_key() => {
+                if self.chat_input.len() + c.len() <= nexdesk_peer::wire::MAX_CHAT {
+                    self.chat_input.push_str(c);
+                }
+            }
+            _ => {}
+        }
+        self.redraw();
     }
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
@@ -256,6 +355,13 @@ impl ApplicationHandler<Ev> for App {
                 next = Some(t);
             }
         }
+        if let Some(t) = self.drop_at {
+            if t <= now {
+                self.start_send();
+            } else {
+                next = Some(t);
+            }
+        }
         if let Some((_, t)) = &self.toast {
             if *t <= now {
                 self.toast = None;
@@ -300,6 +406,34 @@ impl ApplicationHandler<Ev> for App {
                 }
                 self.redraw();
             }
+            Ev::Note(m) => self.say(m),
+            Ev::SendDone => self.xfer = None,
+            Ev::Msg(Msg::Chat(t)) => {
+                self.chat.push((false, t));
+                if self.chat.len() > 200 {
+                    self.chat.remove(0);
+                }
+                if self.chat_open {
+                    self.redraw();
+                } else {
+                    self.say("New chat message: open Chat on the toolbar");
+                }
+            }
+            Ev::Msg(Msg::FilesAnswer { accept, .. }) => {
+                if let Some(x) = &self.xfer {
+                    let _ = x.send(xfer::Event::Answer(accept));
+                }
+            }
+            Ev::Msg(Msg::FileAck { id, bytes }) => {
+                if let Some(x) = &self.xfer {
+                    let _ = x.send(xfer::Event::Ack { id, bytes });
+                }
+            }
+            Ev::Msg(Msg::FileAbort { reason, .. }) => {
+                if let Some(x) = &self.xfer {
+                    let _ = x.send(xfer::Event::Abort(reason.chars().filter(|c| !c.is_control()).take(120).collect()));
+                }
+            }
             Ev::Msg(Msg::Clip(t)) => {
                 if let Some(c) = &self.clip {
                     c.set_remote(t);
@@ -336,6 +470,13 @@ impl ApplicationHandler<Ev> for App {
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::Resized(_) => self.redraw(),
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::DroppedFile(p) => {
+                if self.dropped.len() < 1000 {
+                    self.dropped.push(p);
+                }
+                self.drop_at = Some(Instant::now() + Duration::from_millis(300));
+            }
+            WindowEvent::HoveredFile(_) => self.say("Drop to send to the other computer"),
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer_moved(position.x, position.y);
                 if self.over_bar() || self.view_only {
@@ -387,6 +528,12 @@ impl ApplicationHandler<Ev> for App {
                 }
                 if down && self.mods.control_key() && self.mods.alt_key() {
                     match code {
+                        KeyCode::KeyC => {
+                            self.swallowed = Some(code);
+                            self.chat_open = !self.chat_open;
+                            self.redraw();
+                            return;
+                        }
                         KeyCode::Pause => {
                             self.swallowed = Some(code);
                             self.toggle_fullscreen();
@@ -400,6 +547,11 @@ impl ApplicationHandler<Ev> for App {
                         }
                         _ => {}
                     }
+                }
+                // while the chat line is open, typing goes to it and never to the remote computer
+                if self.chat_open && down {
+                    self.chat_key(&event);
+                    return;
                 }
                 if self.view_only {
                     return;
@@ -616,10 +768,12 @@ fn main() {
     }
 
     let mut pin_error = None;
+    let mut probed = false;
     let result = target.connect(me, |agent| {
         let fp = agent.fingerprint_string();
         if probe {
             println!("FINGERPRINT {fp}");
+            probed = true;
             return false;
         }
         match known.lookup(&key, &fp) {
@@ -644,7 +798,15 @@ fn main() {
         }
     });
     if probe {
-        std::process::exit(0);
+        if probed {
+            std::process::exit(0);
+        }
+        // Nothing was learned: say why, so the manager does not have to guess.
+        let why = match &result {
+            Err(e) => format!("connection failed: {e}"),
+            Ok(_) => "the agent did not identify itself".to_string(),
+        };
+        die(&pin_error.unwrap_or(why));
     }
     let (reader, writer, peer) = match result {
         Ok(x) => x,
@@ -655,6 +817,7 @@ fn main() {
     let target_for_retry = target.clone();
     let el = EventLoop::<Ev>::with_user_event().build().unwrap_or_else(|e| die(&e.to_string()));
     let proxy = el.create_proxy();
+    let app_proxy = proxy.clone();
     let (tx, rx) = mpsc::channel::<Msg>();
     let agent_fp = peer.fingerprint_string();
     std::thread::spawn(move || supervise((reader, writer), rx, proxy, target_for_retry, agent_fp, dir));
@@ -680,6 +843,15 @@ fn main() {
         current_monitor: 0,
         mods: ModifiersState::default(),
         swallowed: None,
+        proxy: app_proxy,
+        dropped: Vec::new(),
+        drop_at: None,
+        xfer: None,
+        xfer_cancel: Arc::new(AtomicBool::new(false)),
+        batch: 0,
+        chat_open: false,
+        chat_input: String::new(),
+        chat: Vec::new(),
     };
     let _ = el.run_app(&mut app);
 }
