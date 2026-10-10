@@ -23,7 +23,7 @@ ironrdp-client = { version = "=0.1.0", features = ["rustls", "clipboard"] }
 ironrdp-input = "0.7"
 image = { version = "0.25", default-features = false, features = ["png"] }
 ironrdp-pdu = "0.9"
-picky-krb = "=0.12.4"
+picky-krb = "=0.13.0"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 winit = "0.30"
 softbuffer = "0.4"
