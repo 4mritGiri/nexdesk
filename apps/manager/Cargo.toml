@@ -10,4 +10,4 @@ name = "nexdesk"
 path = "src/main.rs"
 
 [dependencies]
-nexdesk-ui = { path = "../nexdesk-ui" }
+nexdesk-ui = { path = "../../crates/nexdesk-ui" }

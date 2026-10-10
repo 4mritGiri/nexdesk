@@ -1,0 +1,16 @@
+# NexDesk relay (rendezvous + byte bridge). Build from the repository root:
+#   docker build -f packaging/docker/Dockerfile.relay -t nexdesk-relay .
+#   docker run -d --restart unless-stopped -p 21117:21117 \
+#     -v /etc/nexdesk/relay.key:/run/secrets/relay.key:ro nexdesk-relay
+FROM rust:1-slim AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked -p nexdesk-network --bin nexdesk-relay
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=build /src/target/release/nexdesk-relay /usr/local/bin/nexdesk-relay
+EXPOSE 21117
+USER nonroot
+ENTRYPOINT ["/usr/local/bin/nexdesk-relay", "--listen", "0.0.0.0:21117"]
+# With a key file mounted as above, add:  --key-file /run/secrets/relay.key
+CMD []

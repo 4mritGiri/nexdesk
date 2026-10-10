@@ -15,8 +15,6 @@ fn cap(e: impl std::fmt::Display) -> PeerError {
     PeerError::Capture(e.to_string())
 }
 
-
-
 const KEY_PRESS: u8 = 2;
 const KEY_RELEASE: u8 = 3;
 const BUTTON_PRESS: u8 = 4;
@@ -29,7 +27,6 @@ pub struct XInjector {
     /// The shared area (x, y, w, h) in root coordinates; mouse positions are relative to it.
     region: Mutex<(i16, i16, u16, u16)>,
 }
-
 
 impl XInjector {
     pub fn new() -> Result<Self, PeerError> {
@@ -117,7 +114,6 @@ impl XInjector {
         self.fake(if down { KEY_PRESS } else { KEY_RELEASE }, kc as u8, 0, 0)
     }
 }
-
 
 pub struct XCapture {
     conn: RustConnection,
@@ -360,4 +356,3 @@ impl XCapture {
         Ok(msgs)
     }
 }
-

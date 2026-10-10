@@ -1,3 +1,4 @@
+#![allow(dead_code)] // the save-to-file helpers are kept (and tested) for the planned "save screenshot" action
 //! Screenshot of the remote desktop: saved as PNG into the user's Pictures folder.
 //! Only the local framebuffer is written; nothing is sent anywhere.
 use std::path::{Path, PathBuf};

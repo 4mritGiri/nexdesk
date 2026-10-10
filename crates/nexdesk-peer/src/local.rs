@@ -41,7 +41,14 @@ mod tests {
 
     #[test]
     fn loopback_and_localhost_are_this_computer() {
-        for a in ["127.0.0.1:21118", "127.0.0.1", "localhost:21117", "[::1]:21118", "::1", "0.0.0.0:1"] {
+        for a in [
+            "127.0.0.1:21118",
+            "127.0.0.1",
+            "localhost:21117",
+            "[::1]:21118",
+            "::1",
+            "0.0.0.0:1",
+        ] {
             assert!(is_this_computer(a), "{a}");
         }
     }

@@ -152,9 +152,22 @@ mod tests {
     fn no_two_keys_share_a_number() {
         let mut seen = std::collections::HashMap::new();
         for c in [
-            KeyCode::KeyA, KeyCode::KeyB, KeyCode::Digit1, KeyCode::Space, KeyCode::Numpad0, KeyCode::NumpadEnter,
-            KeyCode::Enter, KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::SuperLeft, KeyCode::SuperRight,
-            KeyCode::PageUp, KeyCode::PageDown, KeyCode::Home, KeyCode::End, KeyCode::Insert,
+            KeyCode::KeyA,
+            KeyCode::KeyB,
+            KeyCode::Digit1,
+            KeyCode::Space,
+            KeyCode::Numpad0,
+            KeyCode::NumpadEnter,
+            KeyCode::Enter,
+            KeyCode::ShiftLeft,
+            KeyCode::ShiftRight,
+            KeyCode::SuperLeft,
+            KeyCode::SuperRight,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Insert,
         ] {
             let n = evdev(c).unwrap();
             assert!(seen.insert(n, c).is_none(), "{c:?} repeats {n}");

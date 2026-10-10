@@ -1,0 +1,34 @@
+[package]
+name = "nexdesk-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+nexdesk-peer = { path = "../crates/nexdesk-peer", default-features = false }
+nexdesk-network = { path = "../crates/nexdesk-network" }
+nexdesk-crypto = { path = "../crates/nexdesk-crypto" }
+
+[workspace]
+
+[[bin]]
+name = "peer_msg_decode"
+path = "fuzz_targets/peer_msg_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "relay_ctl_decode"
+path = "fuzz_targets/relay_ctl_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "identity_decode"
+path = "fuzz_targets/identity_decode.rs"
+test = false
+doc = false

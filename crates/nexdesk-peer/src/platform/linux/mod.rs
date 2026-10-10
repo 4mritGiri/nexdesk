@@ -2,20 +2,20 @@
 #[cfg(feature = "wayland")]
 use std::sync::Arc;
 
+use crate::wire::Msg;
 #[cfg(feature = "wayland")]
 use crate::wire::Rect;
-use crate::wire::Msg;
 use crate::PeerError;
 
-mod x11;
 #[cfg(feature = "wayland")]
 pub mod wayland;
 #[cfg(feature = "wayland")]
 mod wl_capture;
+mod x11;
 
-use x11::{XCapture, XInjector};
 #[cfg(feature = "wayland")]
 use wl_capture::WlCapture;
+use x11::{XCapture, XInjector};
 
 /// The session's connection to the desktop that is shared. On Wayland this holds the portal share the
 /// person approved in the desktop's own dialog; on X11 there is nothing to hold.
@@ -120,8 +120,20 @@ impl Capture {
             Capture::X(c) => c.announce(view_only),
             #[cfg(feature = "wayland")]
             Capture::W(c) => [
-                Msg::Hello { view_only, width: c.w, height: c.h },
-                Msg::Monitors { current: 0, rects: vec![Rect { x: 0, y: 0, w: c.w, h: c.h }] },
+                Msg::Hello {
+                    view_only,
+                    width: c.w,
+                    height: c.h,
+                },
+                Msg::Monitors {
+                    current: 0,
+                    rects: vec![Rect {
+                        x: 0,
+                        y: 0,
+                        w: c.w,
+                        h: c.h,
+                    }],
+                },
             ],
         }
     }

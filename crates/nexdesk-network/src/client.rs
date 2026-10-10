@@ -4,13 +4,40 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::proto::{read_ctl, valid_id, write_ctl, Ctl};
+use crate::proto::{auth_mac, read_ctl, valid_id, write_ctl, Ctl};
 use crate::NetError;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT: Duration = Duration::from_secs(15);
 /// The relay echoes heartbeats; silence for this long means the relay (or the path to it) is gone.
 const RELAY_SILENCE: Duration = Duration::from_secs(50);
+
+/// The relay access key from `NEXDESK_RELAY_KEY`, if set (the plain `connect` and `register` use it).
+pub fn key_from_env() -> Option<Vec<u8>> {
+    std::env::var("NEXDESK_RELAY_KEY")
+        .ok()
+        .map(|k| k.trim().as_bytes().to_vec())
+        .filter(|k| !k.is_empty())
+}
+
+/// Send the first frame and return the relay's answer. A relay with an access key answers with a challenge
+/// first; we prove knowledge of the key and then read the real answer.
+fn first(s: &mut TcpStream, key: Option<&[u8]>, m: &Ctl) -> Result<Ctl, NetError> {
+    write_ctl(s, m)?;
+    match read_ctl(s)? {
+        Ctl::Challenge(nonce) => {
+            let key = key.ok_or(NetError::Refused(
+                "this relay needs an access key (set NEXDESK_RELAY_KEY)",
+            ))?;
+            write_ctl(s, &Ctl::Auth(auth_mac(key, &nonce)))?;
+            match read_ctl(s)? {
+                Ctl::Refused => Err(NetError::Refused("the relay did not accept the access key")),
+                other => Ok(other),
+            }
+        }
+        other => Ok(other),
+    }
+}
 
 fn open(relay: &str) -> Result<TcpStream, NetError> {
     let addr = relay
@@ -27,13 +54,16 @@ fn open(relay: &str) -> Result<TcpStream, NetError> {
 /// Viewer: ask the relay for the computer with this ID. On success the returned stream is connected to the
 /// agent (run the end-to-end handshake on it).
 pub fn connect(relay: &str, id: &str) -> Result<TcpStream, NetError> {
+    connect_with(relay, id, key_from_env().as_deref())
+}
+
+pub fn connect_with(relay: &str, id: &str, key: Option<&[u8]>) -> Result<TcpStream, NetError> {
     if !valid_id(id) {
         return Err(NetError::Refused("an ID is nine digits"));
     }
     let mut s = open(relay)?;
-    write_ctl(&mut s, &Ctl::Connect(id.to_string()))?;
     s.set_read_timeout(Some(Duration::from_secs(25)))?;
-    match read_ctl(&mut s)? {
+    match first(&mut s, key, &Ctl::Connect(id.to_string()))? {
         Ctl::Paired => {
             s.set_read_timeout(None)?;
             s.set_write_timeout(None)?;
@@ -70,18 +100,29 @@ pub fn register(
     on_stream: impl Fn(TcpStream) + Send + Sync + 'static,
     status: impl Fn(&str) + Send + Sync + 'static,
 ) -> Result<Registration, NetError> {
+    register_with(relay, id, key_from_env(), on_stream, status)
+}
+
+pub fn register_with(
+    relay: String,
+    id: String,
+    key: Option<Vec<u8>>,
+    on_stream: impl Fn(TcpStream) + Send + Sync + 'static,
+    status: impl Fn(&str) + Send + Sync + 'static,
+) -> Result<Registration, NetError> {
     if !valid_id(&id) {
         return Err(NetError::Refused("an ID is nine digits"));
     }
     let stop = Arc::new(AtomicBool::new(false));
     let (stop2, on_stream, status) = (stop.clone(), Arc::new(on_stream), Arc::new(status));
+    let key = Arc::new(key);
     std::thread::Builder::new()
         .name("relay-register".into())
         .spawn(move || {
             let mut delay = 2u64;
             while !stop2.load(Ordering::SeqCst) {
                 status("connecting to the relay");
-                match session(&relay, &id, &stop2, &on_stream, &status) {
+                match session(&relay, &id, key.as_deref(), &stop2, &on_stream, &status) {
                     Ok(()) => delay = 2,
                     Err(e) => {
                         status(&format!("relay: {e}"));
@@ -98,13 +139,13 @@ pub fn register(
 fn session(
     relay: &str,
     id: &str,
+    key: Option<&[u8]>,
     stop: &Arc<AtomicBool>,
     on_stream: &Arc<impl Fn(TcpStream) + Send + Sync + 'static>,
     status: &Arc<impl Fn(&str) + Send + Sync + 'static>,
 ) -> Result<(), NetError> {
     let mut ctl = open(relay)?;
-    write_ctl(&mut ctl, &Ctl::Register(id.to_string()))?;
-    match read_ctl(&mut ctl)? {
+    match first(&mut ctl, key, &Ctl::Register(id.to_string()))? {
         Ctl::Registered => {}
         // our own stale entry disappears once the relay notices the old connection died
         Ctl::Taken => {
@@ -139,17 +180,18 @@ fn session(
             Ok(Ctl::Heartbeat) => {}
             Ok(Ctl::Incoming(token)) => {
                 let (relay, on_stream) = (relay.to_string(), on_stream.clone());
+                let key = key.map(|k| k.to_vec());
                 let _ = std::thread::Builder::new()
                     .name("relay-accept".into())
                     .spawn(move || {
                         let Ok(mut s) = open(&relay) else { return };
-                        if write_ctl(&mut s, &Ctl::Accept(token)).is_err() {
+                        if !matches!(
+                            first(&mut s, key.as_deref(), &Ctl::Accept(token)),
+                            Ok(Ctl::Paired)
+                        ) {
                             return;
                         }
-                        if matches!(read_ctl(&mut s), Ok(Ctl::Paired))
-                            && s.set_read_timeout(None).is_ok()
-                            && s.set_write_timeout(None).is_ok()
-                        {
+                        if s.set_read_timeout(None).is_ok() && s.set_write_timeout(None).is_ok() {
                             on_stream(s);
                         }
                     });

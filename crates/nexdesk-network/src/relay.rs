@@ -7,7 +7,7 @@ use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::proto::{random_token, read_ctl, write_ctl, Ctl, Token};
+use crate::proto::{auth_ok, random_nonce, random_token, read_ctl, write_ctl, Ctl, Token};
 use crate::NetError;
 
 #[derive(Debug, Clone)]
@@ -52,6 +52,7 @@ pub struct Relay {
     per_ip: Mutex<HashMap<IpAddr, usize>>,
     total: AtomicUsize,
     next_gen: AtomicU64,
+    key: Option<Vec<u8>>,
     log: Box<dyn Fn(&str) + Send + Sync>,
 }
 
@@ -77,7 +78,18 @@ impl Drop for Slot {
 
 impl Relay {
     pub fn new(limits: Limits, log: impl Fn(&str) + Send + Sync + 'static) -> Arc<Self> {
+        Self::with_key(limits, None, log)
+    }
+
+    /// With `key`, every client must prove it knows the key (challenge-response, nothing secret crosses the wire)
+    /// before the relay does anything for it. Only people you gave the key can register or connect.
+    pub fn with_key(
+        limits: Limits,
+        key: Option<Vec<u8>>,
+        log: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            key,
             limits,
             agents: Mutex::new(HashMap::new()),
             waiting: Mutex::new(HashMap::new()),
@@ -137,7 +149,19 @@ impl Relay {
         s.set_nodelay(true)?;
         s.set_read_timeout(Some(Duration::from_secs(10)))?;
         s.set_write_timeout(Some(Duration::from_secs(10)))?;
-        match read_ctl(&mut s)? {
+        let first = read_ctl(&mut s)?;
+        if let Some(key) = &self.key {
+            let nonce = random_nonce()?;
+            write_ctl(&mut s, &Ctl::Challenge(nonce))?;
+            match read_ctl(&mut s) {
+                Ok(Ctl::Auth(mac)) if auth_ok(key, &nonce, &mac) => {}
+                _ => {
+                    (self.log)(&format!("{ip} refused: wrong or missing relay key"));
+                    return write_ctl(&mut s, &Ctl::Refused);
+                }
+            }
+        }
+        match first {
             Ctl::Register(id) => self.agent(s, id, ip),
             Ctl::Connect(id) => self.viewer(s, id, ip),
             Ctl::Accept(token) => {

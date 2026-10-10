@@ -27,6 +27,18 @@ jobs:
       - name: Peer without Wayland support
         run: cargo check -p nexdesk-peer --all-targets --no-default-features
 
+  quality:
+    name: Format, lints, licences, advisories
+    runs-on: ubuntu-24.04
+    continue-on-error: true   # tighten to blocking once the tree is clean
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt, clippy" }
+      - run: cargo fmt --all -- --check
+      - uses: EmbarkStudios/cargo-deny-action@v2
+      - run: cargo install cargo-audit --locked && cargo audit
+
   # The viewer, relay and shared libraries are meant to build on every desktop OS. The agent builds there but
   # reports that sharing the screen is not supported yet (src/platform/unsupported.rs).
   # continue-on-error until these jobs have been green once; then remove it so they gate merges.

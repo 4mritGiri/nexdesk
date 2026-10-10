@@ -1,16 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/manager",
+    "apps/rdp-viewer",
     "crates/nexdesk-core",
     "crates/nexdesk-session",
     "crates/nexdesk-renderer",
     "crates/nexdesk-ui",
-    "crates/nexdesk-rdp",
     "crates/nexdesk-clipboard",
     "crates/nexdesk-crypto",
     "crates/nexdesk-peer",
     "crates/nexdesk-network",
-    "crates/nexdesk",
 ]
 
 [workspace.package]

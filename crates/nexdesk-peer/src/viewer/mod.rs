@@ -1,15 +1,13 @@
 //! `nexdesk-peer-view HOST:PORT`: window that shows a remote agent's screen and forwards input.
+use std::collections::HashSet;
 use std::io::BufRead;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering as AO};
-use std::collections::HashSet;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nexdesk_core::knownhosts::{host_key, KnownHosts, Lookup};
-use nexdesk_core::scale::{Actual, Fit, View};
 use crate::clip::ClipSync;
 use crate::overlay::gfx::Canvas;
 use crate::overlay::{self, Action, BarItem, Hit, Mode};
@@ -18,6 +16,8 @@ use crate::wire::unpack_pixels;
 use crate::wire::Rect;
 use crate::xfer;
 use crate::{client, store, Msg, Writer};
+use nexdesk_core::knownhosts::{host_key, KnownHosts, Lookup};
+use nexdesk_core::scale::{Actual, Fit, View};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -111,19 +111,46 @@ impl App {
             group,
         };
         let mut l = vec![
-            item(Action::Scale, if self.actual { "Fit" } else { "1:1" }, false, 0),
-            item(Action::Fullscreen, if self.fullscreen { "Window" } else { "Full screen" }, false, 0),
+            item(
+                Action::Scale,
+                if self.actual { "Fit" } else { "1:1" },
+                false,
+                0,
+            ),
+            item(
+                Action::Fullscreen,
+                if self.fullscreen {
+                    "Window"
+                } else {
+                    "Full screen"
+                },
+                false,
+                0,
+            ),
         ];
         if self.monitors.len() > 1 {
             l.push(item(
                 Action::Monitor,
-                &format!("Screen {}/{}", self.current_monitor + 1, self.monitors.len()),
+                &format!(
+                    "Screen {}/{}",
+                    self.current_monitor + 1,
+                    self.monitors.len()
+                ),
                 false,
                 0,
             ));
         }
         if !self.view_only {
-            l.push(item(Action::Control, if self.control { "Control on" } else { "Control off" }, self.control, 1));
+            l.push(item(
+                Action::Control,
+                if self.control {
+                    "Control on"
+                } else {
+                    "Control off"
+                },
+                self.control,
+                1,
+            ));
             l.push(item(Action::Cad, "Ctrl+Alt+Del", false, 1));
         }
         l.push(item(Action::Screenshot, "Copy screen", false, 2));
@@ -151,7 +178,10 @@ impl App {
     fn release_all(&mut self) {
         for (bit, button) in [(1u8, 1u8), (2, 2), (4, 3)] {
             if self.held_buttons & bit != 0 {
-                let _ = self.out.send(Msg::MouseButton { button, down: false });
+                let _ = self.out.send(Msg::MouseButton {
+                    button,
+                    down: false,
+                });
             }
         }
         self.held_buttons = 0;
@@ -211,7 +241,14 @@ impl App {
         let view = self.view();
         let items = self.bar_items();
         let (visible, hover) = (self.bar_visible(), self.hover);
-        let (mode, note) = (self.mode(), if self.control || self.view_only { "" } else { "Ctrl+Alt+G to resume" });
+        let (mode, note) = (
+            self.mode(),
+            if self.control || self.view_only {
+                ""
+            } else {
+                "Ctrl+Alt+G to resume"
+            },
+        );
         let toast = self
             .toast
             .as_ref()
@@ -237,7 +274,10 @@ impl App {
         }
         let mut canvas = Canvas::new(&mut buf, size.width as usize, size.height as usize);
         if self.screen.is_none() {
-            overlay::draw_toast(&mut canvas, "Waiting for the other computer to accept\u{2026}");
+            overlay::draw_toast(
+                &mut canvas,
+                "Waiting for the other computer to accept\u{2026}",
+            );
         }
         if mode != Mode::Controlling || visible {
             overlay::draw_chip(&mut canvas, mode, note);
@@ -404,7 +444,9 @@ impl App {
                 }
             }
             // Esc gives the keyboard back to the remote computer; the panel stays open
-            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) => self.chat_focus = false,
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) => {
+                self.chat_focus = false
+            }
             winit::keyboard::Key::Named(winit::keyboard::NamedKey::Backspace) => {
                 self.chat_input.pop();
             }
@@ -469,7 +511,6 @@ impl App {
             }
         }
     }
-
 }
 
 impl ApplicationHandler<Ev> for App {
@@ -732,7 +773,8 @@ impl ApplicationHandler<Ev> for App {
                     Some(Hit::ChatPanel | Hit::ChatInput) => {
                         if let Some(g) = self.chat_geom() {
                             let max = overlay::chat_max_scroll(&g, &self.chat);
-                            self.chat_scroll = (self.chat_scroll + (dy / 120.0 * 36.0) as i32).clamp(0, max);
+                            self.chat_scroll =
+                                (self.chat_scroll + (dy / 120.0 * 36.0) as i32).clamp(0, max);
                             self.redraw();
                         }
                     }
@@ -820,10 +862,7 @@ impl Target {
         &self,
         me: nexdesk_crypto::Identity,
         accept: impl FnOnce(&nexdesk_crypto::IdentityPublic) -> bool,
-    ) -> Result<
-        (crate::Reader, Writer, nexdesk_crypto::IdentityPublic),
-        crate::PeerError,
-    > {
+    ) -> Result<(crate::Reader, Writer, nexdesk_crypto::IdentityPublic), crate::PeerError> {
         match self {
             Target::Direct(a) => client::connect(a, me, accept),
             Target::Relay { relay, id } => client::connect_relay(relay, id, me, accept),

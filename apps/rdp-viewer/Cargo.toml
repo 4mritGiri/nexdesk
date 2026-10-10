@@ -12,8 +12,8 @@ path = "src/main.rs"
 [dependencies]
 fontdue = "0.9"
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
-nexdesk-core = { path = "../nexdesk-core" }
-nexdesk-clipboard = { path = "../nexdesk-clipboard" }
+nexdesk-core = { path = "../../crates/nexdesk-core" }
+nexdesk-clipboard = { path = "../../crates/nexdesk-clipboard" }
 ironrdp-tls = { version = "0.2", features = ["rustls"] }
 sha2 = "0.10"
 rustls-native-certs = "0.8"

@@ -77,4 +77,3 @@ impl WlCapture {
         Ok(msgs)
     }
 }
-

@@ -151,8 +151,8 @@ impl<'a> Canvas<'a> {
                 let cy = py as f32 + 0.5 - (y as f32 + h as f32 / 2.0);
                 let qx = cx.abs() - (w as f32 / 2.0 - r);
                 let qy = cy.abs() - (h as f32 / 2.0 - r);
-                let d = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0)
-                    - r;
+                let d =
+                    (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - r;
                 let cover = (0.5 - d).clamp(0.0, 1.0);
                 self.put(px, py, color, cover * alpha);
             }
@@ -160,7 +160,17 @@ impl<'a> Canvas<'a> {
     }
 
     /// Rounded rectangle with a 1 px border.
-    pub fn panel(&mut self, x: i32, y: i32, w: i32, h: i32, r: f32, fill: u32, border: u32, alpha: f32) {
+    pub fn panel(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        r: f32,
+        fill: u32,
+        border: u32,
+        alpha: f32,
+    ) {
         self.rrect(x, y, w, h, r, border, alpha);
         self.rrect(x + 1, y + 1, w - 2, h - 2, (r - 1.0).max(0.0), fill, alpha);
     }
@@ -169,7 +179,15 @@ impl<'a> Canvas<'a> {
     pub fn shadow(&mut self, x: i32, y: i32, w: i32, h: i32, r: f32) {
         for i in 1..=6 {
             let g = i * 2;
-            self.rrect(x - g + 2, y - g + 6, w + 2 * g - 4, h + 2 * g - 4, r + g as f32, 0x00_00_00_00, 0.035);
+            self.rrect(
+                x - g + 2,
+                y - g + 6,
+                w + 2 * g - 4,
+                h + 2 * g - 4,
+                r + g as f32,
+                0x00_00_00_00,
+                0.035,
+            );
         }
     }
 
@@ -207,7 +225,12 @@ impl<'a> Canvas<'a> {
                 for col in 0..m.width {
                     let c = bitmap[row * m.width + col];
                     if c > 0 {
-                        self.put(gx + col as i32, gy + row as i32, color, f32::from(c) / 255.0);
+                        self.put(
+                            gx + col as i32,
+                            gy + row as i32,
+                            color,
+                            f32::from(c) / 255.0,
+                        );
                     }
                 }
             }

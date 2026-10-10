@@ -4,7 +4,7 @@
 //! relay for that ID; the relay tells the agent, the agent opens a second connection, and the relay then copies
 //! bytes between the two connections. The relay never sees plaintext: the viewer and the agent run the
 //! `nexdesk-crypto` handshake *through* it, so a malicious relay can refuse or drop traffic but cannot read,
-//! change or impersonate anything. See `docs/RELAY.md`.
+//! change or impersonate anything. See `docs/architecture/RELAY.md`.
 pub mod client;
 pub mod proto;
 pub mod relay;

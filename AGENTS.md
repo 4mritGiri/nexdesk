@@ -654,13 +654,13 @@ log::error!(...)
 
 ```
 README.md
-docs/ARCHITECTURE.md
-docs/SECURITY_DESIGN.md
-docs/CLIPBOARD.md
-docs/VIEWER.md
-docs/FEATURE_MATRIX.md
-docs/ROADMAP.md
-docs/REMOTE.md
+docs/architecture/ARCHITECTURE.md
+docs/security/SECURITY_DESIGN.md
+docs/architecture/CLIPBOARD.md
+docs/architecture/VIEWER.md
+docs/product/FEATURE_MATRIX.md
+docs/product/ROADMAP.md
+docs/architecture/REMOTE.md
 ```
 
  Do not modify documentation merely to restate obvious implementation details.

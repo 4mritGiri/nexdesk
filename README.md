@@ -1,18 +1,16 @@
 # NexDesk
 
-NexDesk is an open-source (MIT OR Apache-2.0) remote-access suite written in Rust: an RDP client built on IronRDP with a GPUI desktop manager, a native remote-control stack (agent, viewer, self-hosted relay) and, next, a terminal with SSH. The goal is one free, auditable tool for remote desktop, remote support, a multi-protocol connection manager and a terminal on Linux, Windows and macOS. See `docs/VISION.md`.
+NexDesk is an open-source (MIT OR Apache-2.0) remote-access suite written in Rust: an RDP client built on IronRDP with a GPUI desktop manager, a native remote-control stack (agent, viewer, self-hosted relay) and, next, a terminal with SSH. The goal is one free, auditable tool for remote desktop, remote support, a multi-protocol connection manager and a terminal on Linux, Windows and macOS. See `docs/product/VISION.md`.
 
 ## Workspace
 
 ```text
-crates/
-├── nexdesk-core/       # RDP files, profiles, credentials boundary, scaling, secure file staging
-├── nexdesk-session/    # typed lifecycle, SessionManager, reconnect foundation, metrics
-├── nexdesk-renderer/   # framebuffer/display abstraction
-├── nexdesk-ui/         # GPUI manager UI, navigation and theme
-├── nexdesk-rdp/        # existing IronRDP engine/input/render loop, migrated from myrdp-viewer
-└── nexdesk/            # GPUI desktop executable
+apps/       manager (GPUI window), rdp-viewer (RDP session window)
+crates/     core, session, renderer, ui, clipboard, crypto, network (relay), peer (native remote control)
+vendor/     patched IronRDP crates
+docs/       product/, architecture/, security/, adr/
 ```
+Full tree and the rules behind it: `docs/architecture/ARCHITECTURE.md`.
 
 ### Security boundaries
 
@@ -99,7 +97,7 @@ The new session layer is deliberately a foundation: reconnect policy and OS keyr
 
 ## Viewer features added in this revision
 * **Full-screen connection bar** (like mstsc): move the mouse to the top edge; pin / minimise / restore / close. `Ctrl+Alt+Break` still toggles full screen.
-* **Clipboard**: text, images and files in both directions, X11 and Wayland (XWayland). See `docs/CLIPBOARD.md`.
+* **Clipboard**: text, images and files in both directions, X11 and Wayland (XWayland). See `docs/architecture/CLIPBOARD.md`.
 * **Drag & drop** local files onto the window (use `--x11` on Wayland).
 * **TLS verification**: `--tls ask|accept-new|strict|insecure`, pins fingerprints in `~/.config/nexdesk/known_hosts`, `--forget-host` to reset.
 * Connection errors are shown inside the window instead of only on stderr.
@@ -135,16 +133,16 @@ Devices > *Scan network* probes the local subnet (at most one /24 per network in
 Failures now show the underlying cause (refused / timed out / unreachable / sign-in rejected) plus a hint, and the same text goes to Logs > Console.
 
 ## Roadmap
-`docs/ROADMAP.md` (phases), `docs/FEATURE_MATRIX.md` (status of every feature) and `docs/REMOTE.md` (the native remote-control mode).
+`docs/product/ROADMAP.md` (phases), `docs/product/FEATURE_MATRIX.md` (status of every feature) and `docs/architecture/REMOTE.md` (the native remote-control mode).
 
 ## Remote control of Linux machines (prototype)
-`nexdesk-agent` shares an X11 screen; `nexdesk-peer-view HOST:PORT` shows and controls it, over a hybrid post-quantum authenticated channel with a consent prompt. See `docs/PEER.md` (how to try it, what is enforced, what is missing) and `docs/CRYPTO.md`. To reach computers behind NAT by a nine digit ID, run `nexdesk-relay` on a server both sides can reach (see `docs/RELAY.md`). Tests: `xvfb-run -a cargo test -p nexdesk-peer -p nexdesk-network`.
+`nexdesk-agent` shares an X11 screen; `nexdesk-peer-view HOST:PORT` shows and controls it, over a hybrid post-quantum authenticated channel with a consent prompt. See `docs/architecture/PEER.md` (how to try it, what is enforced, what is missing) and `docs/security/CRYPTO.md`. To reach computers behind NAT by a nine digit ID, run `nexdesk-relay` on a server both sides can reach (see `docs/architecture/RELAY.md`). Tests: `xvfb-run -a cargo test -p nexdesk-peer -p nexdesk-network`.
 
 In the manager, open **Remote Control** to connect to or share a computer without a terminal; text clipboard and the pointer image are synchronised too.
 
 ## Platforms
 
-Linux (X11 and Wayland) is the primary platform; the viewer, relay and libraries build on Windows and macOS in CI. Details and what is still missing: `docs/PLATFORMS.md`. Code layout: `docs/ARCHITECTURE.md`.
+Linux (X11 and Wayland) is the primary platform; the viewer, relay and libraries build on Windows and macOS in CI. Details and what is still missing: `docs/product/PLATFORMS.md`. Code layout: `docs/architecture/ARCHITECTURE.md`.
 
 ## Licence
 

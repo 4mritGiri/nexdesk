@@ -24,6 +24,7 @@ impl KeyboardGrab {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         #[cfg(target_os = "linux")]
         {

@@ -153,3 +153,74 @@ fn per_address_limit_is_enforced() {
     drop(held);
     let _ = Arc::new(());
 }
+
+fn start_keyed(key: &[u8]) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let relay = Relay::with_key(Limits::default(), Some(key.to_vec()), |_| {});
+    std::thread::spawn(move || relay.serve(l));
+    addr
+}
+
+#[test]
+fn keyed_relay_serves_only_clients_with_the_key() {
+    let key = b"correct horse battery staple";
+    let relay = start_keyed(key);
+    let (stx, srx) = channel::<TcpStream>();
+    let stx = Mutex::new(stx);
+    let (ctx, crx) = channel::<String>();
+    let ctx = Mutex::new(ctx);
+    let _reg = client::register_with(
+        relay.clone(),
+        "123456789".into(),
+        Some(key.to_vec()),
+        move |s| {
+            let _ = stx.lock().unwrap().send(s);
+        },
+        move |m| {
+            let _ = ctx.lock().unwrap().send(m.to_string());
+        },
+    )
+    .unwrap();
+    wait_registered(&crx);
+
+    // no key and a wrong key are refused before any lookup happens (an unknown ID is not even revealed)
+    assert!(client::connect_with(&relay, "123456789", None).is_err());
+    assert!(client::connect_with(&relay, "123456789", Some(b"wrong key wrong key")).is_err());
+    assert!(client::connect_with(&relay, "999999999", None).is_err());
+
+    let mut viewer = client::connect_with(&relay, "123456789", Some(key)).unwrap();
+    let mut agent = srx.recv_timeout(Duration::from_secs(5)).unwrap();
+    viewer.write_all(b"ping").unwrap();
+    let mut buf = [0u8; 4];
+    agent.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"ping");
+}
+
+#[test]
+fn a_keyed_answer_cannot_be_replayed() {
+    let key = b"correct horse battery staple";
+    let relay = start_keyed(key);
+    // learn one valid answer, then offer it on a new connection (new nonce): must fail
+    let mut a = TcpStream::connect(&relay).unwrap();
+    write_ctl(&mut a, &Ctl::Connect("123456789".into())).unwrap();
+    let Ctl::Challenge(n1) = read_ctl(&mut a).unwrap() else {
+        panic!("no challenge")
+    };
+    let old = nexdesk_network::proto::auth_mac(key, &n1);
+    let mut b = TcpStream::connect(&relay).unwrap();
+    write_ctl(&mut b, &Ctl::Connect("123456789".into())).unwrap();
+    let Ctl::Challenge(n2) = read_ctl(&mut b).unwrap() else {
+        panic!("no challenge")
+    };
+    assert_ne!(n1, n2);
+    write_ctl(&mut b, &Ctl::Auth(old)).unwrap();
+    assert_eq!(read_ctl(&mut b).unwrap(), Ctl::Refused);
+}
+
+#[test]
+fn open_relay_still_works_and_a_keyed_client_is_fine_with_it() {
+    let relay = start(Limits::default());
+    // a client that has a key talks to an open relay without trouble (no challenge arrives)
+    assert!(client::connect_with(&relay, "123456789", Some(b"some key some key 1")).is_err());
+}

@@ -1,7 +1,7 @@
 //! Hybrid post-quantum handshake and secure channel for the NexDesk remote-control protocol.
 //!
 //! **Status: prototype, not independently reviewed.** Do not rely on it for real secrets before the
-//! review gate in `docs/SECURITY_DESIGN.md`. The underlying ML-KEM / ML-DSA crates also state that
+//! review gate in `docs/security/SECURITY_DESIGN.md`. The underlying ML-KEM / ML-DSA crates also state that
 //! they have never been audited.
 //!
 //! * Key exchange: X25519 **and** ML-KEM-768, secrets combined with HKDF-SHA-256 (secure if either holds).

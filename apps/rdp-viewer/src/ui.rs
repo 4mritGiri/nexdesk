@@ -184,6 +184,7 @@ impl Canvas<'_> {
     }
 
     /// Rounded rectangle outline.
+    #[allow(dead_code)]
     pub fn rframe(
         &mut self,
         x: i32,

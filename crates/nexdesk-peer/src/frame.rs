@@ -50,7 +50,6 @@ pub fn extract(cur: &[u8], w: usize, (x, y, rw, rh): (usize, usize, usize, usize
     out
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

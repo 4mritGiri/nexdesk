@@ -10,6 +10,11 @@ pub const ID_LEN: usize = 9;
 pub const TOKEN_LEN: usize = 16;
 
 pub type Token = [u8; TOKEN_LEN];
+pub const NONCE_LEN: usize = 16;
+pub const MAC_LEN: usize = 32;
+
+pub type Nonce = [u8; NONCE_LEN];
+pub type Mac = [u8; MAC_LEN];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ctl {
@@ -30,6 +35,10 @@ pub enum Ctl {
     Paired,
     /// relay -> anyone: limit reached or request invalid
     Refused,
+    /// relay -> client, in reply to the first frame, when the relay has an access key
+    Challenge(Nonce),
+    /// client -> relay: HMAC-SHA256(key, nonce)
+    Auth(Mac),
 }
 
 const T_REGISTER: u8 = 1;
@@ -42,6 +51,8 @@ const T_CONNECT: u8 = 7;
 const T_NOTFOUND: u8 = 8;
 const T_PAIRED: u8 = 9;
 const T_REFUSED: u8 = 10;
+const T_CHALLENGE: u8 = 11;
+const T_AUTH: u8 = 12;
 
 /// Exactly nine ASCII digits.
 pub fn valid_id(id: &str) -> bool {
@@ -75,6 +86,8 @@ impl Ctl {
             Ctl::NotFound => vec![T_NOTFOUND],
             Ctl::Paired => vec![T_PAIRED],
             Ctl::Refused => vec![T_REFUSED],
+            Ctl::Challenge(n) => [&[T_CHALLENGE][..], n].concat(),
+            Ctl::Auth(m) => [&[T_AUTH][..], m].concat(),
         }
     }
 
@@ -109,6 +122,10 @@ impl Ctl {
             T_NOTFOUND => empty(rest, Ctl::NotFound),
             T_PAIRED => empty(rest, Ctl::Paired),
             T_REFUSED => empty(rest, Ctl::Refused),
+            T_CHALLENGE => Ok(Ctl::Challenge(
+                rest.try_into().map_err(|_| bad("bad nonce"))?,
+            )),
+            T_AUTH => Ok(Ctl::Auth(rest.try_into().map_err(|_| bad("bad mac"))?)),
             _ => Err(bad("unknown frame")),
         }
     }
@@ -134,6 +151,28 @@ pub fn read_ctl(r: &mut impl Read) -> Result<Ctl, NetError> {
     Ctl::decode(&b)
 }
 
+/// Proof that the sender knows the relay's access key, bound to the relay's fresh nonce (so it cannot be replayed).
+pub fn auth_mac(key: &[u8], nonce: &Nonce) -> Mac {
+    use hmac::{Hmac, Mac as _};
+    let mut m =
+        <Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(key).expect("hmac takes any key length");
+    m.update(b"nexdesk-relay-auth-v1");
+    m.update(nonce);
+    m.finalize().into_bytes().into()
+}
+
+/// Constant-time check of a received proof.
+pub fn auth_ok(key: &[u8], nonce: &Nonce, got: &Mac) -> bool {
+    use subtle::ConstantTimeEq;
+    auth_mac(key, nonce).ct_eq(got).into()
+}
+
+pub fn random_nonce() -> Result<Nonce, NetError> {
+    let mut t = [0u8; NONCE_LEN];
+    getrandom::getrandom(&mut t).map_err(|_| NetError::Proto("no random numbers available"))?;
+    Ok(t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +190,8 @@ mod tests {
             Ctl::NotFound,
             Ctl::Paired,
             Ctl::Refused,
+            Ctl::Challenge([3; 16]),
+            Ctl::Auth([4; 32]),
         ] {
             let mut buf = Vec::new();
             write_ctl(&mut buf, &m).unwrap();
@@ -162,6 +203,7 @@ mod tests {
         assert!(Ctl::decode(b"\x01abcdefghi").is_err(), "non digits");
         assert!(Ctl::decode(&[T_ACCEPT, 1, 2, 3]).is_err(), "short token");
         assert!(Ctl::decode(&[T_PAIRED, 0]).is_err(), "trailing data");
+        assert!(Ctl::decode(&[T_AUTH, 1]).is_err(), "short mac");
         // oversize and zero length frames
         assert!(read_ctl(&mut &[0u8, 200, 1][..]).is_err());
         assert!(read_ctl(&mut &[0u8, 0][..]).is_err());

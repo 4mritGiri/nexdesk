@@ -146,13 +146,27 @@ pub fn draw_bar(c: &mut Canvas, bar: &Bar, items: &[BarItem], hover: Option<Acti
     for ((action, b), item) in bar.buttons.iter().zip(items) {
         let hovered = hover == Some(*action);
         if item.on {
-            c.rrect(b.x, b.y, b.w, b.h, b.h as f32 / 2.0, ACCENT, if hovered { 0.42 } else { 0.30 });
+            c.rrect(
+                b.x,
+                b.y,
+                b.w,
+                b.h,
+                b.h as f32 / 2.0,
+                ACCENT,
+                if hovered { 0.42 } else { 0.30 },
+            );
         } else if hovered {
             c.rrect(b.x, b.y, b.w, b.h, b.h as f32 / 2.0, WHITE, 0.10);
         }
         let color = if item.on { WHITE } else { TEXT };
         let tw = text_width(&item.label, FONT);
-        c.text(b.x + (b.w - tw) / 2, b.y + (b.h - line_height(FONT)) / 2, &item.label, FONT, color);
+        c.text(
+            b.x + (b.w - tw) / 2,
+            b.y + (b.h - line_height(FONT)) / 2,
+            &item.label,
+            FONT,
+            color,
+        );
     }
 }
 
@@ -217,14 +231,23 @@ fn bubbles(g: &ChatGeom, msgs: &[(bool, String)]) -> Vec<Bubble> {
             let lines = wrap(t, FONT, max_text.max(40));
             let w = lines.iter().map(|l| text_width(l, FONT)).max().unwrap_or(0) + 2 * BUBBLE_PAD_X;
             let h = lines.len() as i32 * line_height(FONT) + 2 * BUBBLE_PAD_Y;
-            Bubble { mine: *mine, lines, w, h }
+            Bubble {
+                mine: *mine,
+                lines,
+                w,
+                h,
+            }
         })
         .collect()
 }
 
 /// How far (in pixels) the list can be scrolled up from the newest message.
 pub fn chat_max_scroll(g: &ChatGeom, msgs: &[(bool, String)]) -> i32 {
-    let total: i32 = bubbles(g, msgs).iter().map(|b| b.h + BUBBLE_GAP).sum::<i32>() + BUBBLE_GAP;
+    let total: i32 = bubbles(g, msgs)
+        .iter()
+        .map(|b| b.h + BUBBLE_GAP)
+        .sum::<i32>()
+        + BUBBLE_GAP;
     (total - g.list.h).max(0)
 }
 
@@ -247,14 +270,24 @@ pub fn draw_chat(c: &mut Canvas, g: &ChatGeom, v: &ChatView) {
     for b in bubbles(g, v.msgs).iter().rev() {
         y -= b.h;
         if y + b.h > list.y - 40 && y < list.y + list.h + 40 {
-            let x = if b.mine { list.x + list.w - b.w - 12 } else { list.x + 12 };
+            let x = if b.mine {
+                list.x + list.w - b.w - 12
+            } else {
+                list.x + 12
+            };
             if b.mine {
                 c.rrect(x, y, b.w, b.h, 12.0, ACCENT, 1.0);
             } else {
                 c.rrect(x, y, b.w, b.h, 12.0, PANEL_2, 1.0);
             }
             for (n, l) in b.lines.iter().enumerate() {
-                c.text(x + BUBBLE_PAD_X, y + BUBBLE_PAD_Y + n as i32 * line_height(FONT), l, FONT, if b.mine { WHITE } else { TEXT });
+                c.text(
+                    x + BUBBLE_PAD_X,
+                    y + BUBBLE_PAD_Y + n as i32 * line_height(FONT),
+                    l,
+                    FONT,
+                    if b.mine { WHITE } else { TEXT },
+                );
             }
         }
         y -= BUBBLE_GAP;
@@ -262,7 +295,13 @@ pub fn draw_chat(c: &mut Canvas, g: &ChatGeom, v: &ChatView) {
     if v.msgs.is_empty() {
         let hint = "Messages to the other computer appear here.";
         for (n, l) in wrap(hint, SMALL, list.w - 40).iter().enumerate() {
-            c.text(list.x + 20, list.y + 16 + n as i32 * line_height(SMALL), l, SMALL, MUTED);
+            c.text(
+                list.x + 20,
+                list.y + 16 + n as i32 * line_height(SMALL),
+                l,
+                SMALL,
+                MUTED,
+            );
         }
     }
 
@@ -270,8 +309,20 @@ pub fn draw_chat(c: &mut Canvas, g: &ChatGeom, v: &ChatView) {
     c.rrect(p.x + 1, p.y + 1, p.w - 2, HEAD_H - 1, 13.0, PANEL, 1.0);
     c.rrect(p.x + 1, p.y + HEAD_H - 14, p.w - 2, 14, 0.0, PANEL, 1.0);
     c.hline(p.x + 1, p.y + HEAD_H, p.w - 2, BORDER, 1.0);
-    c.text(p.x + 16, p.y + (HEAD_H - line_height(FONT)) / 2, "Chat", FONT + 1.0, TEXT);
-    c.text(p.x + 62, p.y + (HEAD_H - line_height(SMALL)) / 2 + 1, "with the other computer", SMALL, MUTED);
+    c.text(
+        p.x + 16,
+        p.y + (HEAD_H - line_height(FONT)) / 2,
+        "Chat",
+        FONT + 1.0,
+        TEXT,
+    );
+    c.text(
+        p.x + 62,
+        p.y + (HEAD_H - line_height(SMALL)) / 2 + 1,
+        "with the other computer",
+        SMALL,
+        MUTED,
+    );
     // close button: a plain cross
     let cl = g.close;
     let (cx, cy) = (cl.x + cl.w / 2, cl.y + cl.h / 2);
@@ -279,26 +330,61 @@ pub fn draw_chat(c: &mut Canvas, g: &ChatGeom, v: &ChatView) {
         c.rrect(cx + i - 1, cy + i - 1, 2, 2, 1.0, MUTED, 1.0);
         c.rrect(cx + i - 1, cy - i - 1, 2, 2, 1.0, MUTED, 1.0);
     }
-    c.rrect(p.x + 1, p.y + p.h - FOOT_H, p.w - 2, FOOT_H - 1, 13.0, PANEL, 1.0);
+    c.rrect(
+        p.x + 1,
+        p.y + p.h - FOOT_H,
+        p.w - 2,
+        FOOT_H - 1,
+        13.0,
+        PANEL,
+        1.0,
+    );
     c.rrect(p.x + 1, p.y + p.h - FOOT_H, p.w - 2, 14, 0.0, PANEL, 1.0);
     c.hline(p.x + 1, p.y + p.h - FOOT_H, p.w - 2, BORDER, 1.0);
 
     // input field
     let i = g.input;
-    c.panel(i.x, i.y, i.w, i.h, 10.0, PANEL_2, if v.focused { ACCENT } else { BORDER }, 1.0);
+    c.panel(
+        i.x,
+        i.y,
+        i.w,
+        i.h,
+        10.0,
+        PANEL_2,
+        if v.focused { ACCENT } else { BORDER },
+        1.0,
+    );
     let room = i.w - 24;
     if v.input.is_empty() {
-        let hint = if v.focused { "Type a message" } else { "Click here to type a message" };
-        c.text(i.x + 12, i.y + (i.h - line_height(FONT)) / 2, hint, FONT, MUTED);
+        let hint = if v.focused {
+            "Type a message"
+        } else {
+            "Click here to type a message"
+        };
+        c.text(
+            i.x + 12,
+            i.y + (i.h - line_height(FONT)) / 2,
+            hint,
+            FONT,
+            MUTED,
+        );
     } else {
         // show the end of the text when it is longer than the field
         let mut start = 0;
         let chars: Vec<char> = v.input.chars().collect();
-        while start < chars.len() && text_width(&chars[start..].iter().collect::<String>(), FONT) > room {
+        while start < chars.len()
+            && text_width(&chars[start..].iter().collect::<String>(), FONT) > room
+        {
             start += 1;
         }
         let shown: String = chars[start..].iter().collect();
-        let w = c.text(i.x + 12, i.y + (i.h - line_height(FONT)) / 2, &shown, FONT, TEXT);
+        let w = c.text(
+            i.x + 12,
+            i.y + (i.h - line_height(FONT)) / 2,
+            &shown,
+            FONT,
+            TEXT,
+        );
         if v.focused {
             c.rrect(i.x + 13 + w, i.y + 9, 2, i.h - 18, 1.0, ACCENT, 1.0);
         }
@@ -309,7 +395,13 @@ pub fn draw_chat(c: &mut Canvas, g: &ChatGeom, v: &ChatView) {
 /// A one-line message at the bottom centre.
 pub fn draw_toast(c: &mut Canvas, msg: &str) {
     let max = (c.w as i32 - 80).max(40);
-    let msg = fit(&msg.chars().filter(|ch| !ch.is_control()).collect::<String>(), FONT, max);
+    let msg = fit(
+        &msg.chars()
+            .filter(|ch| !ch.is_control())
+            .collect::<String>(),
+        FONT,
+        max,
+    );
     let tw = text_width(&msg, FONT) + 32;
     let (x, y) = ((c.w as i32 - tw) / 2, c.h as i32 - 64);
     c.shadow(x, y, tw, 38, 19.0);
@@ -332,13 +424,23 @@ pub fn draw_chip(c: &mut Canvas, mode: Mode, note: &str) {
         Mode::Paused => (WARN, "Control off"),
         Mode::ViewOnly => (MUTED, "View only"),
     };
-    let text = if note.is_empty() { label.to_string() } else { format!("{label} \u{2022} {note}") };
+    let text = if note.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label} \u{2022} {note}")
+    };
     let text = fit(&text, SMALL, (c.w as i32 / 2).max(60));
     let tw = text_width(&text, SMALL) + 36;
     let (x, y) = (12, c.h as i32 - 12 - 26);
     c.panel(x, y, tw, 26, 13.0, PANEL, BORDER, 0.88);
     c.disc(x + 14, y + 13, 4, dot);
-    c.text(x + 26, y + (26 - line_height(SMALL)) / 2, &text, SMALL, TEXT);
+    c.text(
+        x + 26,
+        y + (26 - line_height(SMALL)) / 2,
+        &text,
+        SMALL,
+        TEXT,
+    );
 }
 
 // ---- hit testing -------------------------------------------------------------------------------
@@ -405,13 +507,48 @@ mod tests {
         let it = items();
         let bar = bar_layout(1280, &it);
         let (a, r) = bar.buttons[3];
-        assert_eq!(hit_test(Some(&bar), None, f64::from(r.x + 3), f64::from(r.y + 3)), Some(Hit::Bar(a)));
-        assert_eq!(hit_test(Some(&bar), None, f64::from(bar.rect.x) + 1.0, f64::from(bar.rect.y) + 1.0), Some(Hit::BarBackground));
+        assert_eq!(
+            hit_test(Some(&bar), None, f64::from(r.x + 3), f64::from(r.y + 3)),
+            Some(Hit::Bar(a))
+        );
+        assert_eq!(
+            hit_test(
+                Some(&bar),
+                None,
+                f64::from(bar.rect.x) + 1.0,
+                f64::from(bar.rect.y) + 1.0
+            ),
+            Some(Hit::BarBackground)
+        );
         assert_eq!(hit_test(None, None, 5.0, 5.0), None);
         let g = chat_layout(1280, 720);
-        assert_eq!(hit_test(None, Some(&g), f64::from(g.input.x + 4), f64::from(g.input.y + 4)), Some(Hit::ChatInput));
-        assert_eq!(hit_test(None, Some(&g), f64::from(g.close.x + 4), f64::from(g.close.y + 4)), Some(Hit::ChatClose));
-        assert_eq!(hit_test(None, Some(&g), f64::from(g.list.x + 4), f64::from(g.list.y + 4)), Some(Hit::ChatPanel));
+        assert_eq!(
+            hit_test(
+                None,
+                Some(&g),
+                f64::from(g.input.x + 4),
+                f64::from(g.input.y + 4)
+            ),
+            Some(Hit::ChatInput)
+        );
+        assert_eq!(
+            hit_test(
+                None,
+                Some(&g),
+                f64::from(g.close.x + 4),
+                f64::from(g.close.y + 4)
+            ),
+            Some(Hit::ChatClose)
+        );
+        assert_eq!(
+            hit_test(
+                None,
+                Some(&g),
+                f64::from(g.list.x + 4),
+                f64::from(g.list.y + 4)
+            ),
+            Some(Hit::ChatPanel)
+        );
         // the middle of the screen belongs to the remote computer
         assert_eq!(hit_test(Some(&bar), Some(&g), 400.0, 400.0), None);
     }
@@ -423,8 +560,24 @@ mod tests {
             assert!(g.panel.x >= 0 || w < 24, "{w}x{h}");
             let mut buf = vec![0u32; (w * h) as usize];
             let mut c = Canvas::new(&mut buf, w as usize, h as usize);
-            let msgs: Vec<(bool, String)> = (0..30).map(|i| (i % 2 == 0, format!("message number {i} with some words to wrap around"))).collect();
-            draw_chat(&mut c, &g, &ChatView { msgs: &msgs, input: "typing", focused: true, scroll: 99999 });
+            let msgs: Vec<(bool, String)> = (0..30)
+                .map(|i| {
+                    (
+                        i % 2 == 0,
+                        format!("message number {i} with some words to wrap around"),
+                    )
+                })
+                .collect();
+            draw_chat(
+                &mut c,
+                &g,
+                &ChatView {
+                    msgs: &msgs,
+                    input: "typing",
+                    focused: true,
+                    scroll: 99999,
+                },
+            );
             draw_bar(&mut c, &bar_layout(w, &items()), &items(), None);
             draw_toast(&mut c, "hello");
             draw_chip(&mut c, Mode::Paused, "Ctrl+Alt+G to resume");

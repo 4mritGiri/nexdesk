@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use nexdesk_crypto::{Identity, IdentityPublic, Responder};
 
-use crate::platform::{Capture, Display, Injector};
 use crate::link::{read_frame, write_frame, Reader, Writer, MAX_PRE_AUTH};
+use crate::platform::{Capture, Display, Injector};
 use crate::wire::Msg;
 use crate::PeerError;
 
@@ -168,7 +168,11 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
             return Err(e);
         }
     };
-    let injector: Arc<Option<Injector>> = Arc::new(if policy.view_only { None } else { display.injector() });
+    let injector: Arc<Option<Injector>> = Arc::new(if policy.view_only {
+        None
+    } else {
+        display.injector()
+    });
     apply_region(&injector, &capture);
     let injector_input = injector.clone();
     let view_only = policy.view_only || injector.is_none();

@@ -1,5 +1,5 @@
 //! PipeWire receiving half of the Wayland host, against a real PipeWire daemon and a test video source.
-//! Needs `NEXDESK_PW_NODE=<node id>` (see docs/PEER.md); passes without it.
+//! Needs `NEXDESK_PW_NODE=<node id>` (see docs/architecture/PEER.md); passes without it.
 #![cfg(feature = "wayland")]
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;

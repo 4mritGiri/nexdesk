@@ -3,10 +3,10 @@
 //! `host.rs` is platform independent.
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "linux")]
-pub use linux::{Capture, Display, Injector};
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 pub use linux::wayland;
+#[cfg(target_os = "linux")]
+pub use linux::{Capture, Display, Injector};
 
 #[cfg(not(target_os = "linux"))]
 mod unsupported;

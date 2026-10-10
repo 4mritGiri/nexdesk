@@ -1,0 +1,9 @@
+# Security-sensitive code needs the security reviewers (see CONTRIBUTING.md).
+/crates/nexdesk-crypto/        @nexdesk/security
+/crates/nexdesk-network/       @nexdesk/security
+/crates/nexdesk-peer/src/host.rs   @nexdesk/security
+/crates/nexdesk-peer/src/agent.rs  @nexdesk/security
+/crates/nexdesk-peer/src/xfer.rs   @nexdesk/security
+/docs/security/                @nexdesk/security
+/.github/                      @nexdesk/maintainers
+*                              @nexdesk/maintainers
