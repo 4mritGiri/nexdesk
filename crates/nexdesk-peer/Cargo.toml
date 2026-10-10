@@ -23,7 +23,7 @@ wayland = ["dep:ashpd", "dep:pipewire", "dep:tokio"]
 nexdesk-crypto = { path = "../nexdesk-crypto" }
 nexdesk-core = { path = "../nexdesk-core" }
 nexdesk-network = { path = "../nexdesk-network" }
-lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["safe-encode", "safe-decode"] }
 thiserror = "1"
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
