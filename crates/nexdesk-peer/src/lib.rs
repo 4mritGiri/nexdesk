@@ -1,19 +1,27 @@
 //! NexDesk remote-control protocol (P5a prototype): a host agent that shares an X11 screen and a viewer.
 //!
 //! Everything after the handshake travels inside `nexdesk-crypto` records. See `docs/PEER.md`.
+pub mod agent;
 pub mod client;
 pub mod clip;
 pub mod control;
+pub mod frame;
 pub mod host;
-pub mod inject;
+pub mod keymap;
 pub mod link;
+pub mod local;
 pub mod overlay;
 pub mod screen;
 pub mod shot;
 pub mod store;
-pub mod xfer;
+pub mod paths;
+pub mod platform;
 pub mod wire;
+pub mod viewer;
+pub mod xfer;
 
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+pub use platform::wayland;
 pub use link::{Reader, Writer};
 pub use wire::Msg;
 

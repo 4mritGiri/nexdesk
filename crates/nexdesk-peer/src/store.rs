@@ -9,10 +9,7 @@ use crate::PeerError;
 
 /// `~/.config/nexdesk/peer` (honours `XDG_CONFIG_HOME`).
 pub fn default_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    let base = crate::paths::config_base()?;
     Some(base.join("nexdesk").join("peer"))
 }
 
@@ -26,7 +23,9 @@ pub fn load_or_create_identity(dir: &Path, name: &str) -> Result<Identity, PeerE
     }
     let path = dir.join(name);
     match std::fs::read(&path) {
-        Ok(b) => Identity::from_seed_bytes(&b).map_err(|_| PeerError::Proto("identity file is damaged")),
+        Ok(b) => {
+            Identity::from_seed_bytes(&b).map_err(|_| PeerError::Proto("identity file is damaged"))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let id = Identity::generate()?;
             let mut opts = std::fs::OpenOptions::new();
@@ -55,7 +54,8 @@ pub fn load_or_create_id(dir: &Path) -> Result<String, PeerError> {
             return Ok(s);
         }
     }
-    let id = nexdesk_network::proto::random_id().map_err(|_| PeerError::Proto("no random numbers available"))?;
+    let id = nexdesk_network::proto::random_id()
+        .map_err(|_| PeerError::Proto("no random numbers available"))?;
     std::fs::write(&path, format!("{id}\n"))?;
     Ok(id)
 }
@@ -63,7 +63,8 @@ pub fn load_or_create_id(dir: &Path) -> Result<String, PeerError> {
 /// Replace the saved relay ID with a new random one and return it. The identity key (fingerprint) is unchanged.
 pub fn new_id(dir: &Path) -> Result<String, PeerError> {
     std::fs::create_dir_all(dir)?;
-    let id = nexdesk_network::proto::random_id().map_err(|_| PeerError::Proto("no random numbers available"))?;
+    let id = nexdesk_network::proto::random_id()
+        .map_err(|_| PeerError::Proto("no random numbers available"))?;
     std::fs::write(dir.join("agent-id"), format!("{id}\n"))?;
     Ok(id)
 }
@@ -98,8 +99,18 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(dir.join("id")).unwrap().permissions().mode() & 0o777, 0o600);
-            assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(
+                std::fs::metadata(dir.join("id"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
         }
         std::fs::write(dir.join("bad"), b"short").unwrap();
         assert!(load_or_create_identity(&dir, "bad").is_err());

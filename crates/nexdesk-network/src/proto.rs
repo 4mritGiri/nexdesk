@@ -89,8 +89,15 @@ impl Ctl {
                 Err(bad("bad id"))
             }
         };
-        let token = |r: &[u8]| -> Result<Token, NetError> { r.try_into().map_err(|_| bad("bad token")) };
-        let empty = |r: &[u8], m: Ctl| if r.is_empty() { Ok(m) } else { Err(bad("unexpected data")) };
+        let token =
+            |r: &[u8]| -> Result<Token, NetError> { r.try_into().map_err(|_| bad("bad token")) };
+        let empty = |r: &[u8], m: Ctl| {
+            if r.is_empty() {
+                Ok(m)
+            } else {
+                Err(bad("unexpected data"))
+            }
+        };
         match tag {
             T_REGISTER => Ok(Ctl::Register(id(rest)?)),
             T_REGISTERED => empty(rest, Ctl::Registered),

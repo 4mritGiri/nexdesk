@@ -28,7 +28,10 @@ impl Screen {
     }
 
     pub fn searchable(self) -> bool {
-        !matches!(self, Screen::Sessions | Screen::Settings | Screen::AddressBooks | Screen::Remote)
+        !matches!(
+            self,
+            Screen::Sessions | Screen::Settings | Screen::AddressBooks | Screen::Remote
+        )
     }
 }
 

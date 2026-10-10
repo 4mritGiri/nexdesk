@@ -9,7 +9,8 @@ use std::time::UNIX_EPOCH;
 
 use ironrdp_cliprdr::backend::ClipboardMessage;
 use ironrdp_cliprdr::pdu::{
-    ClipboardFileAttributes, FileContentsFlags, FileContentsRequest, FileContentsResponse, FileDescriptor,
+    ClipboardFileAttributes, FileContentsFlags, FileContentsRequest, FileContentsResponse,
+    FileDescriptor,
 };
 
 use crate::Sink;
@@ -63,7 +64,9 @@ impl LocalTable {
             tracing::debug!("skipping {path:?}: unusable name");
             return;
         }
-        let Ok(link_meta) = std::fs::symlink_metadata(path) else { return };
+        let Ok(link_meta) = std::fs::symlink_metadata(path) else {
+            return;
+        };
         let meta = if link_meta.file_type().is_symlink() {
             match std::fs::metadata(path) {
                 Ok(m) if m.is_file() => m, // follow links to files only
@@ -86,7 +89,11 @@ impl LocalTable {
         }
         if meta.is_dir() {
             d = d.with_attributes(ClipboardFileAttributes::DIRECTORY);
-            self.files.push(LocalFile { path: path.to_path_buf(), size: 0, is_dir: true });
+            self.files.push(LocalFile {
+                path: path.to_path_buf(),
+                size: 0,
+                is_dir: true,
+            });
             self.descriptors.push(d);
             let child_rel = match rel_dir {
                 Some(dir) => format!("{dir}\\{name}"),
@@ -101,8 +108,14 @@ impl LocalTable {
                 self.add(&c, Some(&child_rel), depth + 1);
             }
         } else if meta.is_file() {
-            d = d.with_attributes(ClipboardFileAttributes::ARCHIVE).with_file_size(meta.len());
-            self.files.push(LocalFile { path: path.to_path_buf(), size: meta.len(), is_dir: false });
+            d = d
+                .with_attributes(ClipboardFileAttributes::ARCHIVE)
+                .with_file_size(meta.len());
+            self.files.push(LocalFile {
+                path: path.to_path_buf(),
+                size: meta.len(),
+                is_dir: false,
+            });
             self.descriptors.push(d);
         }
     }
@@ -136,7 +149,10 @@ pub fn spawn_file_server(sink: Sink) -> Sender<FileJob> {
 fn serve(job: &FileJob, open: &mut Option<(PathBuf, File)>) -> FileContentsResponse<'static> {
     let r = &job.request;
     let err = || FileContentsResponse::new_error(r.stream_id);
-    let Some(entry) = usize::try_from(r.index).ok().and_then(|i| job.table.files.get(i)) else {
+    let Some(entry) = usize::try_from(r.index)
+        .ok()
+        .and_then(|i| job.table.files.get(i))
+    else {
         return err();
     };
     if entry.is_dir {
@@ -144,7 +160,9 @@ fn serve(job: &FileJob, open: &mut Option<(PathBuf, File)>) -> FileContentsRespo
     }
     if r.flags.contains(FileContentsFlags::SIZE) {
         // Re-stat: the file may have grown since it was copied; the protocol wants the real size.
-        let size = std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(entry.size);
+        let size = std::fs::metadata(&entry.path)
+            .map(|m| m.len())
+            .unwrap_or(entry.size);
         return FileContentsResponse::new_size_response(r.stream_id, size);
     }
     // RANGE
@@ -160,7 +178,9 @@ fn serve(job: &FileJob, open: &mut Option<(PathBuf, File)>) -> FileContentsRespo
             }
         }
     }
-    let Some((_, f)) = open.as_mut() else { return err() };
+    let Some((_, f)) = open.as_mut() else {
+        return err();
+    };
     if f.seek(SeekFrom::Start(r.position)).is_err() {
         return err();
     }
@@ -196,8 +216,11 @@ mod tests {
         std::fs::write(root.join("proj/sub/b.bin"), vec![7u8; 10]).unwrap();
         std::fs::write(root.join("solo.txt"), b"x").unwrap();
         let t = LocalTable::build(&[root.join("proj"), root.join("solo.txt")]);
-        let names: Vec<(String, Option<String>)> =
-            t.descriptors.iter().map(|d| (d.name.clone(), d.relative_path.clone())).collect();
+        let names: Vec<(String, Option<String>)> = t
+            .descriptors
+            .iter()
+            .map(|d| (d.name.clone(), d.relative_path.clone()))
+            .collect();
         assert_eq!(
             names,
             vec![

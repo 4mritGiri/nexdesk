@@ -8,7 +8,13 @@ use std::time::{Duration, Instant};
 /// Agent that answers "yes" to every consent request; returns its stdout lines through a channel.
 fn start_agent(home: &std::path::Path, addr: &str) -> (Child, mpsc::Receiver<String>) {
     let mut agent = Command::new(env!("CARGO_BIN_EXE_nexdesk-agent"))
-        .args(["--listen", addr, "--stdio-control", "--reconnect-grace", "0"])
+        .args([
+            "--listen",
+            addr,
+            "--stdio-control",
+            "--reconnect-grace",
+            "0",
+        ])
         .env("HOME", home)
         .env_remove("XDG_CONFIG_HOME")
         .stdin(Stdio::piped())
@@ -59,11 +65,17 @@ fn viewer_reconnects_after_the_agent_restarts() {
     let home = std::env::temp_dir().join(format!("nexdesk-rc-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).unwrap();
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let addr = format!("127.0.0.1:{port}");
 
     let (mut agent, rx) = start_agent(&home, &addr);
-    let fp = wait_for(&rx, "IDENTITY ", 10).trim_start_matches("IDENTITY ").to_string();
+    let fp = wait_for(&rx, "IDENTITY ", 10)
+        .trim_start_matches("IDENTITY ")
+        .to_string();
     std::thread::sleep(Duration::from_millis(300));
     let mut viewer = Command::new(env!("CARGO_BIN_EXE_nexdesk-peer-view"))
         .args([&addr, "--trust", &fp])
@@ -81,11 +93,16 @@ fn viewer_reconnects_after_the_agent_restarts() {
     let _ = agent.kill();
     let _ = agent.wait();
     std::thread::sleep(Duration::from_millis(1500));
-    assert!(viewer.try_wait().unwrap().is_none(), "the viewer must not exit on a dropped connection");
+    assert!(
+        viewer.try_wait().unwrap().is_none(),
+        "the viewer must not exit on a dropped connection"
+    );
 
     // the agent comes back with the same identity: the viewer reconnects (and is asked again)
     let (mut agent2, rx2) = start_agent(&home, &addr);
-    let fp2 = wait_for(&rx2, "IDENTITY ", 10).trim_start_matches("IDENTITY ").to_string();
+    let fp2 = wait_for(&rx2, "IDENTITY ", 10)
+        .trim_start_matches("IDENTITY ")
+        .to_string();
     assert_eq!(fp, fp2, "the identity must survive a restart");
     wait_for(&rx2, "REQUEST ", 20);
     std::thread::sleep(Duration::from_secs(1));

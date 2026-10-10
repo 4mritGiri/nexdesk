@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use ironrdp_tls::rustls_crate as rustls;
 use nexdesk_core::knownhosts::{fingerprint_string, host_key, KnownHosts, Lookup};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerifier, ServerCertVerified};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -74,12 +74,21 @@ pub struct PolicyVerifier {
 
 impl std::fmt::Debug for PolicyVerifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PolicyVerifier").field("key", &self.key).field("policy", &self.policy).finish()
+        f.debug_struct("PolicyVerifier")
+            .field("key", &self.key)
+            .field("policy", &self.policy)
+            .finish()
     }
 }
 
 impl PolicyVerifier {
-    pub fn new(host: &str, port: u16, policy: Policy, store: KnownHosts, prompt: Prompt) -> Arc<Self> {
+    pub fn new(
+        host: &str,
+        port: u16,
+        policy: Policy,
+        store: KnownHosts,
+        prompt: Prompt,
+    ) -> Arc<Self> {
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let mut roots = RootCertStore::empty();
         for c in rustls_native_certs::load_native_certs().certs {
@@ -88,9 +97,18 @@ impl PolicyVerifier {
         let webpki = if roots.is_empty() {
             None
         } else {
-            WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone()).build().ok()
+            WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+                .build()
+                .ok()
         };
-        Arc::new(Self { key: host_key(host, port), policy, store: Mutex::new(store), webpki, provider, prompt })
+        Arc::new(Self {
+            key: host_key(host, port),
+            policy,
+            store: Mutex::new(store),
+            webpki,
+            provider,
+            prompt,
+        })
     }
 
     fn describe(der: &CertificateDer<'_>) -> String {
@@ -114,25 +132,40 @@ impl ServerCertVerifier for PolicyVerifier {
             return Ok(ServerCertVerified::assertion());
         }
         if let Some(w) = &self.webpki {
-            if w.verify_server_cert(end_entity, intermediates, server_name, ocsp, now).is_ok() {
+            if w.verify_server_cert(end_entity, intermediates, server_name, ocsp, now)
+                .is_ok()
+            {
                 return Ok(ServerCertVerified::assertion());
             }
         }
         let fp = fingerprint_string(&Sha256::digest(end_entity.as_ref()));
-        let mut store = self.store.lock().map_err(|_| Error::General("known_hosts lock poisoned".into()))?;
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_| Error::General("known_hosts lock poisoned".into()))?;
         let pinned = match store.lookup(&self.key, &fp) {
             Lookup::Match => return Ok(ServerCertVerified::assertion()),
             Lookup::Unknown => {
                 match self.policy {
                     Policy::Strict => {
-                        nexdesk_core::logs::alarm(nexdesk_core::logs::Level::Error, "Untrusted certificate refused", &self.key, &format!("strict mode, fingerprint {fp}"));
+                        nexdesk_core::logs::alarm(
+                            nexdesk_core::logs::Level::Error,
+                            "Untrusted certificate refused",
+                            &self.key,
+                            &format!("strict mode, fingerprint {fp}"),
+                        );
                         return Err(Error::General(format!(
                             "server certificate {fp} is not trusted (strict mode; connect once with --tls ask to pin it)"
-                        )))
+                        )));
                     }
                     Policy::AcceptNew => {
                         tracing::warn!("pinning new server certificate for {}: {fp}", self.key);
-                        nexdesk_core::logs::alarm(nexdesk_core::logs::Level::Warn, "New certificate pinned (accept-new)", &self.key, &fp);
+                        nexdesk_core::logs::alarm(
+                            nexdesk_core::logs::Level::Warn,
+                            "New certificate pinned (accept-new)",
+                            &self.key,
+                            &fp,
+                        );
                         let _ = store.set(&self.key, &fp);
                         return Ok(ServerCertVerified::assertion());
                     }
@@ -142,7 +175,12 @@ impl ServerCertVerifier for PolicyVerifier {
             }
             Lookup::Mismatch { pinned } => {
                 if self.policy != Policy::Ask {
-                    nexdesk_core::logs::alarm(nexdesk_core::logs::Level::Error, "SERVER CERTIFICATE CHANGED - connection refused", &self.key, &format!("pinned {pinned}, got {fp}"));
+                    nexdesk_core::logs::alarm(
+                        nexdesk_core::logs::Level::Error,
+                        "SERVER CERTIFICATE CHANGED - connection refused",
+                        &self.key,
+                        &format!("pinned {pinned}, got {fp}"),
+                    );
                     return Err(Error::General(format!(
                         "SERVER CERTIFICATE CHANGED for {} (pinned {pinned}, got {fp}). Possible man-in-the-middle attack. \
                          If the server was reinstalled, run with --forget-host or use --tls ask.",
@@ -152,21 +190,40 @@ impl ServerCertVerifier for PolicyVerifier {
                 Some(pinned)
             }
         };
-        let info = CertInfo { host: self.key.clone(), subject: Self::describe(end_entity), fingerprint: fp.clone(), pinned };
+        let info = CertInfo {
+            host: self.key.clone(),
+            subject: Self::describe(end_entity),
+            fingerprint: fp.clone(),
+            pinned,
+        };
         drop(store); // the prompt can take minutes; do not hold the lock
         let changed = info.pinned.is_some();
         if !(self.prompt)(info) {
             nexdesk_core::logs::alarm(
                 nexdesk_core::logs::Level::Warn,
-                if changed { "Changed certificate rejected by user" } else { "Unknown certificate rejected by user" },
+                if changed {
+                    "Changed certificate rejected by user"
+                } else {
+                    "Unknown certificate rejected by user"
+                },
                 &self.key,
                 &fp,
             );
-            return Err(Error::General("server certificate rejected by the user".into()));
+            return Err(Error::General(
+                "server certificate rejected by the user".into(),
+            ));
         }
         nexdesk_core::logs::alarm(
-            if changed { nexdesk_core::logs::Level::Error } else { nexdesk_core::logs::Level::Warn },
-            if changed { "CHANGED certificate trusted by user" } else { "Unknown certificate trusted by user" },
+            if changed {
+                nexdesk_core::logs::Level::Error
+            } else {
+                nexdesk_core::logs::Level::Warn
+            },
+            if changed {
+                "CHANGED certificate trusted by user"
+            } else {
+                "Unknown certificate trusted by user"
+            },
             &self.key,
             &fp,
         );
@@ -178,16 +235,38 @@ impl ServerCertVerifier for PolicyVerifier {
         Ok(ServerCertVerified::assertion())
     }
 
-    fn verify_tls12_signature(&self, m: &[u8], c: &CertificateDer<'_>, d: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
-        rustls::crypto::verify_tls12_signature(m, c, d, &self.provider.signature_verification_algorithms)
+    fn verify_tls12_signature(
+        &self,
+        m: &[u8],
+        c: &CertificateDer<'_>,
+        d: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        rustls::crypto::verify_tls12_signature(
+            m,
+            c,
+            d,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
-    fn verify_tls13_signature(&self, m: &[u8], c: &CertificateDer<'_>, d: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
-        rustls::crypto::verify_tls13_signature(m, c, d, &self.provider.signature_verification_algorithms)
+    fn verify_tls13_signature(
+        &self,
+        m: &[u8],
+        c: &CertificateDer<'_>,
+        d: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        rustls::crypto::verify_tls13_signature(
+            m,
+            c,
+            d,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -200,19 +279,29 @@ mod tests {
         CertificateDer::from(vec![n; 40])
     }
 
-    fn verify(v: &PolicyVerifier, c: &CertificateDer<'static>) -> Result<ServerCertVerified, Error> {
+    fn verify(
+        v: &PolicyVerifier,
+        c: &CertificateDer<'static>,
+    ) -> Result<ServerCertVerified, Error> {
         let name = ServerName::try_from("srv.example").unwrap();
         v.verify_server_cert(c, &[], &name, &[], UnixTime::now())
     }
 
-    fn mk(policy: Policy, answer: bool, store: KnownHosts) -> (Arc<PolicyVerifier>, Arc<AtomicUsize>) {
+    fn mk(
+        policy: Policy,
+        answer: bool,
+        store: KnownHosts,
+    ) -> (Arc<PolicyVerifier>, Arc<AtomicUsize>) {
         let asked = Arc::new(AtomicUsize::new(0));
         let a2 = asked.clone();
         let prompt: Prompt = Arc::new(move |_| {
             a2.fetch_add(1, Ordering::SeqCst);
             answer
         });
-        (PolicyVerifier::new("srv.example", 3389, policy, store, prompt), asked)
+        (
+            PolicyVerifier::new("srv.example", 3389, policy, store, prompt),
+            asked,
+        )
     }
 
     #[test]

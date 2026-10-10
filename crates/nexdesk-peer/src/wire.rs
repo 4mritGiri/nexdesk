@@ -48,39 +48,94 @@ pub const MAX_MONITORS: usize = 16;
 pub enum Msg {
     // agent -> viewer
     /// First message after the handshake.
-    Hello { view_only: bool, width: u16, height: u16 },
+    Hello {
+        view_only: bool,
+        width: u16,
+        height: u16,
+    },
     /// A rectangle of the screen, BGRX pixels compressed with LZ4 (block format, size implied by w*h*4).
-    Tile { x: u16, y: u16, w: u16, h: u16, lz4: Vec<u8> },
+    Tile {
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+        lz4: Vec<u8>,
+    },
     Bye(String),
     /// The shared monitors and which one is shown now. Sent after `Hello` and whenever the layout changes.
-    Monitors { current: u8, rects: Vec<Rect> },
+    Monitors {
+        current: u8,
+        rects: Vec<Rect>,
+    },
     /// The remote pointer image: BGRA (premultiplied) pixels, LZ4-compressed, with its hotspot.
-    Cursor { hot_x: u16, hot_y: u16, w: u16, h: u16, lz4: Vec<u8> },
+    Cursor {
+        hot_x: u16,
+        hot_y: u16,
+        w: u16,
+        h: u16,
+        lz4: Vec<u8>,
+    },
     // viewer -> agent
     /// Show another monitor (index into the last `Monitors` list); the agent answers with a new `Hello`.
     SelectMonitor(u8),
-    MouseMove { x: u16, y: u16 },
+    MouseMove {
+        x: u16,
+        y: u16,
+    },
     /// 1 = left, 2 = middle, 3 = right.
-    MouseButton { button: u8, down: bool },
-    Wheel { dx: i16, dy: i16 },
+    MouseButton {
+        button: u8,
+        down: bool,
+    },
+    Wheel {
+        dx: i16,
+        dy: i16,
+    },
     /// Linux evdev key code (KEY_*), the same on every Linux viewer and host.
-    Key { code: u16, down: bool },
+    Key {
+        code: u16,
+        down: bool,
+    },
     /// Ask to send `count` files (`total` bytes). `first` is the name of the first one, for the question
     /// shown to the user. Nothing is written until the other side answers yes.
-    FilesOffer { batch: u32, count: u32, total: u64, first: String },
+    FilesOffer {
+        batch: u32,
+        count: u32,
+        total: u64,
+        first: String,
+    },
     /// One file of an accepted batch: size and a relative path ('/' separated, never absolute).
-    FileStart { batch: u32, id: u32, size: u64, path: String },
-    FileChunk { id: u32, data: Vec<u8> },
-    FileEnd { id: u32 },
+    FileStart {
+        batch: u32,
+        id: u32,
+        size: u64,
+        path: String,
+    },
+    FileChunk {
+        id: u32,
+        data: Vec<u8>,
+    },
+    FileEnd {
+        id: u32,
+    },
     // both
     /// A chat line (UTF-8, at most `MAX_CHAT` bytes, control characters removed). Never logged.
     Chat(String),
     /// Answer to `FilesOffer`.
-    FilesAnswer { batch: u32, accept: bool },
+    FilesAnswer {
+        batch: u32,
+        accept: bool,
+    },
     /// The receiver has stored `bytes` bytes of file `id` so far (lets the sender keep a window in flight).
-    FileAck { id: u32, bytes: u64 },
+    FileAck {
+        id: u32,
+        bytes: u64,
+    },
     /// Stop a transfer, either side.
-    FileAbort { batch: u32, reason: String },
+    FileAbort {
+        batch: u32,
+        reason: String,
+    },
     /// Clipboard text (UTF-8, at most `MAX_CLIP` bytes). Never logged.
     Clip(String),
     Ping(u64),
@@ -117,7 +172,11 @@ impl Msg {
     pub fn encode(&self) -> Vec<u8> {
         let mut v = Vec::new();
         match self {
-            Msg::Hello { view_only, width, height } => {
+            Msg::Hello {
+                view_only,
+                width,
+                height,
+            } => {
                 v.push(T_HELLO);
                 v.push(*view_only as u8);
                 v.extend_from_slice(&width.to_be_bytes());
@@ -147,7 +206,13 @@ impl Msg {
                 }
             }
             Msg::SelectMonitor(i) => v.extend_from_slice(&[T_SELECT, *i]),
-            Msg::Cursor { hot_x, hot_y, w, h, lz4 } => {
+            Msg::Cursor {
+                hot_x,
+                hot_y,
+                w,
+                h,
+                lz4,
+            } => {
                 v.push(T_CURSOR);
                 for n in [hot_x, hot_y, w, h] {
                     v.extend_from_slice(&n.to_be_bytes());
@@ -163,7 +228,9 @@ impl Msg {
                 v.extend_from_slice(&x.to_be_bytes());
                 v.extend_from_slice(&y.to_be_bytes());
             }
-            Msg::MouseButton { button, down } => v.extend_from_slice(&[T_BUTTON, *button, *down as u8]),
+            Msg::MouseButton { button, down } => {
+                v.extend_from_slice(&[T_BUTTON, *button, *down as u8])
+            }
             Msg::Wheel { dx, dy } => {
                 v.push(T_WHEEL);
                 v.extend_from_slice(&dx.to_be_bytes());
@@ -178,7 +245,12 @@ impl Msg {
                 v.push(T_CHAT);
                 v.extend_from_slice(t.as_bytes());
             }
-            Msg::FilesOffer { batch, count, total, first } => {
+            Msg::FilesOffer {
+                batch,
+                count,
+                total,
+                first,
+            } => {
                 v.push(T_OFFER);
                 v.extend_from_slice(&batch.to_be_bytes());
                 v.extend_from_slice(&count.to_be_bytes());
@@ -190,7 +262,12 @@ impl Msg {
                 v.extend_from_slice(&batch.to_be_bytes());
                 v.push(*accept as u8);
             }
-            Msg::FileStart { batch, id, size, path } => {
+            Msg::FileStart {
+                batch,
+                id,
+                size,
+                path,
+            } => {
                 v.push(T_FSTART);
                 v.extend_from_slice(&batch.to_be_bytes());
                 v.extend_from_slice(&id.to_be_bytes());
@@ -232,10 +309,14 @@ impl Msg {
     pub fn decode(b: &[u8]) -> Result<Msg, PeerError> {
         let (&tag, rest) = b.split_first().ok_or_else(|| bad("empty message"))?;
         let u16at = |i: usize| -> Result<u16, PeerError> {
-            rest.get(i..i + 2).map(|s| u16::from_be_bytes([s[0], s[1]])).ok_or_else(|| bad("short message"))
+            rest.get(i..i + 2)
+                .map(|s| u16::from_be_bytes([s[0], s[1]]))
+                .ok_or_else(|| bad("short message"))
         };
         let u32at = |i: usize| -> Result<u32, PeerError> {
-            rest.get(i..i + 4).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]])).ok_or_else(|| bad("short message"))
+            rest.get(i..i + 4)
+                .map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+                .ok_or_else(|| bad("short message"))
         };
         let u64at = |i: usize| -> Result<u64, PeerError> {
             rest.get(i..i + 8)
@@ -246,7 +327,13 @@ impl Msg {
                 })
                 .ok_or_else(|| bad("short message"))
         };
-        let exact = |n: usize| if rest.len() == n { Ok(()) } else { Err(bad("wrong message length")) };
+        let exact = |n: usize| {
+            if rest.len() == n {
+                Ok(())
+            } else {
+                Err(bad("wrong message length"))
+            }
+        };
         let flag = |i: usize| -> Result<bool, PeerError> {
             match rest.get(i) {
                 Some(0) => Ok(false),
@@ -261,7 +348,11 @@ impl Msg {
                 if width == 0 || height == 0 || width > MAX_DIM || height > MAX_DIM {
                     return Err(bad("bad screen size"));
                 }
-                Msg::Hello { view_only: flag(0)?, width, height }
+                Msg::Hello {
+                    view_only: flag(0)?,
+                    width,
+                    height,
+                }
             }
             T_TILE => {
                 if rest.len() < 8 {
@@ -274,9 +365,20 @@ impl Msg {
                 if (w as usize) * (h as usize) * 4 > MAX_TILE_BYTES {
                     return Err(bad("tile too large"));
                 }
-                Msg::Tile { x, y, w, h, lz4: rest[8..].to_vec() }
+                Msg::Tile {
+                    x,
+                    y,
+                    w,
+                    h,
+                    lz4: rest[8..].to_vec(),
+                }
             }
-            T_BYE => Msg::Bye(String::from_utf8_lossy(rest).chars().filter(|c| !c.is_control()).collect()),
+            T_BYE => Msg::Bye(
+                String::from_utf8_lossy(rest)
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .collect(),
+            ),
             T_MONITORS => {
                 let n = *rest.get(1).ok_or_else(|| bad("short monitors"))? as usize;
                 if n == 0 || n > MAX_MONITORS || rest.len() != 2 + n * 8 {
@@ -307,20 +409,32 @@ impl Msg {
                     return Err(bad("short cursor"));
                 }
                 let (hot_x, hot_y, w, h) = (u16at(0)?, u16at(2)?, u16at(4)?, u16at(6)?);
-                if w == 0 || h == 0 || w > MAX_CURSOR || h > MAX_CURSOR || hot_x >= w || hot_y >= h {
+                if w == 0 || h == 0 || w > MAX_CURSOR || h > MAX_CURSOR || hot_x >= w || hot_y >= h
+                {
                     return Err(bad("bad cursor"));
                 }
-                Msg::Cursor { hot_x, hot_y, w, h, lz4: rest[8..].to_vec() }
+                Msg::Cursor {
+                    hot_x,
+                    hot_y,
+                    w,
+                    h,
+                    lz4: rest[8..].to_vec(),
+                }
             }
             T_CLIP => {
                 if rest.len() > MAX_CLIP {
                     return Err(bad("clipboard too large"));
                 }
-                Msg::Clip(String::from_utf8(rest.to_vec()).map_err(|_| bad("clipboard is not UTF-8"))?)
+                Msg::Clip(
+                    String::from_utf8(rest.to_vec()).map_err(|_| bad("clipboard is not UTF-8"))?,
+                )
             }
             T_MOVE => {
                 exact(4)?;
-                Msg::MouseMove { x: u16at(0)?, y: u16at(2)? }
+                Msg::MouseMove {
+                    x: u16at(0)?,
+                    y: u16at(2)?,
+                }
             }
             T_BUTTON => {
                 exact(2)?;
@@ -328,15 +442,24 @@ impl Msg {
                 if !(1..=3).contains(&button) {
                     return Err(bad("bad button"));
                 }
-                Msg::MouseButton { button, down: flag(1)? }
+                Msg::MouseButton {
+                    button,
+                    down: flag(1)?,
+                }
             }
             T_WHEEL => {
                 exact(4)?;
-                Msg::Wheel { dx: u16at(0)? as i16, dy: u16at(2)? as i16 }
+                Msg::Wheel {
+                    dx: u16at(0)? as i16,
+                    dy: u16at(2)? as i16,
+                }
             }
             T_KEY => {
                 exact(3)?;
-                Msg::Key { code: u16at(0)?, down: flag(2)? }
+                Msg::Key {
+                    code: u16at(0)?,
+                    down: flag(2)?,
+                }
             }
             T_CHAT => {
                 if rest.len() > MAX_CHAT {
@@ -353,12 +476,23 @@ impl Msg {
                 if count == 0 || count > MAX_FILES || total > MAX_BATCH_BYTES {
                     return Err(bad("file offer out of range"));
                 }
-                let first = String::from_utf8_lossy(&rest[16..]).chars().filter(|c| !c.is_control()).collect();
-                Msg::FilesOffer { batch, count, total, first }
+                let first = String::from_utf8_lossy(&rest[16..])
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .collect();
+                Msg::FilesOffer {
+                    batch,
+                    count,
+                    total,
+                    first,
+                }
             }
             T_ANSWER => {
                 exact(5)?;
-                Msg::FilesAnswer { batch: u32at(0)?, accept: flag(4)? }
+                Msg::FilesAnswer {
+                    batch: u32at(0)?,
+                    accept: flag(4)?,
+                }
             }
             T_FSTART => {
                 if rest.len() < 17 || rest.len() > 16 + MAX_PATH {
@@ -368,14 +502,23 @@ impl Msg {
                 if size > MAX_FILE_SIZE {
                     return Err(bad("file too large"));
                 }
-                let path = String::from_utf8(rest[16..].to_vec()).map_err(|_| bad("file name is not UTF-8"))?;
-                Msg::FileStart { batch: u32at(0)?, id: u32at(4)?, size, path }
+                let path = String::from_utf8(rest[16..].to_vec())
+                    .map_err(|_| bad("file name is not UTF-8"))?;
+                Msg::FileStart {
+                    batch: u32at(0)?,
+                    id: u32at(4)?,
+                    size,
+                    path,
+                }
             }
             T_FCHUNK => {
                 if rest.len() < 5 || rest.len() > 4 + MAX_CHUNK {
                     return Err(bad("bad file chunk"));
                 }
-                Msg::FileChunk { id: u32at(0)?, data: rest[4..].to_vec() }
+                Msg::FileChunk {
+                    id: u32at(0)?,
+                    data: rest[4..].to_vec(),
+                }
             }
             T_FEND => {
                 exact(4)?;
@@ -383,21 +526,34 @@ impl Msg {
             }
             T_FACK => {
                 exact(12)?;
-                Msg::FileAck { id: u32at(0)?, bytes: u64at(4)? }
+                Msg::FileAck {
+                    id: u32at(0)?,
+                    bytes: u64at(4)?,
+                }
             }
             T_FABORT => {
                 if rest.len() < 4 || rest.len() > 4 + 200 {
                     return Err(bad("bad abort"));
                 }
-                let reason = String::from_utf8_lossy(&rest[4..]).chars().filter(|c| !c.is_control()).collect();
-                Msg::FileAbort { batch: u32at(0)?, reason }
+                let reason = String::from_utf8_lossy(&rest[4..])
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .collect();
+                Msg::FileAbort {
+                    batch: u32at(0)?,
+                    reason,
+                }
             }
             T_PING | T_PONG => {
                 exact(8)?;
                 let mut n = [0u8; 8];
                 n.copy_from_slice(rest);
                 let n = u64::from_be_bytes(n);
-                if tag == T_PING { Msg::Ping(n) } else { Msg::Pong(n) }
+                if tag == T_PING {
+                    Msg::Ping(n)
+                } else {
+                    Msg::Pong(n)
+                }
             }
             _ => return Err(bad("unknown message")),
         })
@@ -432,27 +588,84 @@ mod tests {
 
     #[test]
     fn roundtrip_all() {
-        rt(Msg::Hello { view_only: true, width: 1920, height: 1080 });
-        rt(Msg::Tile { x: 1, y: 2, w: 3, h: 4, lz4: vec![9, 8, 7] });
+        rt(Msg::Hello {
+            view_only: true,
+            width: 1920,
+            height: 1080,
+        });
+        rt(Msg::Tile {
+            x: 1,
+            y: 2,
+            w: 3,
+            h: 4,
+            lz4: vec![9, 8, 7],
+        });
         rt(Msg::Bye("denied".into()));
         rt(Msg::MouseMove { x: 5, y: 6 });
-        rt(Msg::MouseButton { button: 3, down: true });
+        rt(Msg::MouseButton {
+            button: 3,
+            down: true,
+        });
         rt(Msg::Wheel { dx: -120, dy: 240 });
-        rt(Msg::Key { code: 30, down: false });
-        rt(Msg::Cursor { hot_x: 1, hot_y: 2, w: 16, h: 16, lz4: vec![1, 2] });
-        rt(Msg::Monitors { current: 1, rects: vec![Rect { x: 0, y: 0, w: 1920, h: 1080 }, Rect { x: -1280, y: 0, w: 1280, h: 1024 }] });
+        rt(Msg::Key {
+            code: 30,
+            down: false,
+        });
+        rt(Msg::Cursor {
+            hot_x: 1,
+            hot_y: 2,
+            w: 16,
+            h: 16,
+            lz4: vec![1, 2],
+        });
+        rt(Msg::Monitors {
+            current: 1,
+            rects: vec![
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 1920,
+                    h: 1080,
+                },
+                Rect {
+                    x: -1280,
+                    y: 0,
+                    w: 1280,
+                    h: 1024,
+                },
+            ],
+        });
         rt(Msg::SelectMonitor(2));
         rt(Msg::Clip("héllo\nworld".into()));
         rt(Msg::Ping(u64::MAX));
         rt(Msg::Pong(1));
         rt(Msg::Chat("hi there \u{1F600}".into()));
-        rt(Msg::FilesOffer { batch: 7, count: 3, total: 1 << 33, first: "docs/a.txt".into() });
-        rt(Msg::FilesAnswer { batch: 7, accept: true });
-        rt(Msg::FileStart { batch: 7, id: 2, size: 99, path: "docs/a.txt".into() });
-        rt(Msg::FileChunk { id: 2, data: vec![1, 2, 3] });
+        rt(Msg::FilesOffer {
+            batch: 7,
+            count: 3,
+            total: 1 << 33,
+            first: "docs/a.txt".into(),
+        });
+        rt(Msg::FilesAnswer {
+            batch: 7,
+            accept: true,
+        });
+        rt(Msg::FileStart {
+            batch: 7,
+            id: 2,
+            size: 99,
+            path: "docs/a.txt".into(),
+        });
+        rt(Msg::FileChunk {
+            id: 2,
+            data: vec![1, 2, 3],
+        });
         rt(Msg::FileEnd { id: 2 });
         rt(Msg::FileAck { id: 2, bytes: 4096 });
-        rt(Msg::FileAbort { batch: 7, reason: "no space".into() });
+        rt(Msg::FileAbort {
+            batch: 7,
+            reason: "no space".into(),
+        });
     }
 
     #[test]
@@ -479,7 +692,11 @@ mod tests {
         let mut ch = vec![T_CHAT];
         ch.resize(1 + MAX_CHAT + 1, b'a');
         assert!(Msg::decode(&ch).is_err(), "chat cap");
-        assert_eq!(Msg::decode(&[T_CHAT, b'a', 0x1b, b'[', b'b']).unwrap(), Msg::Chat("a[b".into()), "control characters stripped");
+        assert_eq!(
+            Msg::decode(&[T_CHAT, b'a', 0x1b, b'[', b'b']).unwrap(),
+            Msg::Chat("a[b".into()),
+            "control characters stripped"
+        );
     }
 
     #[test]
@@ -487,7 +704,10 @@ mod tests {
         assert!(Msg::decode(&[]).is_err());
         assert!(Msg::decode(&[0xEE]).is_err());
         assert!(Msg::decode(&[T_HELLO, 0, 0, 0, 0, 0]).is_err(), "zero size");
-        assert!(Msg::decode(&[T_HELLO, 2, 7, 128, 4, 56]).is_err(), "flag must be 0/1");
+        assert!(
+            Msg::decode(&[T_HELLO, 2, 7, 128, 4, 56]).is_err(),
+            "flag must be 0/1"
+        );
         assert!(Msg::decode(&[T_MOVE, 0, 1]).is_err(), "short");
         assert!(Msg::decode(&[T_MOVE, 0, 1, 0, 1, 9]).is_err(), "long");
         assert!(Msg::decode(&[T_BUTTON, 9, 1]).is_err(), "button range");
@@ -499,17 +719,38 @@ mod tests {
         let mut t = vec![T_TILE, 0, 0, 0, 0, 0xFF, 0xFF, 0, 1];
         t.push(0);
         assert!(Msg::decode(&t).is_err(), "w above MAX_DIM");
-        assert!(Msg::decode(&[T_CLIP, 0xFF, 0xFE]).is_err(), "clipboard must be UTF-8");
+        assert!(
+            Msg::decode(&[T_CLIP, 0xFF, 0xFE]).is_err(),
+            "clipboard must be UTF-8"
+        );
         let mut big = vec![T_CLIP];
         big.resize(1 + MAX_CLIP + 1, b'a');
         assert!(Msg::decode(&big).is_err(), "clipboard size cap");
-        assert!(Msg::decode(&[T_CURSOR, 0, 0, 0, 0, 0, 0, 0, 0]).is_err(), "zero cursor");
-        assert!(Msg::decode(&[T_CURSOR, 0, 16, 0, 0, 0, 16, 0, 16]).is_err(), "hotspot outside the image");
-        assert!(Msg::decode(&[T_CURSOR, 0, 0, 0, 0, 1, 1, 0, 16]).is_err(), "cursor larger than MAX_CURSOR");
+        assert!(
+            Msg::decode(&[T_CURSOR, 0, 0, 0, 0, 0, 0, 0, 0]).is_err(),
+            "zero cursor"
+        );
+        assert!(
+            Msg::decode(&[T_CURSOR, 0, 16, 0, 0, 0, 16, 0, 16]).is_err(),
+            "hotspot outside the image"
+        );
+        assert!(
+            Msg::decode(&[T_CURSOR, 0, 0, 0, 0, 1, 1, 0, 16]).is_err(),
+            "cursor larger than MAX_CURSOR"
+        );
         assert!(Msg::decode(&[T_MONITORS, 0, 0]).is_err(), "no monitors");
-        assert!(Msg::decode(&[T_MONITORS, 1, 1, 0, 0, 0, 0, 0, 10, 0, 10]).is_err(), "current out of range");
-        assert!(Msg::decode(&[T_MONITORS, 0, 1, 0, 0, 0, 0, 0, 0, 0, 10]).is_err(), "zero width");
-        assert!(Msg::decode(&[T_MONITORS, 0, 2, 0, 0, 0, 0, 0, 10, 0, 10]).is_err(), "count larger than data");
+        assert!(
+            Msg::decode(&[T_MONITORS, 1, 1, 0, 0, 0, 0, 0, 10, 0, 10]).is_err(),
+            "current out of range"
+        );
+        assert!(
+            Msg::decode(&[T_MONITORS, 0, 1, 0, 0, 0, 0, 0, 0, 0, 10]).is_err(),
+            "zero width"
+        );
+        assert!(
+            Msg::decode(&[T_MONITORS, 0, 2, 0, 0, 0, 0, 0, 10, 0, 10]).is_err(),
+            "count larger than data"
+        );
         assert!(Msg::decode(&[T_SELECT]).is_err() && Msg::decode(&[T_SELECT, 1, 2]).is_err());
         // control characters in Bye are stripped (it is shown to the user)
         let m = Msg::decode(&[T_BYE, b'a', 0x1b, b'b', b'\n']).unwrap();
@@ -521,8 +762,14 @@ mod tests {
         let px: Vec<u8> = (0..4 * 4 * 4).map(|i| (i % 7) as u8).collect();
         let z = pack_pixels(&px);
         assert_eq!(unpack_pixels(&z, 4, 4).unwrap(), px);
-        assert!(unpack_pixels(&z, 4, 5).is_err(), "claimed size larger than data");
-        assert!(unpack_pixels(&z, 2, 2).is_err(), "claimed size smaller than data");
+        assert!(
+            unpack_pixels(&z, 4, 5).is_err(),
+            "claimed size larger than data"
+        );
+        assert!(
+            unpack_pixels(&z, 2, 2).is_err(),
+            "claimed size smaller than data"
+        );
         assert!(unpack_pixels(&[0xFF; 20], 4, 4).is_err(), "garbage");
     }
 }

@@ -13,16 +13,28 @@ path = "src/bin/agent.rs"
 name = "nexdesk-peer-view"
 path = "src/bin/view.rs"
 
+[features]
+# Screen sharing on Wayland (xdg-desktop-portal ScreenCast + RemoteDesktop, PipeWire).
+# Building it needs libpipewire-0.3-dev and clang (libclang-dev). Use --no-default-features to leave it out.
+default = ["wayland"]
+wayland = ["dep:ashpd", "dep:pipewire", "dep:tokio"]
+
 [dependencies]
 nexdesk-crypto = { path = "../nexdesk-crypto" }
 nexdesk-core = { path = "../nexdesk-core" }
-nexdesk-clipboard = { path = "../nexdesk-clipboard" }
 nexdesk-network = { path = "../nexdesk-network" }
 lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }
 thiserror = "1"
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
-font8x8 = { version = "0.3", default-features = false, features = ["std"] }
+fontdue = { version = "0.9", default-features = false, features = ["std"] }
 softbuffer = "0.4"
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
+
+# Screen sharing backends exist for Linux only so far (see src/platform). The viewer builds everywhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+nexdesk-clipboard = { path = "../nexdesk-clipboard" }
 x11rb = { version = "0.13", features = ["xtest", "xfixes", "randr", "damage"] }
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "remote_desktop", "screencast"], optional = true }
+pipewire = { version = "0.9", optional = true }
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"], optional = true }

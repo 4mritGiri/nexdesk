@@ -63,5 +63,12 @@ pub fn connect_stream(
     stream.set_write_timeout(None)?;
     let (sealer, opener) = session.split();
     let rstream = stream.try_clone()?;
-    Ok((Reader { stream: rstream, opener }, Writer { stream, sealer }, peer))
+    Ok((
+        Reader {
+            stream: rstream,
+            opener,
+        },
+        Writer { stream, sealer },
+        peer,
+    ))
 }

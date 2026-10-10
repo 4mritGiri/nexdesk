@@ -37,7 +37,11 @@ pub fn window_bg() -> Background {
         2 => (0xf4f5fa, 0xf4f5fa),
         _ => (0x0e1019, 0x1a1d33),
     };
-    linear_gradient(155., linear_color_stop(rgb(a), 0.), linear_color_stop(rgb(b), 1.))
+    linear_gradient(
+        155.,
+        linear_color_stop(rgb(a), 0.),
+        linear_color_stop(rgb(b), 1.),
+    )
 }
 
 pub fn bg() -> Rgba {
@@ -101,7 +105,11 @@ pub fn on_accent() -> Rgba {
     rgb(0xffffff)
 }
 pub fn row_hover() -> Rgba {
-    if idx() == 2 { rgba(0x00000010) } else { rgba(0xffffff14) }
+    if idx() == 2 {
+        rgba(0x00000010)
+    } else {
+        rgba(0xffffff14)
+    }
 }
 pub fn accent_soft() -> Rgba {
     match idx() {
@@ -111,7 +119,11 @@ pub fn accent_soft() -> Rgba {
     }
 }
 pub fn scrim() -> Rgba {
-    if idx() == 2 { rgba(0x00000066) } else { rgba(0x000000aa) }
+    if idx() == 2 {
+        rgba(0x00000066)
+    } else {
+        rgba(0x000000aa)
+    }
 }
 // Window-control dots (same in every theme, like macOS).
 pub fn dot_close() -> Rgba {

@@ -74,12 +74,30 @@ pub enum SessionError {
 fn run_hook(label: &str, cmd: &str, p: &Profile) -> Result<(), String> {
     let r = nexdesk_core::hooks::run(
         cmd,
-        &[("NEXDESK_HOST", p.host.trim()), ("NEXDESK_PROFILE", p.name.trim()), ("NEXDESK_USER", p.user.trim())],
+        &[
+            ("NEXDESK_HOST", p.host.trim()),
+            ("NEXDESK_PROFILE", p.name.trim()),
+            ("NEXDESK_USER", p.user.trim()),
+        ],
         nexdesk_core::hooks::DEFAULT_TIMEOUT,
     );
     match &r {
-        Ok(()) => nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, label, &p.name, &p.host, &p.user, "ok"),
-        Err(e) => nexdesk_core::logs::connection(nexdesk_core::logs::Level::Error, label, &p.name, &p.host, &p.user, e),
+        Ok(()) => nexdesk_core::logs::connection(
+            nexdesk_core::logs::Level::Info,
+            label,
+            &p.name,
+            &p.host,
+            &p.user,
+            "ok",
+        ),
+        Err(e) => nexdesk_core::logs::connection(
+            nexdesk_core::logs::Level::Error,
+            label,
+            &p.name,
+            &p.host,
+            &p.user,
+            e,
+        ),
     }
     r
 }
@@ -90,9 +108,11 @@ fn spawn_post_hook(p: &Profile) {
         return;
     }
     let p = p.clone();
-    let _ = std::thread::Builder::new().name("post-hook".into()).spawn(move || {
-        let _ = run_hook("After-disconnect", &p.post_command, &p);
-    });
+    let _ = std::thread::Builder::new()
+        .name("post-hook".into())
+        .spawn(move || {
+            let _ = run_hook("After-disconnect", &p.post_command, &p);
+        });
 }
 
 #[derive(Debug, Default)]
@@ -262,7 +282,14 @@ impl SessionManager {
                         }
                     });
                 }
-                nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Started", &profile.name, &profile.host, &profile.user, &format!("engine pid {}", child.id()));
+                nexdesk_core::logs::connection(
+                    nexdesk_core::logs::Level::Info,
+                    "Started",
+                    &profile.name,
+                    &profile.host,
+                    &profile.user,
+                    &format!("engine pid {}", child.id()),
+                );
                 session.started_wall = Some(Instant::now());
                 session.child = Some(child);
                 self.metrics
@@ -275,7 +302,14 @@ impl SessionManager {
             }
             Err(e) => {
                 session.last_error = Some(e.to_string());
-                nexdesk_core::logs::connection(nexdesk_core::logs::Level::Error, "Failed", &profile.name, &profile.host, &profile.user, &format!("cannot start engine: {e}"));
+                nexdesk_core::logs::connection(
+                    nexdesk_core::logs::Level::Error,
+                    "Failed",
+                    &profile.name,
+                    &profile.host,
+                    &profile.user,
+                    &format!("cannot start engine: {e}"),
+                );
                 session.state = SessionState::Failed;
                 self.metrics
                     .failed
@@ -304,7 +338,10 @@ impl SessionManager {
             &s.profile.name,
             &s.profile.host,
             &s.profile.user,
-            &format!("closed from manager after {}s", s.started_wall.map(|t| t.elapsed().as_secs()).unwrap_or(0)),
+            &format!(
+                "closed from manager after {}s",
+                s.started_wall.map(|t| t.elapsed().as_secs()).unwrap_or(0)
+            ),
         );
         spawn_post_hook(&s.profile);
         Ok(SessionEvent::Disconnected {
@@ -322,12 +359,20 @@ impl SessionManager {
                         s.state = SessionState::Disconnected;
                         let ok = status.success();
                         nexdesk_core::logs::connection(
-                            if ok { nexdesk_core::logs::Level::Info } else { nexdesk_core::logs::Level::Error },
+                            if ok {
+                                nexdesk_core::logs::Level::Info
+                            } else {
+                                nexdesk_core::logs::Level::Error
+                            },
                             "Ended",
                             &s.profile.name,
                             &s.profile.host,
                             &s.profile.user,
-                            &format!("engine {} after {}s", status, s.started_wall.map(|t| t.elapsed().as_secs()).unwrap_or(0)),
+                            &format!(
+                                "engine {} after {}s",
+                                status,
+                                s.started_wall.map(|t| t.elapsed().as_secs()).unwrap_or(0)
+                            ),
                         );
                         spawn_post_hook(&s.profile);
                         false
@@ -379,11 +424,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("XDG_DATA_HOME", &dir);
         let engine = dir.join("fake-engine.sh");
-        std::fs::write(&engine, "#!/bin/sh\necho 'ERROR boom happened' >&2\nexit 3\n").unwrap();
+        std::fs::write(
+            &engine,
+            "#!/bin/sh\necho 'ERROR boom happened' >&2\nexit 3\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let m = SessionManager::new(engine);
-        let p = Profile { name: "Bank".into(), host: "10.0.0.5".into(), user: "bob".into(), ..Profile::default() };
+        let p = Profile {
+            name: "Bank".into(),
+            host: "10.0.0.5".into(),
+            user: "bob".into(),
+            ..Profile::default()
+        };
         m.start(p, Secret::new("pw".to_string())).unwrap();
         for _ in 0..50 {
             std::thread::sleep(Duration::from_millis(100));
@@ -395,9 +449,14 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300)); // stderr reader thread
         let conn = nexdesk_core::logs::read_tail(nexdesk_core::logs::Kind::Connection, 10);
         let events: Vec<&str> = conn.iter().map(|e| e.fields[0].as_str()).collect();
-        assert!(events.contains(&"Started") && events.contains(&"Ended"), "{events:?}");
+        assert!(
+            events.contains(&"Started") && events.contains(&"Ended"),
+            "{events:?}"
+        );
         let con = nexdesk_core::logs::read_tail(nexdesk_core::logs::Kind::Console, 10);
-        assert!(con.iter().any(|e| e.fields[1].contains("boom") && e.level == nexdesk_core::logs::Level::Error));
+        assert!(con
+            .iter()
+            .any(|e| e.fields[1].contains("boom") && e.level == nexdesk_core::logs::Level::Error));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

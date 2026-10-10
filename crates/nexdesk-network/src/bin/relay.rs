@@ -25,7 +25,10 @@ fn main() {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut num = |name: &str| -> usize {
-            args.next().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or_else(|| die(&format!("{name} needs a positive number")))
+            args.next()
+                .and_then(|v| v.parse().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or_else(|| die(&format!("{name} needs a positive number")))
         };
         match a.as_str() {
             "--listen" => listen = args.next().unwrap_or_else(|| die("--listen needs a value")),
@@ -38,7 +41,8 @@ fn main() {
             other => die(&format!("unknown option {other}\n\n{HELP}")),
         }
     }
-    let listener = TcpListener::bind(&listen).unwrap_or_else(|e| die(&format!("cannot listen on {listen}: {e}")));
+    let listener = TcpListener::bind(&listen)
+        .unwrap_or_else(|e| die(&format!("cannot listen on {listen}: {e}")));
     eprintln!("relay listening on {listen}");
     Relay::new(limits, |m| eprintln!("{m}")).serve(listener);
 }

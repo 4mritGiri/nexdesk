@@ -11,7 +11,11 @@ pub fn parse_pictures_dir(user_dirs: Option<&str>, home: &Path) -> PathBuf {
                 let v = v.trim().trim_matches('"');
                 if let Some(rest) = v.strip_prefix("$HOME") {
                     let rest = rest.trim_start_matches('/');
-                    return if rest.is_empty() { home.to_path_buf() } else { home.join(rest) };
+                    return if rest.is_empty() {
+                        home.to_path_buf()
+                    } else {
+                        home.join(rest)
+                    };
                 }
                 if v.starts_with('/') && !v.contains("..") {
                     return PathBuf::from(v);
@@ -26,14 +30,27 @@ pub fn parse_pictures_dir(user_dirs: Option<&str>, home: &Path) -> PathBuf {
 pub fn file_name(host: &str, stamp: &str) -> String {
     let host: String = host
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(40)
         .collect();
     let host = host.trim_matches(|c| c == '.' || c == '_').to_owned();
-    let host = if host.is_empty() { "remote".to_owned() } else { host };
+    let host = if host.is_empty() {
+        "remote".to_owned()
+    } else {
+        host
+    };
     let digits: Vec<char> = stamp.chars().filter(|c| c.is_ascii_digit()).collect();
     let (d, t) = if digits.len() >= 14 {
-        (digits[..8].iter().collect::<String>(), digits[8..14].iter().collect::<String>())
+        (
+            digits[..8].iter().collect::<String>(),
+            digits[8..14].iter().collect::<String>(),
+        )
     } else {
         ("00000000".into(), "000000".into())
     };
@@ -62,7 +79,14 @@ fn unique(dir: &Path, name: &str) -> PathBuf {
 }
 
 /// Save into `dir` (created if needed). Returns the written path.
-pub fn save_in(dir: &Path, buf: &[u32], w: u32, h: u32, host: &str, stamp: &str) -> Result<PathBuf, String> {
+pub fn save_in(
+    dir: &Path,
+    buf: &[u32],
+    w: u32,
+    h: u32,
+    host: &str,
+    stamp: &str,
+) -> Result<PathBuf, String> {
     if w == 0 || h == 0 || buf.len() < (w as usize) * (h as usize) {
         return Err("no picture to save yet".into());
     }
@@ -77,14 +101,21 @@ pub fn save_in(dir: &Path, buf: &[u32], w: u32, h: u32, host: &str, stamp: &str)
 
 /// Save into the user's Pictures folder using the current local time.
 pub fn save(buf: &[u32], w: u32, h: u32, host: &str) -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("HOME is not set")?;
-    let dirs = std::fs::read_to_string(home.join(".config/user-dirs.dirs")).ok();
+    let home = crate::paths::home_dir().ok_or("the home folder is not known")?;
+    let dirs = crate::paths::user_dirs_file();
     let dir = parse_pictures_dir(dirs.as_deref(), &home);
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    save_in(&dir, buf, w, h, host, &nexdesk_core::logs::format_time(now_ms))
+    save_in(
+        &dir,
+        buf,
+        w,
+        h,
+        host,
+        &nexdesk_core::logs::format_time(now_ms),
+    )
 }
 
 /// Put the picture on the system clipboard as an image. Nothing is written to disk.
@@ -103,11 +134,18 @@ pub fn copy(buf: &[u32], w: u32, h: u32) -> Result<(), String> {
     }
     let mut guard = CLIP.lock().map_err(|_| "clipboard busy".to_string())?;
     if guard.is_none() {
-        *guard = Some(arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?);
+        *guard =
+            Some(arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?);
     }
     guard
         .as_mut()
-        .map(|cb| cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: rgba.into() }))
+        .map(|cb| {
+            cb.set_image(arboard::ImageData {
+                width: w as usize,
+                height: h as usize,
+                bytes: rgba.into(),
+            })
+        })
         .transpose()
         .map_err(|e| format!("cannot copy: {e}"))?;
     Ok(())
@@ -120,21 +158,45 @@ mod tests {
     #[test]
     fn pictures_dir_parsing() {
         let home = Path::new("/home/u");
-        assert_eq!(parse_pictures_dir(None, home), Path::new("/home/u/Pictures"));
+        assert_eq!(
+            parse_pictures_dir(None, home),
+            Path::new("/home/u/Pictures")
+        );
         let t = "# c\nXDG_DOWNLOAD_DIR=\"$HOME/Dl\"\nXDG_PICTURES_DIR=\"$HOME/Bilder\"\n";
-        assert_eq!(parse_pictures_dir(Some(t), home), Path::new("/home/u/Bilder"));
-        assert_eq!(parse_pictures_dir(Some("XDG_PICTURES_DIR=\"/data/pics\""), home), Path::new("/data/pics"));
+        assert_eq!(
+            parse_pictures_dir(Some(t), home),
+            Path::new("/home/u/Bilder")
+        );
+        assert_eq!(
+            parse_pictures_dir(Some("XDG_PICTURES_DIR=\"/data/pics\""), home),
+            Path::new("/data/pics")
+        );
         // relative / traversal values are ignored
-        assert_eq!(parse_pictures_dir(Some("XDG_PICTURES_DIR=\"/a/../etc\""), home), Path::new("/home/u/Pictures"));
-        assert_eq!(parse_pictures_dir(Some("XDG_PICTURES_DIR=\"rel\""), home), Path::new("/home/u/Pictures"));
+        assert_eq!(
+            parse_pictures_dir(Some("XDG_PICTURES_DIR=\"/a/../etc\""), home),
+            Path::new("/home/u/Pictures")
+        );
+        assert_eq!(
+            parse_pictures_dir(Some("XDG_PICTURES_DIR=\"rel\""), home),
+            Path::new("/home/u/Pictures")
+        );
     }
 
     #[test]
     fn file_names_are_safe() {
-        assert_eq!(file_name("srv-01.corp", "2026-10-06 16:05:09"), "nexdesk-srv-01.corp-20261006-160509.png");
-        assert_eq!(file_name("../../etc/passwd", "2026-10-06 16:05:09"), "nexdesk-etc_passwd-20261006-160509.png");
+        assert_eq!(
+            file_name("srv-01.corp", "2026-10-06 16:05:09"),
+            "nexdesk-srv-01.corp-20261006-160509.png"
+        );
+        assert_eq!(
+            file_name("../../etc/passwd", "2026-10-06 16:05:09"),
+            "nexdesk-etc_passwd-20261006-160509.png"
+        );
         assert!(!file_name("a/b\\c", "x").contains('/'));
-        assert_eq!(file_name("", "2026-10-06 16:05:09"), "nexdesk-remote-20261006-160509.png");
+        assert_eq!(
+            file_name("", "2026-10-06 16:05:09"),
+            "nexdesk-remote-20261006-160509.png"
+        );
     }
 
     #[test]

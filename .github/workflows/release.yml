@@ -1,0 +1,46 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config clang libclang-dev libpipewire-0.3-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libx11-xcb-dev libxcb1-dev libxi-dev \
+            libfontconfig1-dev libvulkan-dev libssl-dev
+      - run: cargo build --release --workspace
+      - run: packaging/make-deb.sh
+      - run: |
+          mkdir -p dist
+          tar -C target/release -czf dist/nexdesk-linux-x86_64.tar.gz nexdesk nexdesk-rdp nexdesk-agent nexdesk-peer-view nexdesk-relay
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: dist/* }
+
+  portable:
+    strategy:
+      matrix:
+        include:
+          - { os: macos-latest, name: macos }
+          - { os: windows-latest, name: windows }
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p nexdesk-peer -p nexdesk-network
+      - shell: bash
+        run: |
+          mkdir -p dist/${{ matrix.name }}
+          for b in nexdesk-peer-view nexdesk-agent nexdesk-relay; do
+            cp "target/release/$b" "dist/${{ matrix.name }}/" 2>/dev/null || cp "target/release/$b.exe" "dist/${{ matrix.name }}/"
+          done
+      - uses: actions/upload-artifact@v4
+        with: { name: '${{ matrix.name }}', path: 'dist/${{ matrix.name }}/*' }

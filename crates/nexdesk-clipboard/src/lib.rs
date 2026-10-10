@@ -17,10 +17,10 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-use ironrdp_cliprdr::backend::{CliprdrBackend, CliprdrBackendFactory, ClipboardMessage};
+use ironrdp_cliprdr::backend::{ClipboardMessage, CliprdrBackend, CliprdrBackendFactory};
 use ironrdp_cliprdr::pdu::{
-    ClipboardFormat, ClipboardGeneralCapabilityFlags, FileContentsRequest, FileContentsResponse, FileDescriptor,
-    FormatDataRequest, FormatDataResponse, LockDataId,
+    ClipboardFormat, ClipboardGeneralCapabilityFlags, FileContentsRequest, FileContentsResponse,
+    FileDescriptor, FormatDataRequest, FormatDataResponse, LockDataId,
 };
 
 use crate::engine::{EngineHandle, EngineMsg};
@@ -45,7 +45,10 @@ impl Default for Config {
             .filter(|p| p.is_absolute())
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
             .unwrap_or_else(std::env::temp_dir);
-        Self { staging_root: cache.join("nexdesk").join("clipboard"), prefetch_limit: 64 * 1024 * 1024 }
+        Self {
+            staging_root: cache.join("nexdesk").join("clipboard"),
+            prefetch_limit: 64 * 1024 * 1024,
+        }
     }
 }
 
@@ -75,15 +78,25 @@ impl ClipboardHandle {
 
 impl LinuxClipboard {
     pub fn new(sink: Sink, cfg: Config) -> Self {
-        Self { sink, cfg, current: Arc::new(Mutex::new(None)) }
+        Self {
+            sink,
+            cfg,
+            current: Arc::new(Mutex::new(None)),
+        }
     }
 
     pub fn handle(&self) -> ClipboardHandle {
-        ClipboardHandle { current: self.current.clone() }
+        ClipboardHandle {
+            current: self.current.clone(),
+        }
     }
 
     pub fn backend_factory(&self) -> Box<dyn CliprdrBackendFactory + Send> {
-        Box::new(Factory { sink: self.sink.clone(), cfg: self.cfg.clone(), current: self.current.clone() })
+        Box::new(Factory {
+            sink: self.sink.clone(),
+            cfg: self.cfg.clone(),
+            current: self.current.clone(),
+        })
     }
 }
 
@@ -109,7 +122,9 @@ fn open_transport(events: crate::transport::EventSink) -> Option<Box<dyn Transpo
     {
         match x11::X11Transport::spawn(events) {
             Ok(t) => {
-                tracing::info!("clipboard: using the X11 selection protocol (native X11 or XWayland)");
+                tracing::info!(
+                    "clipboard: using the X11 selection protocol (native X11 or XWayland)"
+                );
                 return Some(Box::new(t));
             }
             Err(e) => tracing::warn!("clipboard unavailable: {e}"),
@@ -196,7 +211,10 @@ impl CliprdrBackend for LinuxBackend {
         self.send(EngineMsg::RequestFormatList);
     }
 
-    fn on_process_negotiated_capabilities(&mut self, capabilities: ClipboardGeneralCapabilityFlags) {
+    fn on_process_negotiated_capabilities(
+        &mut self,
+        capabilities: ClipboardGeneralCapabilityFlags,
+    ) {
         self.send(EngineMsg::Caps(capabilities));
     }
 
@@ -209,7 +227,10 @@ impl CliprdrBackend for LinuxBackend {
     }
 
     fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
-        self.send(EngineMsg::FormatDataResponse { error: response.is_error(), data: response.data().to_vec() });
+        self.send(EngineMsg::FormatDataResponse {
+            error: response.is_error(),
+            data: response.data().to_vec(),
+        });
     }
 
     fn on_file_contents_request(&mut self, request: FileContentsRequest) {
@@ -217,7 +238,11 @@ impl CliprdrBackend for LinuxBackend {
     }
 
     fn on_file_contents_response(&mut self, response: FileContentsResponse<'_>) {
-        let result = if response.is_error() { Err(()) } else { Ok(response.data().to_vec()) };
+        let result = if response.is_error() {
+            Err(())
+        } else {
+            Ok(response.data().to_vec())
+        };
         self.handle.router.deliver(response.stream_id(), result);
     }
 
@@ -230,7 +255,10 @@ impl CliprdrBackend for LinuxBackend {
     }
 
     fn on_remote_file_list(&mut self, files: &[FileDescriptor], clip_data_id: Option<u32>) {
-        self.send(EngineMsg::RemoteFileList { files: files.to_vec(), lock: clip_data_id });
+        self.send(EngineMsg::RemoteFileList {
+            files: files.to_vec(),
+            lock: clip_data_id,
+        });
     }
 }
 

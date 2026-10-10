@@ -4,26 +4,28 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::ipc::Spec;
+use crate::tls::CertInfo;
+use crate::ui::{self, BarHit, Canvas, Modal, ModalHit, TabInfo, TabState, Toast, Toolbar};
 use ironrdp_client::rdp::{RdpInputEvent, RdpOutputEvent};
 use ironrdp_input::{
     Database, MouseButton as RdpButton, MousePosition, Operation, Scancode, WheelRotations,
 };
+use nexdesk_clipboard::ClipboardHandle;
 use nexdesk_core::scale::{Actual, Fit, View};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::Sender;
 use tokio::sync::mpsc::UnboundedSender;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use std::path::PathBuf;
-use std::sync::mpsc::Sender;
-use nexdesk_clipboard::ClipboardHandle;
-use crate::ipc::Spec;
-use crate::tls::CertInfo;
-use crate::ui::{self, BarHit, Canvas, Modal, ModalHit, TabInfo, TabState, Toast, Toolbar};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Cursor, CursorIcon, CustomCursor, Fullscreen, ResizeDirection, Window, WindowId};
+use winit::window::{
+    Cursor, CursorIcon, CustomCursor, Fullscreen, ResizeDirection, Window, WindowId,
+};
 
 use crate::grab::KeyboardGrab;
 use crate::keymap;
@@ -36,7 +38,11 @@ pub enum UserEvent {
     /// A short message for the toast (sent by background jobs such as the screenshot saver).
     Toast(String),
     /// Another nexdesk-rdp process hands over a connection to open as a new tab.
-    NewSession { spec: Spec, ack: Sender<Result<u64, String>>, end: Sender<Result<(), String>> },
+    NewSession {
+        spec: Spec,
+        ack: Sender<Result<u64, String>>,
+        end: Sender<Result<(), String>>,
+    },
     /// The process that handed over session `id` went away: close its tab.
     CloseSession(u64),
 }
@@ -306,16 +312,25 @@ impl App {
                     state: Self::tab_state(self.failed, self.toolbar.paused, self.frame.is_some()),
                 });
             } else if let Some(p) = self.parked.iter().find(|p| p.id == *id) {
-                tabs.push(TabInfo { title: p.title.clone(), active: false, state: Self::tab_state(p.failed, p.paused, p.frame.is_some()) });
+                tabs.push(TabInfo {
+                    title: p.title.clone(),
+                    active: false,
+                    state: Self::tab_state(p.failed, p.paused, p.frame.is_some()),
+                });
             }
         }
         self.toolbar.tabs = tabs;
     }
 
     /// Open a new session as a tab. Returns its id.
-    fn add_session(&mut self, spec: &Spec, end: Option<Sender<Result<(), String>>>) -> Result<u64, String> {
+    fn add_session(
+        &mut self,
+        spec: &Spec,
+        end: Option<Sender<Result<(), String>>>,
+    ) -> Result<u64, String> {
         let id = self.next_id;
-        let started = crate::session::start(id, spec, self.proxy.clone()).map_err(|e| format!("{e:#}"))?;
+        let started =
+            crate::session::start(id, spec, self.proxy.clone()).map_err(|e| format!("{e:#}"))?;
         self.next_id += 1;
         let mut p = Parked {
             id,
@@ -377,7 +392,11 @@ impl App {
         }
         let _ = self.input_tx.send(RdpInputEvent::Close);
         if let Some(end) = self.end.take() {
-            let _ = end.send(if self.failed { Err("the session ended with an error".to_string()) } else { Ok(()) });
+            let _ = end.send(if self.failed {
+                Err("the session ended with an error".to_string())
+            } else {
+                Ok(())
+            });
         }
         let pos = self.order.iter().position(|x| *x == id).unwrap_or(0);
         self.order.retain(|x| *x != id);
@@ -409,12 +428,23 @@ impl App {
         if !self.has_session(id) {
             return;
         }
-        let back = if id == self.cur_id { None } else { Some(self.cur_id) };
+        let back = if id == self.cur_id {
+            None
+        } else {
+            Some(self.cur_id)
+        };
         if id != self.cur_id {
             self.release_all_keys();
             self.swap_in(id);
         }
-        nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Disconnected", &self.log_profile, &self.toolbar.title, &self.log_user, "closed by user");
+        nexdesk_core::logs::connection(
+            nexdesk_core::logs::Level::Info,
+            "Disconnected",
+            &self.log_profile,
+            &self.toolbar.title,
+            &self.log_user,
+            "closed by user",
+        );
         self.close_current(el, back);
     }
 
@@ -422,7 +452,14 @@ impl App {
     fn close_all(&mut self, el: &ActiveEventLoop) {
         while !self.order.is_empty() {
             let id = self.cur_id;
-            nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Disconnected", &self.log_profile, &self.toolbar.title, &self.log_user, "closed by user");
+            nexdesk_core::logs::connection(
+                nexdesk_core::logs::Level::Info,
+                "Disconnected",
+                &self.log_profile,
+                &self.toolbar.title,
+                &self.log_user,
+                "closed by user",
+            );
             // The last one calls el.exit(); the others hop to a neighbour first.
             self.close_current(el, None);
             if self.cur_id == id {
@@ -446,8 +483,17 @@ impl App {
         self.modal = Some(Modal {
             heading: "Close all sessions?".into(),
             lines: vec![
-                (format!("{} remote sessions are open in this window.", self.order.len()), ui::FG),
-                ("Closing the window disconnects all of them.".into(), ui::DIM),
+                (
+                    format!(
+                        "{} remote sessions are open in this window.",
+                        self.order.len()
+                    ),
+                    ui::FG,
+                ),
+                (
+                    "Closing the window disconnects all of them.".into(),
+                    ui::DIM,
+                ),
             ],
             accent: ui::WARN,
             accept: Some("Close all".into()),
@@ -458,7 +504,12 @@ impl App {
     }
 
     /// Run `f` for session `id`, which may be a background tab.
-    fn with_session(&mut self, el: &ActiveEventLoop, id: u64, f: impl FnOnce(&mut Self, &ActiveEventLoop)) {
+    fn with_session(
+        &mut self,
+        el: &ActiveEventLoop,
+        id: u64,
+        f: impl FnOnce(&mut Self, &ActiveEventLoop),
+    ) {
         if !self.has_session(id) {
             return; // late event of a tab that is already closed
         }
@@ -541,26 +592,49 @@ impl App {
 
     /// Direction (-1/0/1 per axis) the 1:1 view should scroll because the pointer is at a window edge.
     fn edge_dir(&self) -> (i64, i64) {
-        let (Some(w), Some(View::Actual(a))) = (self.window.as_ref(), self.view()) else { return (0, 0) };
-        if !self.cursor_in || self.toolbar.paused || self.modal.is_some() || self.bar_hit() != BarHit::None {
+        let (Some(w), Some(View::Actual(a))) = (self.window.as_ref(), self.view()) else {
+            return (0, 0);
+        };
+        if !self.cursor_in
+            || self.toolbar.paused
+            || self.modal.is_some()
+            || self.bar_hit() != BarHit::None
+        {
             return (0, 0);
         }
         let s = w.inner_size();
-        let (aw, ah) = (f64::from(s.width), f64::from(s.height) - f64::from(self.header_h()));
+        let (aw, ah) = (
+            f64::from(s.width),
+            f64::from(s.height) - f64::from(self.header_h()),
+        );
         let (x, y) = (self.cursor.0, self.cursor.1 - f64::from(self.header_h()));
         if y < 0.0 || self.resize_edge().is_some() {
             return (0, 0);
         }
         let e = 18.0 * f64::from(self.ui_scale());
         let (mx, my) = a.max_pan();
-        let dx = if mx > 0 && x < e { -1 } else if mx > 0 && x >= aw - e { 1 } else { 0 };
-        let dy = if my > 0 && y < e { -1 } else if my > 0 && y >= ah - e { 1 } else { 0 };
+        let dx = if mx > 0 && x < e {
+            -1
+        } else if mx > 0 && x >= aw - e {
+            1
+        } else {
+            0
+        };
+        let dy = if my > 0 && y < e {
+            -1
+        } else if my > 0 && y >= ah - e {
+            1
+        } else {
+            0
+        };
         (dx, dy)
     }
 
     /// Scroll the 1:1 view one step; returns whether it moved.
     fn pan_step(&mut self, dx: i64, dy: i64) -> bool {
-        let Some(View::Actual(a)) = self.view() else { return false };
+        let Some(View::Actual(a)) = self.view() else {
+            return false;
+        };
         let (mx, my) = a.max_pan();
         let step = 24 * i64::from(self.ui_scale());
         let nx = (i64::from(self.pan.0) + dx * step).clamp(0, i64::from(mx)) as u32;
@@ -577,11 +651,19 @@ impl App {
         self.release_all_keys();
         self.toolbar.paused = on;
         self.frozen = if on {
-            self.frame.as_ref().map(|f| Frame { buf: f.buf.clone(), w: f.w, h: f.h })
+            self.frame.as_ref().map(|f| Frame {
+                buf: f.buf.clone(),
+                w: f.w,
+                h: f.h,
+            })
         } else {
             None
         };
-        self.show_toast(if on { "View paused: input is not sent" } else { "Resumed" });
+        self.show_toast(if on {
+            "View paused: input is not sent"
+        } else {
+            "Resumed"
+        });
     }
 
     fn send_cad(&mut self) {
@@ -590,7 +672,11 @@ impl App {
             return;
         }
         self.release_all_keys();
-        let (ctrl, alt, del) = (Scancode::from_u16(0x1D), Scancode::from_u16(0x38), Scancode::from_u16(0xE053));
+        let (ctrl, alt, del) = (
+            Scancode::from_u16(0x1D),
+            Scancode::from_u16(0x38),
+            Scancode::from_u16(0xE053),
+        );
         self.send_ops([
             Operation::KeyPressed(ctrl),
             Operation::KeyPressed(alt),
@@ -610,15 +696,17 @@ impl App {
         let (buf, w, h) = (f.buf.clone(), f.w, f.h);
         let host = self.toolbar.title.clone();
         let proxy = self.proxy.clone();
-        let spawned = std::thread::Builder::new().name("screenshot".into()).spawn(move || {
-            // Copy to the clipboard only; no file is written.
-            let _ = &host;
-            let msg = match crate::shot::copy(&buf, w, h) {
-                Ok(()) => "Screen copied to clipboard".to_string(),
-                Err(e) => format!("Copy failed: {e}"),
-            };
-            let _ = proxy.send_event(UserEvent::Toast(msg));
-        });
+        let spawned = std::thread::Builder::new()
+            .name("screenshot".into())
+            .spawn(move || {
+                // Copy to the clipboard only; no file is written.
+                let _ = &host;
+                let msg = match crate::shot::copy(&buf, w, h) {
+                    Ok(()) => "Screen copied to clipboard".to_string(),
+                    Err(e) => format!("Copy failed: {e}"),
+                };
+                let _ = proxy.send_event(UserEvent::Toast(msg));
+            });
         if spawned.is_err() {
             self.show_toast("Screenshot failed: cannot start worker");
         }
@@ -626,7 +714,11 @@ impl App {
 
     /// UI scale for overlay widgets (1 on normal screens, 2 on HiDPI).
     fn ui_scale(&self) -> i32 {
-        self.window.as_ref().map(|w| w.scale_factor().round() as i32).unwrap_or(1).clamp(1, 4)
+        self.window
+            .as_ref()
+            .map(|w| w.scale_factor().round() as i32)
+            .unwrap_or(1)
+            .clamp(1, 4)
     }
 
     fn redraw(&self) {
@@ -645,7 +737,11 @@ impl App {
 
     /// Height of the docked header in physical pixels (0 when not docked).
     fn header_h(&self) -> i32 {
-        if self.docked() { 40 * self.ui_scale() } else { 0 }
+        if self.docked() {
+            40 * self.ui_scale()
+        } else {
+            0
+        }
     }
 
     fn bar_visible(&self) -> bool {
@@ -724,25 +820,39 @@ impl App {
         if !self.bar_visible() {
             return BarHit::None;
         }
-        let w = self.window.as_ref().map(|w| w.inner_size().width as i32).unwrap_or(0);
+        let w = self
+            .window
+            .as_ref()
+            .map(|w| w.inner_size().width as i32)
+            .unwrap_or(0);
         if self.modal.is_some() {
             return BarHit::None;
         }
-        self.toolbar.hit(w, self.ui_scale(), self.cursor.0, self.cursor.1)
+        self.toolbar
+            .hit(w, self.ui_scale(), self.cursor.0, self.cursor.1)
     }
 
     fn modal_hit(&self) -> ModalHit {
         match (&self.modal, &self.window) {
             (Some(m), Some(w)) => {
                 let s = w.inner_size();
-                m.hit(s.width as i32, s.height as i32, self.ui_scale(), self.cursor.0, self.cursor.1)
+                m.hit(
+                    s.width as i32,
+                    s.height as i32,
+                    self.ui_scale(),
+                    self.cursor.0,
+                    self.cursor.1,
+                )
             }
             _ => ModalHit::None,
         }
     }
 
     fn show_toast(&mut self, text: impl Into<String>) {
-        self.toast = Some(Toast { text: text.into(), until: Instant::now() + Duration::from_secs(4) });
+        self.toast = Some(Toast {
+            text: text.into(),
+            until: Instant::now() + Duration::from_secs(4),
+        });
         self.redraw();
     }
 
@@ -781,7 +891,10 @@ impl App {
         self.sync_tabs();
         self.modal = Some(Modal {
             heading: heading.to_owned(),
-            lines: ui::wrap_words(msg, 70).into_iter().map(|l| (l, ui::FG)).collect(),
+            lines: ui::wrap_words(msg, 70)
+                .into_iter()
+                .map(|l| (l, ui::FG))
+                .collect(),
             accent: ui::DANGER,
             accept: None,
             reject: "Close".into(),
@@ -795,8 +908,15 @@ impl App {
     /// This window stays as it is.
     fn new_tab_hint(&mut self) {
         if !crate::ipc::focus_manager() {
-            let name = if cfg!(windows) { "nexdesk.exe" } else { "nexdesk" };
-            if let Some(m) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(name))) {
+            let name = if cfg!(windows) {
+                "nexdesk.exe"
+            } else {
+                "nexdesk"
+            };
+            if let Some(m) = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join(name)))
+            {
                 if m.is_file() {
                     let _ = std::process::Command::new(m).spawn();
                 }
@@ -827,7 +947,11 @@ impl App {
             BarHit::Scale => {
                 self.toolbar.actual = !self.toolbar.actual;
                 self.pan = (0, 0);
-                self.show_toast(if self.toolbar.actual { "Actual size: move the pointer to a window edge to scroll" } else { "Fit to window" });
+                self.show_toast(if self.toolbar.actual {
+                    "Actual size: move the pointer to a window edge to scroll"
+                } else {
+                    "Fit to window"
+                });
             }
             BarHit::Pause => self.set_paused(!self.toolbar.paused),
             BarHit::Tab(i) => {
@@ -867,7 +991,11 @@ impl App {
         let Ok(mut buffer) = surface.buffer_mut() else {
             return;
         };
-        let hb = (if self.native_frame || window.fullscreen().is_some() { 0 } else { 40 * u }) as u32;
+        let hb = (if self.native_frame || window.fullscreen().is_some() {
+            0
+        } else {
+            40 * u
+        }) as u32;
         let hb = hb.min(size.height);
         let src = self.frozen.as_ref().or(self.frame.as_ref());
         match (src, view) {
@@ -880,9 +1008,17 @@ impl App {
             _ => buffer.fill(ui::BG),
         }
         {
-            let mut c = Canvas { buf: &mut buffer, w: size.width as usize, h: size.height as usize };
+            let mut c = Canvas {
+                buf: &mut buffer,
+                w: size.width as usize,
+                h: size.height as usize,
+            };
             if self.frame.is_none() && self.modal.is_none() {
-                let msg = if self.stage.is_empty() { "Connecting...".to_string() } else { format!("{}...", self.stage) };
+                let msg = if self.stage.is_empty() {
+                    "Connecting...".to_string()
+                } else {
+                    format!("{}...", self.stage)
+                };
                 let msg = msg.as_str();
                 let k = 3 * u;
                 let tx = (size.width as i32 - ui::text_width(msg, k)) / 2;
@@ -890,7 +1026,13 @@ impl App {
                 if self.stage.starts_with("Waiting for the first") {
                     let hint = "Signed in. The computer has not sent a picture yet (is its screen locked or asleep?)";
                     let hk = (k / 2).max(1);
-                    c.text((size.width as i32 - ui::text_width(hint, hk)) / 2, size.height as i32 / 2 + 2 * k, hint, hk, ui::DIM);
+                    c.text(
+                        (size.width as i32 - ui::text_width(hint, hk)) / 2,
+                        size.height as i32 / 2 + 2 * k,
+                        hint,
+                        hk,
+                        ui::DIM,
+                    );
                 }
             }
             if let Some(View::Actual(a)) = &view {
@@ -899,13 +1041,17 @@ impl App {
                 let hb = hb as i32;
                 let (aw, ah) = (a.dst_w as i32, a.dst_h as i32);
                 if mx > 0 {
-                    let thumb = (aw as i64 * i64::from(a.dst_w) / i64::from(a.src_w)).max(24) as i32;
-                    let x = (i64::from(pan.0.min(mx)) * i64::from((aw - thumb).max(0)) / i64::from(mx)) as i32;
+                    let thumb =
+                        (aw as i64 * i64::from(a.dst_w) / i64::from(a.src_w)).max(24) as i32;
+                    let x = (i64::from(pan.0.min(mx)) * i64::from((aw - thumb).max(0))
+                        / i64::from(mx)) as i32;
                     c.rrect(x, hb + ah - 6 * u, thumb, 4 * u, 2 * u, ui::DIM);
                 }
                 if my > 0 {
-                    let thumb = (ah as i64 * i64::from(a.dst_h) / i64::from(a.src_h)).max(24) as i32;
-                    let y = (i64::from(pan.1.min(my)) * i64::from((ah - thumb).max(0)) / i64::from(my)) as i32;
+                    let thumb =
+                        (ah as i64 * i64::from(a.dst_h) / i64::from(a.src_h)).max(24) as i32;
+                    let y = (i64::from(pan.1.min(my)) * i64::from((ah - thumb).max(0))
+                        / i64::from(my)) as i32;
                     c.rrect(aw - 6 * u, hb + y, 4 * u, thumb, 2 * u, ui::DIM);
                 }
             }
@@ -934,11 +1080,23 @@ impl App {
             return;
         }
         // Local hotkeys: Ctrl+Alt+PageDown / PageUp switch session tabs.
-        if ctrl && alt && state == ElementState::Pressed && matches!(code, KeyCode::PageDown | KeyCode::PageUp) {
+        if ctrl
+            && alt
+            && state == ElementState::Pressed
+            && matches!(code, KeyCode::PageDown | KeyCode::PageUp)
+        {
             let n = self.order.len();
             if n > 1 {
-                let pos = self.order.iter().position(|x| *x == self.cur_id).unwrap_or(0);
-                let next = if code == KeyCode::PageDown { (pos + 1) % n } else { (pos + n - 1) % n };
+                let pos = self
+                    .order
+                    .iter()
+                    .position(|x| *x == self.cur_id)
+                    .unwrap_or(0);
+                let next = if code == KeyCode::PageDown {
+                    (pos + 1) % n
+                } else {
+                    (pos + n - 1) % n
+                };
                 let id = self.order[next];
                 self.switch_to(id);
             }
@@ -967,11 +1125,20 @@ impl App {
         let changed = info.pinned.is_some();
         let mut lines: Vec<(String, u32)> = Vec::new();
         if changed {
-            lines.push(("This computer's certificate is different from the one you trusted before.".into(), ui::DANGER));
+            lines.push((
+                "This computer's certificate is different from the one you trusted before.".into(),
+                ui::DANGER,
+            ));
             lines.push(("Someone may be intercepting the connection. Continue only if the server was reinstalled.".into(), ui::DANGER));
         } else {
-            lines.push(("NexDesk cannot verify who this computer is.".into(), ui::WARN));
-            lines.push(("Connect only if you recognise the fingerprint below.".into(), ui::DIM));
+            lines.push((
+                "NexDesk cannot verify who this computer is.".into(),
+                ui::WARN,
+            ));
+            lines.push((
+                "Connect only if you recognise the fingerprint below.".into(),
+                ui::DIM,
+            ));
         }
         lines.push((String::new(), ui::FG));
         lines.push((format!("Computer:  {}", info.host), ui::FG));
@@ -989,10 +1156,18 @@ impl App {
             }
         }
         self.modal = Some(Modal {
-            heading: if changed { "Certificate changed".into() } else { "Trust this computer?".into() },
+            heading: if changed {
+                "Certificate changed".into()
+            } else {
+                "Trust this computer?".into()
+            },
             lines,
             accent: if changed { ui::DANGER } else { ui::WARN },
-            accept: Some(if changed { "Trust new certificate".into() } else { "Trust and connect".into() }),
+            accept: Some(if changed {
+                "Trust new certificate".into()
+            } else {
+                "Trust and connect".into()
+            }),
             reject: "Cancel".into(),
             reply: Some(reply),
         });
@@ -1012,7 +1187,14 @@ impl App {
             } => {
                 if !self.connected_logged {
                     self.connected_logged = true;
-                    nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Connected", &self.log_profile, &self.toolbar.title, &self.log_user, "");
+                    nexdesk_core::logs::connection(
+                        nexdesk_core::logs::Level::Info,
+                        "Connected",
+                        &self.log_profile,
+                        &self.toolbar.title,
+                        &self.log_user,
+                        "",
+                    );
                 }
                 self.frame = Some(Frame {
                     buf: buffer,
@@ -1024,7 +1206,14 @@ impl App {
             RdpOutputEvent::Stage(name) => {
                 self.stage = name.to_string();
                 self.stage_at = Instant::now();
-                nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Step", &self.log_profile, &self.toolbar.title, &self.log_user, name);
+                nexdesk_core::logs::connection(
+                    nexdesk_core::logs::Level::Info,
+                    "Step",
+                    &self.log_profile,
+                    &self.toolbar.title,
+                    &self.log_user,
+                    name,
+                );
                 self.redraw();
             }
             RdpOutputEvent::PointerHidden => {
@@ -1048,7 +1237,10 @@ impl App {
                     }
                 }
                 let (w, h) = (p.width, p.height);
-                let (hx, hy) = (p.hotspot_x.min(w.saturating_sub(1)), p.hotspot_y.min(h.saturating_sub(1)));
+                let (hx, hy) = (
+                    p.hotspot_x.min(w.saturating_sub(1)),
+                    p.hotspot_y.min(h.saturating_sub(1)),
+                );
                 match CustomCursor::from_rgba(rgba, w, h, hx, hy) {
                     Ok(src) => {
                         self.server_cursor = Cursor::Custom(el.create_custom_cursor(src));
@@ -1066,7 +1258,14 @@ impl App {
             RdpOutputEvent::PointerPosition { .. } => {}
             RdpOutputEvent::ConnectionFailure(e) => {
                 let msg = crate::diag::explain("connection failed", &e);
-                nexdesk_core::logs::connection(nexdesk_core::logs::Level::Error, "Failed", &self.log_profile, &self.toolbar.title, &self.log_user, &msg);
+                nexdesk_core::logs::connection(
+                    nexdesk_core::logs::Level::Error,
+                    "Failed",
+                    &self.log_profile,
+                    &self.toolbar.title,
+                    &self.log_user,
+                    &msg,
+                );
                 self.failure = Some(msg.clone());
                 self.show_error(el, "Connection failed", &msg);
             }
@@ -1074,12 +1273,29 @@ impl App {
                 match res {
                     Ok(reason) => {
                         eprintln!("session ended: {reason:?}");
-                        nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Disconnected", &self.log_profile, &self.toolbar.title, &self.log_user, &format!("{reason:?}"));
+                        nexdesk_core::logs::connection(
+                            nexdesk_core::logs::Level::Info,
+                            "Disconnected",
+                            &self.log_profile,
+                            &self.toolbar.title,
+                            &self.log_user,
+                            &format!("{reason:?}"),
+                        );
                     }
                     Err(e) => {
                         let c = format!("{e:#}");
-                        let msg = match crate::diag::hint(&c) { Some(h) => format!("session error: {c}\n\n{h}"), None => format!("session error: {c}") };
-                        nexdesk_core::logs::connection(nexdesk_core::logs::Level::Error, "Failed", &self.log_profile, &self.toolbar.title, &self.log_user, &msg);
+                        let msg = match crate::diag::hint(&c) {
+                            Some(h) => format!("session error: {c}\n\n{h}"),
+                            None => format!("session error: {c}"),
+                        };
+                        nexdesk_core::logs::connection(
+                            nexdesk_core::logs::Level::Error,
+                            "Failed",
+                            &self.log_profile,
+                            &self.toolbar.title,
+                            &self.log_user,
+                            &msg,
+                        );
                         self.failure = Some(msg.clone());
                         self.show_error(el, "Session ended", &msg);
                         return;
@@ -1143,7 +1359,14 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::NewSession { spec, ack, end } => {
                 let r = self.add_session(&spec, Some(end));
                 if let Ok(id) = &r {
-                    nexdesk_core::logs::connection(nexdesk_core::logs::Level::Info, "Started", &spec.profile, &spec.host, &spec.user, &format!("opened as tab {id}"));
+                    nexdesk_core::logs::connection(
+                        nexdesk_core::logs::Level::Info,
+                        "Started",
+                        &spec.profile,
+                        &spec.host,
+                        &spec.user,
+                        &format!("opened as tab {id}"),
+                    );
                     if let Some(w) = &self.window {
                         w.set_minimized(false);
                         w.focus_window();
@@ -1220,11 +1443,20 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.modal.is_some() {
                     if event.state == ElementState::Pressed {
                         match event.physical_key {
-                            PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
-                                let accept = self.modal.as_ref().map(|m| m.accept.is_some()).unwrap_or(false);
+                            PhysicalKey::Code(KeyCode::Enter)
+                            | PhysicalKey::Code(KeyCode::NumpadEnter) => {
+                                let accept = self
+                                    .modal
+                                    .as_ref()
+                                    .map(|m| m.accept.is_some())
+                                    .unwrap_or(false);
                                 // Enter only accepts when the dialog has an accept button and the user
                                 // is not looking at a "changed certificate" warning (those need a click).
-                                let dangerous = self.modal.as_ref().map(|m| m.accent == ui::DANGER).unwrap_or(false);
+                                let dangerous = self
+                                    .modal
+                                    .as_ref()
+                                    .map(|m| m.accent == ui::DANGER)
+                                    .unwrap_or(false);
                                 self.resolve_modal(accept && !dangerous, el);
                             }
                             PhysicalKey::Code(KeyCode::Escape) => self.resolve_modal(false, el),
@@ -1275,7 +1507,8 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 if let Some(view) = self.view() {
-                    let (x, y) = view.to_remote(position.x, position.y - f64::from(self.header_h()));
+                    let (x, y) =
+                        view.to_remote(position.x, position.y - f64::from(self.header_h()));
                     self.send_ops([Operation::MouseMove(MousePosition { x, y })]);
                 }
             }
@@ -1297,17 +1530,29 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 let hit = self.bar_hit();
-                if let (BarHit::Tab(i) | BarHit::TabClose(i), ElementState::Released, MouseButton::Middle) = (hit, state, button) {
+                if let (
+                    BarHit::Tab(i) | BarHit::TabClose(i),
+                    ElementState::Released,
+                    MouseButton::Middle,
+                ) = (hit, state, button)
+                {
                     if let Some(id) = self.order.get(i).copied() {
                         self.close_tab(el, id);
                     }
                     return;
                 }
                 if hit != BarHit::None {
-                    if state == ElementState::Pressed && button == MouseButton::Left && hit == BarHit::Bar && self.docked() {
+                    if state == ElementState::Pressed
+                        && button == MouseButton::Left
+                        && hit == BarHit::Bar
+                        && self.docked()
+                    {
                         // empty part of the header: drag the window, double-click maximises
                         let now = Instant::now();
-                        let double = self.last_header_click.map(|t| now.duration_since(t) < Duration::from_millis(400)).unwrap_or(false);
+                        let double = self
+                            .last_header_click
+                            .map(|t| now.duration_since(t) < Duration::from_millis(400))
+                            .unwrap_or(false);
                         self.last_header_click = Some(now);
                         if let Some(w) = &self.window {
                             if double {
@@ -1395,12 +1640,18 @@ impl ApplicationHandler<UserEvent> for App {
             self.drop_deadline = None;
             let files = std::mem::take(&mut self.drop_batch);
             let n = files.len();
-            let ok = self.clipboard.as_ref().map(|c| c.offer_files(files)).unwrap_or(false);
+            let ok = self
+                .clipboard
+                .as_ref()
+                .map(|c| c.offer_files(files))
+                .unwrap_or(false);
             if ok && self.drop_paste {
                 self.paste_at = Some(now + Duration::from_millis(600));
                 self.show_toast(format!("Sending {n} file(s) to the remote desktop..."));
             } else if ok {
-                self.show_toast(format!("{n} file(s) ready: press Ctrl+V on the remote desktop"));
+                self.show_toast(format!(
+                    "{n} file(s) ready: press Ctrl+V on the remote desktop"
+                ));
             } else {
                 self.show_toast("Drop failed: clipboard redirection is not available");
             }
@@ -1424,7 +1675,8 @@ impl ApplicationHandler<UserEvent> for App {
             if (dx, dy) != (0, 0) {
                 if self.pan_step(dx, dy) {
                     if let (Some(view), false) = (self.view(), self.toolbar.paused) {
-                        let (x, y) = view.to_remote(self.cursor.0, self.cursor.1 - f64::from(self.header_h()));
+                        let (x, y) = view
+                            .to_remote(self.cursor.0, self.cursor.1 - f64::from(self.header_h()));
                         self.send_ops([Operation::MouseMove(MousePosition { x, y })]);
                     }
                     self.redraw();

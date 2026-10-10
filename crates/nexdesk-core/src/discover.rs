@@ -29,7 +29,10 @@ pub fn hosts_in(ip: Ipv4Addr, prefix: u8) -> Vec<Ipv4Addr> {
     let mask = u32::MAX << (32 - prefix);
     let net = u32::from(ip) & mask;
     let bcast = net | !mask;
-    ((net + 1)..bcast).map(Ipv4Addr::from).take(MAX_HOSTS).collect()
+    ((net + 1)..bcast)
+        .map(Ipv4Addr::from)
+        .take(MAX_HOSTS)
+        .collect()
 }
 
 fn usable(ip: Ipv4Addr) -> bool {
@@ -48,7 +51,8 @@ pub fn local_subnets() -> Vec<(Ipv4Addr, u8)> {
     while !cur.is_null() {
         let ifa = unsafe { &*cur };
         cur = ifa.ifa_next;
-        let up = ifa.ifa_flags & (libc::IFF_UP as u32) != 0 && ifa.ifa_flags & (libc::IFF_LOOPBACK as u32) == 0;
+        let up = ifa.ifa_flags & (libc::IFF_UP as u32) != 0
+            && ifa.ifa_flags & (libc::IFF_LOOPBACK as u32) == 0;
         if !up || ifa.ifa_addr.is_null() || ifa.ifa_netmask.is_null() {
             continue;
         }
@@ -81,7 +85,9 @@ fn reverse_dns(ip: Ipv4Addr) -> Option<String> {
     let sa = libc::sockaddr_in {
         sin_family: libc::AF_INET as libc::sa_family_t,
         sin_port: 0,
-        sin_addr: libc::in_addr { s_addr: u32::from(ip).to_be() },
+        sin_addr: libc::in_addr {
+            s_addr: u32::from(ip).to_be(),
+        },
         sin_zero: [0; 8],
     };
     let mut buf = [0 as libc::c_char; 256];
@@ -99,8 +105,14 @@ fn reverse_dns(ip: Ipv4Addr) -> Option<String> {
     if rc != 0 {
         return None;
     }
-    let s = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned();
-    if s.is_empty() { None } else { Some(s) }
+    let s = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 #[cfg(not(unix))]
@@ -148,15 +160,24 @@ impl Scan {
         let workers = 48usize.min(scan.total);
         let live = Arc::new(AtomicUsize::new(workers));
         for _ in 0..workers {
-            let (queue, found, checked, done, live) =
-                (queue.clone(), scan.found.clone(), scan.checked.clone(), scan.done.clone(), live.clone());
+            let (queue, found, checked, done, live) = (
+                queue.clone(),
+                scan.found.clone(),
+                scan.checked.clone(),
+                scan.done.clone(),
+                live.clone(),
+            );
             std::thread::spawn(move || {
                 loop {
                     let next = queue.lock().ok().and_then(|mut q| q.pop());
                     let Some((ip, is_self)) = next else { break };
                     let addr = SocketAddr::new(IpAddr::V4(ip), port);
                     if TcpStream::connect_timeout(&addr, timeout).is_ok() {
-                        let f = Found { ip, name: reverse_dns(ip), is_self };
+                        let f = Found {
+                            ip,
+                            name: reverse_dns(ip),
+                            is_self,
+                        };
                         if let Ok(mut g) = found.lock() {
                             g.push(f);
                             g.sort_by_key(|f| u32::from(f.ip));
@@ -182,7 +203,10 @@ impl Scan {
 
     /// (checked, total)
     pub fn progress(&self) -> (usize, usize) {
-        (self.checked.load(Ordering::SeqCst).min(self.total), self.total)
+        (
+            self.checked.load(Ordering::SeqCst).min(self.total),
+            self.total,
+        )
     }
 }
 
@@ -212,7 +236,11 @@ mod tests {
     fn finds_only_hosts_with_the_port_open() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
-        let scan = Scan::start_with(vec![(Ipv4Addr::LOCALHOST, true)], port, Duration::from_millis(500));
+        let scan = Scan::start_with(
+            vec![(Ipv4Addr::LOCALHOST, true)],
+            port,
+            Duration::from_millis(500),
+        );
         for _ in 0..100 {
             if scan.is_done() {
                 break;
@@ -225,7 +253,11 @@ mod tests {
         assert!(r[0].is_self);
         assert_eq!(scan.progress(), (1, 1));
         drop(l);
-        let closed = Scan::start_with(vec![(Ipv4Addr::LOCALHOST, false)], port, Duration::from_millis(300));
+        let closed = Scan::start_with(
+            vec![(Ipv4Addr::LOCALHOST, false)],
+            port,
+            Duration::from_millis(300),
+        );
         while !closed.is_done() {
             std::thread::sleep(Duration::from_millis(20));
         }

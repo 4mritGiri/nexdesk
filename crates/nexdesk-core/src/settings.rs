@@ -125,7 +125,9 @@ impl Settings {
             _ => d,
         };
         for line in text.lines() {
-            let Some((k, v)) = line.split_once('=') else { continue };
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
             let (k, v) = (k.trim(), v.trim());
             match k {
                 "theme" => s.theme = Theme::parse(v).unwrap_or(s.theme),
@@ -161,11 +163,16 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        default_path().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| Self::parse(&t)).unwrap_or_default()
+        default_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|t| Self::parse(&t))
+            .unwrap_or_default()
     }
 
     pub fn save(&self) -> io::Result<()> {
-        let Some(path) = default_path() else { return Ok(()) };
+        let Some(path) = default_path() else {
+            return Ok(());
+        };
         if let Some(d) = path.parent() {
             std::fs::create_dir_all(d)?;
         }
@@ -195,7 +202,8 @@ mod tests {
 
     #[test]
     fn bad_input_falls_back() {
-        let s = Settings::parse("theme=neon\ntls=whatever\ngrid_view=maybe\njunk\n=\nkey_capture=no\n");
+        let s =
+            Settings::parse("theme=neon\ntls=whatever\ngrid_view=maybe\njunk\n=\nkey_capture=no\n");
         assert_eq!(s.theme, Theme::Midnight);
         assert_eq!(s.tls, TlsMode::Ask);
         assert!(s.grid_view);

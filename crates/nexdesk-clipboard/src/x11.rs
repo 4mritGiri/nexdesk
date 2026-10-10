@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::xfixes::{self, SelectionEventMask};
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask,
-    PropMode, Property, SelectionNotifyEvent, SelectionRequestEvent, Window, WindowClass, SELECTION_NOTIFY_EVENT,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt as _,
+    CreateWindowAux, EventMask, PropMode, Property, SelectionNotifyEvent, SelectionRequestEvent,
+    Window, WindowClass, SELECTION_NOTIFY_EVENT,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -28,11 +29,21 @@ const INCR_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_READ_BYTES: usize = 256 * 1024 * 1024;
 
 enum Cmd {
-    Read { token: u64, target: String },
-    Own { targets: Vec<String>, provider: Arc<dyn Provider> },
+    Read {
+        token: u64,
+        target: String,
+    },
+    Own {
+        targets: Vec<String>,
+        provider: Arc<dyn Provider>,
+    },
     Disown,
     Query,
-    Serve { req: SelectionRequestEvent, prop: Atom, data: Option<Vec<u8>> },
+    Serve {
+        req: SelectionRequestEvent,
+        prop: Atom,
+        data: Option<Vec<u8>>,
+    },
     Tick,
 }
 
@@ -53,7 +64,9 @@ impl Shared {
     }
     fn wake(&self) {
         let ev = ClientMessageEvent::new(32, self.win, self.wake, [0u32; 5]);
-        let _ = self.conn.send_event(false, self.win, EventMask::NO_EVENT, ev);
+        let _ = self
+            .conn
+            .send_event(false, self.win, EventMask::NO_EVENT, ev);
         let _ = self.conn.flush();
     }
 }
@@ -65,7 +78,8 @@ pub struct X11Transport {
 impl X11Transport {
     /// Connects to `$DISPLAY` and starts the worker. Fails (cleanly) when there is no X server.
     pub fn spawn(events: EventSink) -> Result<Self, String> {
-        let (conn, screen_num) = RustConnection::connect(None).map_err(|e| format!("cannot connect to X11: {e}"))?;
+        let (conn, screen_num) =
+            RustConnection::connect(None).map_err(|e| format!("cannot connect to X11: {e}"))?;
         let root = conn.setup().roots[screen_num].root;
         let win = conn.generate_id().map_err(|e| e.to_string())?;
         conn.create_window(
@@ -83,7 +97,12 @@ impl X11Transport {
         )
         .map_err(|e| e.to_string())?;
         let intern = |n: &str| -> Result<Atom, String> {
-            Ok(conn.intern_atom(false, n.as_bytes()).map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?.atom)
+            Ok(conn
+                .intern_atom(false, n.as_bytes())
+                .map_err(|e| e.to_string())?
+                .reply()
+                .map_err(|e| e.to_string())?
+                .atom)
         };
         let atoms = Atoms {
             clipboard: intern("CLIPBOARD")?,
@@ -100,11 +119,22 @@ impl X11Transport {
             .map_err(|e| e.to_string())?
             .reply()
             .map_err(|e| format!("XFixes unavailable: {e}"))?;
-        xfixes::select_selection_input(&conn, win, atoms.clipboard, SelectionEventMask::SET_SELECTION_OWNER)
-            .map_err(|e| e.to_string())?;
+        xfixes::select_selection_input(
+            &conn,
+            win,
+            atoms.clipboard,
+            SelectionEventMask::SET_SELECTION_OWNER,
+        )
+        .map_err(|e| e.to_string())?;
         conn.flush().map_err(|e| e.to_string())?;
 
-        let shared = Arc::new(Shared { conn, win, wake, cmds: Mutex::new(VecDeque::new()), stop: AtomicBool::new(false) });
+        let shared = Arc::new(Shared {
+            conn,
+            win,
+            wake,
+            cmds: Mutex::new(VecDeque::new()),
+            stop: AtomicBool::new(false),
+        });
         let max_req = shared.conn.maximum_request_bytes();
         let incr_chunk = max_req.saturating_sub(1024).clamp(4096, 512 * 1024);
 
@@ -152,7 +182,10 @@ impl Drop for X11Transport {
 
 impl Transport for X11Transport {
     fn read(&self, token: u64, target: &str) {
-        self.shared.push(Cmd::Read { token, target: target.to_owned() });
+        self.shared.push(Cmd::Read {
+            token,
+            target: target.to_owned(),
+        });
     }
     fn own(&self, targets: Vec<String>, provider: Arc<dyn Provider>) {
         self.shared.push(Cmd::Own { targets, provider });
@@ -228,7 +261,13 @@ impl Worker {
         if let Some(a) = self.by_name.get(name) {
             return Some(*a);
         }
-        let a = self.conn().intern_atom(false, name.as_bytes()).ok()?.reply().ok()?.atom;
+        let a = self
+            .conn()
+            .intern_atom(false, name.as_bytes())
+            .ok()?
+            .reply()
+            .ok()?
+            .atom;
         self.by_name.insert(name.to_owned(), a);
         self.names.insert(a, name.to_owned());
         Some(a)
@@ -300,11 +339,17 @@ impl Worker {
             };
             let Some(cmd) = cmd else { break };
             match cmd {
-                Cmd::Read { token, target } => self.start_read(ReadKind::Data { token }, &target, true),
+                Cmd::Read { token, target } => {
+                    self.start_read(ReadKind::Data { token }, &target, true)
+                }
                 Cmd::Own { targets, provider } => self.own(targets, provider),
                 Cmd::Disown => self.disown(),
                 Cmd::Query => {
-                    if let Ok(r) = self.conn().get_selection_owner(self.atoms.clipboard).map(|c| c.reply()) {
+                    if let Ok(r) = self
+                        .conn()
+                        .get_selection_owner(self.atoms.clipboard)
+                        .map(|c| c.reply())
+                    {
                         if let Ok(r) = r {
                             if r.owner != self.shared.win {
                                 self.probe_owner(r.owner);
@@ -332,7 +377,10 @@ impl Worker {
 
     fn start_read(&mut self, kind: ReadKind, target_name: &str, is_data: bool) {
         let fail = |this: &mut Self, kind: ReadKind, why: &str| match kind {
-            ReadKind::Data { token } => (this.events)(TransportEvent::ReadDone { token, result: Err(why.to_owned()) }),
+            ReadKind::Data { token } => (this.events)(TransportEvent::ReadDone {
+                token,
+                result: Err(why.to_owned()),
+            }),
             ReadKind::Targets { .. } => (this.events)(TransportEvent::OwnerChanged(Vec::new())),
         };
         let Some(target) = self.atom(target_name) else {
@@ -348,14 +396,26 @@ impl Worker {
         let _ = is_data;
         let ok = self
             .conn()
-            .convert_selection(self.shared.win, self.atoms.clipboard, target, prop, CURRENT_TIME)
+            .convert_selection(
+                self.shared.win,
+                self.atoms.clipboard,
+                target,
+                prop,
+                CURRENT_TIME,
+            )
             .is_ok();
         if !ok {
             return fail(self, kind, "convert_selection failed");
         }
         self.reads.insert(
             prop,
-            ReadState { kind, target, deadline: Instant::now() + READ_TIMEOUT, incr: None, waiting_conversion: true },
+            ReadState {
+                kind,
+                target,
+                deadline: Instant::now() + READ_TIMEOUT,
+                incr: None,
+                waiting_conversion: true,
+            },
         );
     }
 
@@ -373,9 +433,18 @@ impl Worker {
             }
             return;
         }
-        let Some(rs) = self.reads.get_mut(&property) else { return };
+        let Some(rs) = self.reads.get_mut(&property) else {
+            return;
+        };
         rs.waiting_conversion = false;
-        let reply = self.shared.conn.get_property(true, self.shared.win, property, AtomEnum::ANY, 0, u32::MAX / 4);
+        let reply = self.shared.conn.get_property(
+            true,
+            self.shared.win,
+            property,
+            AtomEnum::ANY,
+            0,
+            u32::MAX / 4,
+        );
         let Ok(Ok(reply)) = reply.map(|c| c.reply()) else {
             return self.finish_read(property, Err("cannot read property".into()));
         };
@@ -390,11 +459,20 @@ impl Worker {
     }
 
     fn on_incr_in(&mut self, prop: Atom) {
-        let Some(rs) = self.reads.get_mut(&prop) else { return };
+        let Some(rs) = self.reads.get_mut(&prop) else {
+            return;
+        };
         if rs.incr.is_none() {
             return;
         }
-        let reply = self.shared.conn.get_property(true, self.shared.win, prop, AtomEnum::ANY, 0, u32::MAX / 4);
+        let reply = self.shared.conn.get_property(
+            true,
+            self.shared.win,
+            prop,
+            AtomEnum::ANY,
+            0,
+            u32::MAX / 4,
+        );
         let Ok(Ok(reply)) = reply.map(|c| c.reply()) else {
             return self.finish_read(prop, Err("cannot read INCR chunk".into()));
         };
@@ -412,9 +490,14 @@ impl Worker {
     }
 
     fn finish_read(&mut self, prop: Atom, result: Result<(Vec<u8>, Atom), String>) {
-        let Some(rs) = self.reads.remove(&prop) else { return };
+        let Some(rs) = self.reads.remove(&prop) else {
+            return;
+        };
         match rs.kind {
-            ReadKind::Data { token } => (self.events)(TransportEvent::ReadDone { token, result: result.map(|(d, _)| d) }),
+            ReadKind::Data { token } => (self.events)(TransportEvent::ReadDone {
+                token,
+                result: result.map(|(d, _)| d),
+            }),
             ReadKind::Targets { seq } => {
                 if seq != self.probe_seq {
                     return; // a newer owner change superseded this probe
@@ -435,7 +518,12 @@ impl Worker {
 
     fn expire(&mut self) {
         let now = Instant::now();
-        let dead: Vec<Atom> = self.reads.iter().filter(|(_, r)| r.deadline < now).map(|(p, _)| *p).collect();
+        let dead: Vec<Atom> = self
+            .reads
+            .iter()
+            .filter(|(_, r)| r.deadline < now)
+            .map(|(p, _)| *p)
+            .collect();
         for p in dead {
             self.finish_read(p, Err("timed out waiting for the clipboard owner".into()));
         }
@@ -452,16 +540,27 @@ impl Worker {
             }
         }
         self.incr_out.clear();
-        self.owned = Some(Owned { targets: v, provider });
-        let _ = self.conn().set_selection_owner(self.shared.win, self.atoms.clipboard, CURRENT_TIME);
+        self.owned = Some(Owned {
+            targets: v,
+            provider,
+        });
+        let _ =
+            self.conn()
+                .set_selection_owner(self.shared.win, self.atoms.clipboard, CURRENT_TIME);
         let _ = self.conn().flush();
     }
 
     fn disown(&mut self) {
         if self.owned.take().is_some() {
-            if let Ok(Ok(r)) = self.conn().get_selection_owner(self.atoms.clipboard).map(|c| c.reply()) {
+            if let Ok(Ok(r)) = self
+                .conn()
+                .get_selection_owner(self.atoms.clipboard)
+                .map(|c| c.reply())
+            {
                 if r.owner == self.shared.win {
-                    let _ = self.conn().set_selection_owner(NONE, self.atoms.clipboard, CURRENT_TIME);
+                    let _ =
+                        self.conn()
+                            .set_selection_owner(NONE, self.atoms.clipboard, CURRENT_TIME);
                 }
             }
         }
@@ -478,12 +577,18 @@ impl Worker {
             target: req.target,
             property,
         };
-        let _ = self.conn().send_event(false, req.requestor, EventMask::NO_EVENT, ev);
+        let _ = self
+            .conn()
+            .send_event(false, req.requestor, EventMask::NO_EVENT, ev);
         let _ = self.conn().flush();
     }
 
     fn on_selection_request(&mut self, req: SelectionRequestEvent) {
-        let prop = if req.property == NONE { req.target } else { req.property };
+        let prop = if req.property == NONE {
+            req.target
+        } else {
+            req.property
+        };
         let Some(owned) = self.owned.as_ref() else {
             return self.notify(&req, NONE);
         };
@@ -495,14 +600,25 @@ impl Worker {
             list.extend(owned.targets.iter().map(|(_, a)| *a));
             let ok = self
                 .conn()
-                .change_property32(PropMode::REPLACE, req.requestor, prop, AtomEnum::ATOM, &list)
+                .change_property32(
+                    PropMode::REPLACE,
+                    req.requestor,
+                    prop,
+                    AtomEnum::ATOM,
+                    &list,
+                )
                 .is_ok();
             return self.notify(&req, if ok { prop } else { NONE });
         }
         if req.target == self.atoms.timestamp || req.target == self.atoms.multiple {
             return self.notify(&req, NONE);
         }
-        let Some((name, _)) = owned.targets.iter().find(|(_, a)| *a == req.target).cloned() else {
+        let Some((name, _)) = owned
+            .targets
+            .iter()
+            .find(|(_, a)| *a == req.target)
+            .cloned()
+        else {
             return self.notify(&req, NONE);
         };
         let provider = owned.provider.clone();
@@ -517,12 +633,20 @@ impl Worker {
 
     fn serve(&mut self, req: SelectionRequestEvent, prop: Atom, data: Option<Vec<u8>>) {
         // The clipboard may have been replaced while the provider was working.
-        let still_ours = self.owned.as_ref().map(|o| o.targets.iter().any(|(_, a)| *a == req.target)).unwrap_or(false);
+        let still_ours = self
+            .owned
+            .as_ref()
+            .map(|o| o.targets.iter().any(|(_, a)| *a == req.target))
+            .unwrap_or(false);
         let Some(data) = data.filter(|_| still_ours) else {
             return self.notify(&req, NONE);
         };
         // Data type: text targets use their natural type, MIME targets use their own atom.
-        let type_ = if req.target == self.atoms.text { self.atoms.utf8 } else { req.target };
+        let type_ = if req.target == self.atoms.text {
+            self.atoms.utf8
+        } else {
+            req.target
+        };
         if data.len() > self.incr_chunk {
             let _ = self.conn().change_window_attributes(
                 req.requestor,
@@ -531,30 +655,49 @@ impl Worker {
             let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
             let ok = self
                 .conn()
-                .change_property32(PropMode::REPLACE, req.requestor, prop, self.atoms.incr, &[len])
+                .change_property32(
+                    PropMode::REPLACE,
+                    req.requestor,
+                    prop,
+                    self.atoms.incr,
+                    &[len],
+                )
                 .is_ok();
             if !ok {
                 return self.notify(&req, NONE);
             }
             self.incr_out.insert(
                 (req.requestor, prop),
-                IncrOut { data, offset: 0, type_, deadline: Instant::now() + INCR_TIMEOUT },
+                IncrOut {
+                    data,
+                    offset: 0,
+                    type_,
+                    deadline: Instant::now() + INCR_TIMEOUT,
+                },
             );
             return self.notify(&req, prop);
         }
-        let ok = self.conn().change_property8(PropMode::REPLACE, req.requestor, prop, type_, &data).is_ok();
+        let ok = self
+            .conn()
+            .change_property8(PropMode::REPLACE, req.requestor, prop, type_, &data)
+            .is_ok();
         self.notify(&req, if ok { prop } else { NONE });
     }
 
     fn on_incr_out(&mut self, window: Window, prop: Atom) {
-        let Some(s) = self.incr_out.get_mut(&(window, prop)) else { return };
+        let Some(s) = self.incr_out.get_mut(&(window, prop)) else {
+            return;
+        };
         let end = (s.offset + self.incr_chunk).min(s.data.len());
         let chunk = s.data[s.offset..end].to_vec(); // empty chunk terminates the transfer
         s.offset = end;
         s.deadline = Instant::now() + INCR_TIMEOUT;
         let type_ = s.type_;
         let done = chunk.is_empty();
-        let _ = self.shared.conn.change_property8(PropMode::REPLACE, window, prop, type_, &chunk);
+        let _ = self
+            .shared
+            .conn
+            .change_property8(PropMode::REPLACE, window, prop, type_, &chunk);
         let _ = self.shared.conn.flush();
         if done {
             self.incr_out.remove(&(window, prop));
@@ -596,17 +739,27 @@ mod tests {
 
     fn next_owner(rx: &Receiver<TransportEvent>) -> Vec<String> {
         loop {
-            match rx.recv_timeout(Duration::from_secs(5)).expect("no OwnerChanged") {
+            match rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("no OwnerChanged")
+            {
                 TransportEvent::OwnerChanged(t) if !t.is_empty() => return t,
                 _ => {}
             }
         }
     }
 
-    fn read(t: &X11Transport, rx: &Receiver<TransportEvent>, target: &str) -> Result<Vec<u8>, String> {
+    fn read(
+        t: &X11Transport,
+        rx: &Receiver<TransportEvent>,
+        target: &str,
+    ) -> Result<Vec<u8>, String> {
         t.read(42, target);
         loop {
-            if let TransportEvent::ReadDone { token: 42, result } = rx.recv_timeout(Duration::from_secs(15)).expect("no ReadDone") {
+            if let TransportEvent::ReadDone { token: 42, result } = rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("no ReadDone")
+            {
                 return result;
             }
         }
@@ -618,12 +771,25 @@ mod tests {
             eprintln!("skipped: no X server (run under xvfb-run)");
             return;
         };
-        a.own(vec!["UTF8_STRING".into(), "text/uri-list".into(), "NOPE".into()], Arc::new(Fixed("héllo".as_bytes().to_vec())));
+        a.own(
+            vec!["UTF8_STRING".into(), "text/uri-list".into(), "NOPE".into()],
+            Arc::new(Fixed("héllo".as_bytes().to_vec())),
+        );
         let targets = next_owner(&brx);
-        assert!(targets.iter().any(|t| t == "UTF8_STRING") && targets.iter().any(|t| t == "text/uri-list"), "{targets:?}");
+        assert!(
+            targets.iter().any(|t| t == "UTF8_STRING")
+                && targets.iter().any(|t| t == "text/uri-list"),
+            "{targets:?}"
+        );
         assert_eq!(read(&b, &brx, "UTF8_STRING").unwrap(), "héllo".as_bytes());
-        assert!(read(&b, &brx, "NOPE").is_err(), "provider refusal must surface as an error");
-        assert!(read(&b, &brx, "image/png").is_err(), "unoffered target must fail");
+        assert!(
+            read(&b, &brx, "NOPE").is_err(),
+            "provider refusal must surface as an error"
+        );
+        assert!(
+            read(&b, &brx, "image/png").is_err(),
+            "unoffered target must fail"
+        );
     }
 
     #[test]
@@ -646,9 +812,15 @@ mod tests {
             eprintln!("skipped: no X server (run under xvfb-run)");
             return;
         };
-        a.own(vec!["UTF8_STRING".into()], Arc::new(Fixed(b"from-a".to_vec())));
+        a.own(
+            vec!["UTF8_STRING".into()],
+            Arc::new(Fixed(b"from-a".to_vec())),
+        );
         let _ = next_owner(&brx);
-        b.own(vec!["UTF8_STRING".into()], Arc::new(Fixed(b"from-b".to_vec())));
+        b.own(
+            vec!["UTF8_STRING".into()],
+            Arc::new(Fixed(b"from-b".to_vec())),
+        );
         // a is told that someone else owns the clipboard now and can read b's data
         let _ = next_owner(&arx);
         assert_eq!(read(&a, &arx, "UTF8_STRING").unwrap(), b"from-b");

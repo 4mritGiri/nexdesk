@@ -6,16 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nexdesk_crypto::{Identity, IdentityPublic, Responder};
-use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
-use x11rb::rust_connection::RustConnection;
 
-use crate::inject::Injector;
+use crate::platform::{Capture, Display, Injector};
 use crate::link::{read_frame, write_frame, Reader, Writer, MAX_PRE_AUTH};
-use crate::wire::{pack_pixels, Msg, Rect, MAX_MONITORS};
+use crate::wire::Msg;
 use crate::PeerError;
 
-const TILE: usize = 64;
 const FRAME_TIME: Duration = Duration::from_millis(33);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
@@ -53,7 +49,12 @@ impl Policy {
         allow: Vec<String>,
         prompt: Option<Box<dyn Fn(&IdentityPublic) -> bool + Send + Sync>>,
     ) -> Self {
-        Self { view_only, clipboard, allow, prompt, reconnect_grace: Duration::from_secs(60),
+        Self {
+            view_only,
+            clipboard,
+            allow,
+            prompt,
+            reconnect_grace: Duration::from_secs(60),
             files: None,
             on_chat: None,
             download_dir: None,
@@ -69,7 +70,10 @@ impl Policy {
             return false;
         }
         match self.outbox.lock() {
-            Ok(o) => o.as_ref().map(|tx| tx.send(Msg::Chat(t)).is_ok()).unwrap_or(false),
+            Ok(o) => o
+                .as_ref()
+                .map(|tx| tx.send(Msg::Chat(t)).is_ok())
+                .unwrap_or(false),
             Err(_) => false,
         }
     }
@@ -82,7 +86,9 @@ impl Policy {
 
     fn recently_approved(&self, fp: &str) -> bool {
         match self.recent.lock() {
-            Ok(r) => matches!(r.as_ref(), Some((f, t)) if f == fp && t.elapsed() < self.reconnect_grace),
+            Ok(r) => {
+                matches!(r.as_ref(), Some((f, t)) if f == fp && t.elapsed() < self.reconnect_grace)
+            }
             Err(_) => false,
         }
     }
@@ -96,232 +102,19 @@ impl Policy {
     }
 }
 
-fn cap(e: impl std::fmt::Display) -> PeerError {
-    PeerError::Capture(e.to_string())
-}
-
-struct Capture {
-    conn: RustConnection,
-    root: u32,
-    /// The shared area (one monitor, or the whole screen) in root coordinates.
-    ox: i16,
-    oy: i16,
-    w: u16,
-    h: u16,
-    /// Whole X screen size and monitor list when this capture was set up.
-    root_size: (u16, u16),
-    monitors: Vec<Rect>,
-    selected: usize,
-    prev: Vec<u8>,
-    xfixes: bool,
-    cursor_serial: u32,
-    damage: Option<u32>,
-    last_grab: Instant,
-}
-
-/// Monitors from RandR; the whole screen when RandR is missing or lists nothing usable.
-fn list_monitors(conn: &RustConnection, root: u32, root_w: u16, root_h: u16) -> Vec<Rect> {
-    use x11rb::protocol::randr::ConnectionExt as _;
-    let mut out: Vec<Rect> = conn
-        .randr_get_monitors(root, true)
-        .ok()
-        .and_then(|c| c.reply().ok())
-        .map(|r| {
-            r.monitors
-                .iter()
-                .filter(|m| m.width > 0 && m.height > 0)
-                .map(|m| Rect { x: m.x, y: m.y, w: m.width, h: m.height })
-                // keep only monitors inside the screen, so a grab can never fail on bounds
-                .filter(|m| m.x >= 0 && m.y >= 0 && m.x as u32 + m.w as u32 <= root_w as u32 && m.y as u32 + m.h as u32 <= root_h as u32)
-                .collect()
-        })
-        .unwrap_or_default();
-    out.truncate(MAX_MONITORS);
-    if out.is_empty() {
-        out.push(Rect { x: 0, y: 0, w: root_w, h: root_h });
+fn apply_region(inj: &Option<Injector>, capture: &Capture) {
+    if let Some(inj) = inj {
+        let (x, y, w, h) = capture.region();
+        inj.set_region(x, y, w, h);
     }
-    out
-}
-
-impl Capture {
-    fn new(selected: usize) -> Result<Self, PeerError> {
-        let (conn, n) = x11rb::connect(None).map_err(cap)?;
-        let setup = conn.setup();
-        let s = &setup.roots[n];
-        let fmt = setup
-            .pixmap_formats
-            .iter()
-            .find(|f| f.depth == s.root_depth)
-            .ok_or_else(|| cap("no pixmap format for the root depth"))?;
-        if fmt.bits_per_pixel != 32 {
-            return Err(cap(format!("unsupported screen format ({} bits per pixel)", fmt.bits_per_pixel)));
-        }
-        let root = s.root;
-        let (root_w, root_h) = (s.width_in_pixels, s.height_in_pixels);
-        let xfixes = x11rb::protocol::xfixes::query_version(&conn, 5, 0).ok().and_then(|c| c.reply().ok()).is_some();
-        let monitors = list_monitors(&conn, root, root_w, root_h);
-        let selected = selected.min(monitors.len() - 1);
-        let m = monitors[selected];
-        // XDamage tells us when anything on screen changed, so an idle screen costs nothing
-        let damage = (|| {
-            use x11rb::protocol::damage::{ConnectionExt as _, ReportLevel};
-            conn.damage_query_version(1, 1).ok()?.reply().ok()?;
-            let id = conn.generate_id().ok()?;
-            conn.damage_create(id, root, ReportLevel::NON_EMPTY).ok()?.check().ok()?;
-            Some(id)
-        })();
-        Ok(Self {
-            conn,
-            root,
-            ox: m.x,
-            oy: m.y,
-            w: m.w,
-            h: m.h,
-            root_size: (root_w, root_h),
-            monitors,
-            selected,
-            prev: Vec::new(),
-            xfixes,
-            cursor_serial: 0,
-            damage,
-            last_grab: Instant::now(),
-        })
-    }
-
-    fn grab(&self) -> Result<Vec<u8>, PeerError> {
-        let r = self
-            .conn
-            .get_image(ImageFormat::Z_PIXMAP, self.root, self.ox, self.oy, self.w, self.h, !0)
-            .map_err(cap)?
-            .reply()
-            .map_err(cap)?;
-        if r.data.len() != self.w as usize * self.h as usize * 4 {
-            return Err(cap("unexpected image size"));
-        }
-        Ok(r.data)
-    }
-
-    /// A new pointer image if it changed since the last call.
-    fn cursor(&mut self) -> Option<Msg> {
-        if !self.xfixes {
-            return None;
-        }
-        let r = x11rb::protocol::xfixes::get_cursor_image(&self.conn).ok()?.reply().ok()?;
-        if r.cursor_serial == self.cursor_serial {
-            return None;
-        }
-        self.cursor_serial = r.cursor_serial;
-        let (w, h) = (r.width, r.height);
-        if w == 0 || h == 0 || w > crate::wire::MAX_CURSOR || h > crate::wire::MAX_CURSOR || r.cursor_image.len() != w as usize * h as usize {
-            return None;
-        }
-        let bytes: Vec<u8> = r.cursor_image.iter().flat_map(|p| p.to_le_bytes()).collect();
-        Some(Msg::Cursor { hot_x: r.xhot.min(w - 1), hot_y: r.yhot.min(h - 1), w, h, lz4: pack_pixels(&bytes) })
-    }
-
-    /// The screen size or the monitor layout is not what we set up with.
-    fn layout_changed(&self) -> bool {
-        match self.conn.get_geometry(self.root).ok().and_then(|c| c.reply().ok()) {
-            Some(g) => (g.width, g.height) != self.root_size || list_monitors(&self.conn, self.root, g.width, g.height) != self.monitors,
-            None => false,
-        }
-    }
-
-    /// Messages that tell the viewer what it is looking at.
-    fn announce(&self, view_only: bool) -> [Msg; 2] {
-        [
-            Msg::Hello { view_only, width: self.w, height: self.h },
-            Msg::Monitors { current: self.selected as u8, rects: self.monitors.clone() },
-        ]
-    }
-
-    /// True when something on the screen changed since the last grab (always true without XDamage,
-    /// and at least once a second as a safety net).
-    fn needs_grab(&mut self) -> bool {
-        let Some(d) = self.damage else { return true };
-        let mut dirty = self.prev.is_empty() || self.last_grab.elapsed() >= Duration::from_secs(1);
-        while let Ok(Some(ev)) = self.conn.poll_for_event() {
-            if matches!(ev, x11rb::protocol::Event::DamageNotify(_)) {
-                dirty = true;
-            }
-        }
-        if dirty {
-            use x11rb::protocol::damage::ConnectionExt as _;
-            // re-arm: the next change produces a new notification
-            let _ = self.conn.damage_subtract(d, 0u32, 0u32);
-            let _ = self.conn.flush();
-        }
-        dirty
-    }
-
-    /// Tiles that changed since the last call, merged per tile row, as ready-to-send messages.
-    fn next_update(&mut self) -> Result<Vec<Msg>, PeerError> {
-        if !self.needs_grab() {
-            return Ok(Vec::new());
-        }
-        self.last_grab = Instant::now();
-        let cur = self.grab()?;
-        let rects = dirty_rects(&self.prev, &cur, self.w as usize, self.h as usize);
-        let msgs = rects
-            .into_iter()
-            .map(|(x, y, w, h)| Msg::Tile {
-                x: x as u16,
-                y: y as u16,
-                w: w as u16,
-                h: h as u16,
-                lz4: pack_pixels(&extract(&cur, self.w as usize, (x, y, w, h))),
-            })
-            .collect();
-        self.prev = cur;
-        Ok(msgs)
-    }
-}
-
-/// Changed regions between two BGRX screens: per 64-pixel tile row, runs of adjacent changed tiles.
-/// With an empty or differently sized `prev` everything is changed.
-pub fn dirty_rects(prev: &[u8], cur: &[u8], w: usize, h: usize) -> Vec<(usize, usize, usize, usize)> {
-    let full = prev.len() != cur.len();
-    let mut out = Vec::new();
-    let stride = w * 4;
-    for ty in (0..h).step_by(TILE) {
-        let th = TILE.min(h - ty);
-        let mut run: Option<usize> = None;
-        let flush = |start: Option<usize>, end_x: usize, out: &mut Vec<_>| {
-            if let Some(sx) = start {
-                out.push((sx, ty, end_x - sx, th));
-            }
-        };
-        for tx in (0..w).step_by(TILE) {
-            let tw = TILE.min(w - tx);
-            let changed = full
-                || (0..th).any(|r| {
-                    let o = (ty + r) * stride + tx * 4;
-                    prev[o..o + tw * 4] != cur[o..o + tw * 4]
-                });
-            match (changed, run) {
-                (true, None) => run = Some(tx),
-                (false, Some(_)) => {
-                    flush(run.take(), tx, &mut out);
-                }
-                _ => {}
-            }
-        }
-        flush(run, w, &mut out);
-    }
-    out
-}
-
-fn extract(cur: &[u8], w: usize, (x, y, rw, rh): (usize, usize, usize, usize)) -> Vec<u8> {
-    let mut out = Vec::with_capacity(rw * rh * 4);
-    for r in 0..rh {
-        let o = ((y + r) * w + x) * 4;
-        out.extend_from_slice(&cur[o..o + rw * 4]);
-    }
-    out
 }
 
 /// Handshake as the responder; the policy decides whether the viewer is allowed in.
-fn authenticate(mut stream: TcpStream, id: &Identity, policy: &Policy) -> Result<(Reader, Writer, IdentityPublic), PeerError> {
+fn authenticate(
+    mut stream: TcpStream,
+    id: &Identity,
+    policy: &Policy,
+) -> Result<(Reader, Writer, IdentityPublic), PeerError> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
@@ -336,11 +129,19 @@ fn authenticate(mut stream: TcpStream, id: &Identity, policy: &Policy) -> Result
     stream.set_write_timeout(None)?;
     let (sealer, opener) = session.split();
     let r = stream.try_clone()?;
-    Ok((Reader { stream: r, opener }, Writer { stream, sealer }, peer))
+    Ok((
+        Reader { stream: r, opener },
+        Writer { stream, sealer },
+        peer,
+    ))
 }
 
 /// Serve one connection until it ends. Returns the viewer's fingerprint once it was authenticated.
-pub fn serve_connection(stream: TcpStream, id: &Identity, policy: &Policy) -> Result<String, PeerError> {
+pub fn serve_connection(
+    stream: TcpStream,
+    id: &Identity,
+    policy: &Policy,
+) -> Result<String, PeerError> {
     let (reader, mut writer, peer) = authenticate(stream, id, policy)?;
     let fp = peer.fingerprint_string();
     let result = session_loop(reader, &mut writer, policy);
@@ -350,14 +151,25 @@ pub fn serve_connection(stream: TcpStream, id: &Identity, policy: &Policy) -> Re
 }
 
 fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<(), PeerError> {
-    let mut capture = match Capture::new(0) {
+    // Wayland: the desktop's own dialog asks the person at this computer what to share (nothing is
+    // captured before they answer). X11: the screen is read directly.
+    let display = match Display::open(policy.view_only) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = writer.send(&Msg::Bye(format!("the screen was not shared: {e}")));
+            return Err(e);
+        }
+    };
+    let open = |sel: usize| display.capture(sel);
+    let mut capture = match open(0) {
         Ok(c) => c,
         Err(e) => {
             let _ = writer.send(&Msg::Bye("the agent cannot capture its screen".into()));
             return Err(e);
         }
     };
-    let injector: Arc<Option<Injector>> = Arc::new(if policy.view_only { None } else { Injector::new().ok() });
+    let injector: Arc<Option<Injector>> = Arc::new(if policy.view_only { None } else { display.injector() });
+    apply_region(&injector, &capture);
     let injector_input = injector.clone();
     let view_only = policy.view_only || injector.is_none();
     for m in capture.announce(view_only) {
@@ -381,123 +193,166 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
         *o = Some(tx.clone());
     }
     let receiver = Arc::new(Mutex::new(crate::xfer::Receiver::new(
-        policy.download_dir.clone().or_else(crate::xfer::download_dir).unwrap_or_else(|| std::env::temp_dir().join("NexDesk")),
+        policy
+            .download_dir
+            .clone()
+            .or_else(crate::xfer::download_dir)
+            .unwrap_or_else(|| std::env::temp_dir().join("NexDesk")),
     )));
-    let files_prompt = if policy.view_only { None } else { policy.files.clone() };
+    let files_prompt = if policy.view_only {
+        None
+    } else {
+        policy.files.clone()
+    };
     let on_chat = policy.on_chat.clone();
     let reader_done = done.clone();
-    let input = std::thread::Builder::new().name("agent-input".into()).spawn(move || {
-        loop {
-            match rd.recv() {
-                Ok(Msg::Ping(n)) => {
-                    let _ = tx.send(Msg::Pong(n));
-                }
-                Ok(Msg::SelectMonitor(i)) => {
-                    let _ = tx.send(Msg::SelectMonitor(i)); // handled by the capture loop
-                }
-                Ok(Msg::Clip(t)) => {
-                    if let Some(c) = &clip {
-                        c.set_remote(t);
+    let input = std::thread::Builder::new()
+        .name("agent-input".into())
+        .spawn(move || {
+            loop {
+                match rd.recv() {
+                    Ok(Msg::Ping(n)) => {
+                        let _ = tx.send(Msg::Pong(n));
                     }
-                }
-                Ok(Msg::Chat(t)) => {
-                    if let Some(f) = &on_chat {
-                        f(&t);
+                    Ok(Msg::SelectMonitor(i)) => {
+                        let _ = tx.send(Msg::SelectMonitor(i)); // handled by the capture loop
                     }
-                }
-                Ok(Msg::FilesOffer { batch, count, total, first }) => {
-                    let refused = |tx: &mpsc::Sender<Msg>| {
-                        let _ = tx.send(Msg::FilesAnswer { batch, accept: false });
-                    };
-                    let Some(prompt) = files_prompt.clone() else {
-                        refused(&tx);
-                        continue;
-                    };
-                    let offered = receiver.lock().map(|mut r| r.offer(batch, count, total)).unwrap_or(Err("busy"));
-                    if offered.is_err() {
-                        refused(&tx);
-                        continue;
-                    }
-                    // ask without blocking the input loop: pings and input keep flowing
-                    let (tx2, receiver2) = (tx.clone(), receiver.clone());
-                    let summary = format!("{count}|{total}|{first}");
-                    let _ = std::thread::Builder::new().name("agent-files-consent".into()).spawn(move || {
-                        let (rtx, rrx) = mpsc::channel();
-                        std::thread::spawn(move || {
-                            let _ = rtx.send(prompt(&summary));
-                        });
-                        let ok = rrx.recv_timeout(FILES_CONSENT_TIMEOUT).unwrap_or(false);
-                        if let Ok(mut r) = receiver2.lock() {
-                            r.answer(batch, ok);
+                    Ok(Msg::Clip(t)) => {
+                        if let Some(c) = &clip {
+                            c.set_remote(t);
                         }
-                        let _ = tx2.send(Msg::FilesAnswer { batch, accept: ok });
-                    });
-                }
-                Ok(Msg::FileStart { batch, id, size, path }) => {
-                    let r = receiver.lock().map(|mut r| r.start(batch, id, size, &path)).unwrap_or(Err("busy".into()));
-                    if let Err(e) = r {
+                    }
+                    Ok(Msg::Chat(t)) => {
+                        if let Some(f) = &on_chat {
+                            f(&t);
+                        }
+                    }
+                    Ok(Msg::FilesOffer {
+                        batch,
+                        count,
+                        total,
+                        first,
+                    }) => {
+                        let refused = |tx: &mpsc::Sender<Msg>| {
+                            let _ = tx.send(Msg::FilesAnswer {
+                                batch,
+                                accept: false,
+                            });
+                        };
+                        let Some(prompt) = files_prompt.clone() else {
+                            refused(&tx);
+                            continue;
+                        };
+                        let offered = receiver
+                            .lock()
+                            .map(|mut r| r.offer(batch, count, total))
+                            .unwrap_or(Err("busy"));
+                        if offered.is_err() {
+                            refused(&tx);
+                            continue;
+                        }
+                        // ask without blocking the input loop: pings and input keep flowing
+                        let (tx2, receiver2) = (tx.clone(), receiver.clone());
+                        let summary = format!("{count}|{total}|{first}");
+                        let _ = std::thread::Builder::new()
+                            .name("agent-files-consent".into())
+                            .spawn(move || {
+                                let (rtx, rrx) = mpsc::channel();
+                                std::thread::spawn(move || {
+                                    let _ = rtx.send(prompt(&summary));
+                                });
+                                let ok = rrx.recv_timeout(FILES_CONSENT_TIMEOUT).unwrap_or(false);
+                                if let Ok(mut r) = receiver2.lock() {
+                                    r.answer(batch, ok);
+                                }
+                                let _ = tx2.send(Msg::FilesAnswer { batch, accept: ok });
+                            });
+                    }
+                    Ok(Msg::FileStart {
+                        batch,
+                        id,
+                        size,
+                        path,
+                    }) => {
+                        let r = receiver
+                            .lock()
+                            .map(|mut r| r.start(batch, id, size, &path))
+                            .unwrap_or(Err("busy".into()));
+                        if let Err(e) = r {
+                            if let Ok(mut r) = receiver.lock() {
+                                r.abort();
+                            }
+                            let _ = tx.send(Msg::FileAbort { batch, reason: e });
+                        }
+                    }
+                    Ok(Msg::FileChunk { id, data }) => {
+                        let r = receiver
+                            .lock()
+                            .map(|mut r| r.chunk(id, &data))
+                            .unwrap_or(Err("busy".into()));
+                        match r {
+                            Ok(Some(bytes)) => {
+                                let _ = tx.send(Msg::FileAck { id, bytes });
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                if let Ok(mut r) = receiver.lock() {
+                                    r.abort();
+                                }
+                                let _ = tx.send(Msg::FileAbort {
+                                    batch: 0,
+                                    reason: e,
+                                });
+                            }
+                        }
+                    }
+                    Ok(Msg::FileEnd { id }) => {
+                        let r = receiver
+                            .lock()
+                            .map(|mut r| r.end(id))
+                            .unwrap_or(Err("busy".into()));
+                        match r {
+                            Ok((_, size)) => {
+                                let _ = tx.send(Msg::FileAck { id, bytes: size });
+                            }
+                            Err(e) => {
+                                if let Ok(mut r) = receiver.lock() {
+                                    r.abort();
+                                }
+                                let _ = tx.send(Msg::FileAbort {
+                                    batch: 0,
+                                    reason: e,
+                                });
+                            }
+                        }
+                    }
+                    Ok(Msg::FileAbort { .. }) => {
                         if let Ok(mut r) = receiver.lock() {
                             r.abort();
                         }
-                        let _ = tx.send(Msg::FileAbort { batch, reason: e });
                     }
-                }
-                Ok(Msg::FileChunk { id, data }) => {
-                    let r = receiver.lock().map(|mut r| r.chunk(id, &data)).unwrap_or(Err("busy".into()));
-                    match r {
-                        Ok(Some(bytes)) => {
-                            let _ = tx.send(Msg::FileAck { id, bytes });
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            if let Ok(mut r) = receiver.lock() {
-                                r.abort();
-                            }
-                            let _ = tx.send(Msg::FileAbort { batch: 0, reason: e });
+                    Ok(m) => {
+                        if let Some(inj) = &*injector_input {
+                            let _ = match m {
+                                Msg::MouseMove { x, y } => inj.move_to(x, y),
+                                Msg::MouseButton { button, down } => inj.button(button, down),
+                                Msg::Wheel { dx, dy } => inj.wheel(dx, dy),
+                                Msg::Key { code, down } => inj.key(code, down),
+                                _ => Ok(()),
+                            };
                         }
                     }
+                    Err(_) => break,
                 }
-                Ok(Msg::FileEnd { id }) => {
-                    let r = receiver.lock().map(|mut r| r.end(id)).unwrap_or(Err("busy".into()));
-                    match r {
-                        Ok((_, size)) => {
-                            let _ = tx.send(Msg::FileAck { id, bytes: size });
-                        }
-                        Err(e) => {
-                            if let Ok(mut r) = receiver.lock() {
-                                r.abort();
-                            }
-                            let _ = tx.send(Msg::FileAbort { batch: 0, reason: e });
-                        }
-                    }
+                if reader_done.load(Ordering::Relaxed) {
+                    break;
                 }
-                Ok(Msg::FileAbort { .. }) => {
-                    if let Ok(mut r) = receiver.lock() {
-                        r.abort();
-                    }
-                }
-                Ok(m) => {
-                    if let Some(inj) = &*injector_input {
-                        let _ = match m {
-                            Msg::MouseMove { x, y } => inj.move_to(x, y),
-                            Msg::MouseButton { button, down } => inj.button(button, down),
-                            Msg::Wheel { dx, dy } => inj.wheel(dx, dy),
-                            Msg::Key { code, down } => inj.key(code, down),
-                            _ => Ok(()),
-                        };
-                    }
-                }
-                Err(_) => break,
             }
-            if reader_done.load(Ordering::Relaxed) {
-                break;
+            if let Ok(mut r) = receiver.lock() {
+                r.abort(); // connection ended: remove half-written files
             }
-        }
-        if let Ok(mut r) = receiver.lock() {
-            r.abort(); // connection ended: remove half-written files
-        }
-        reader_done.store(true, Ordering::Relaxed);
-    })?;
+            reader_done.store(true, Ordering::Relaxed);
+        })?;
 
     let mut last_size_check = Instant::now();
     let result = (|| -> Result<(), PeerError> {
@@ -506,12 +361,10 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
             while let Ok(m) = rx.try_recv() {
                 match m {
                     Msg::SelectMonitor(i) => {
-                        let i = usize::from(i).min(capture.monitors.len() - 1);
-                        if i != capture.selected {
-                            capture = Capture::new(i)?;
-                            if let Some(inj) = &*injector {
-                                inj.set_region(capture.ox, capture.oy, capture.w, capture.h);
-                            }
+                        let i = usize::from(i).min(capture.monitor_count() - 1);
+                        if i != capture.selected() {
+                            capture = open(i)?;
+                            apply_region(&injector, &capture);
                             for m in capture.announce(view_only) {
                                 writer.send(&m)?;
                             }
@@ -531,10 +384,8 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
                 }
                 // a grab that fails right after a size change is not fatal: announce the new size
                 Err(_) if capture.layout_changed() => {
-                    capture = Capture::new(capture.selected)?;
-                    if let Some(inj) = &*injector {
-                        inj.set_region(capture.ox, capture.oy, capture.w, capture.h);
-                    }
+                    capture = open(capture.selected())?;
+                    apply_region(&injector, &capture);
                     for m in capture.announce(view_only) {
                         writer.send(&m)?;
                     }
@@ -545,10 +396,8 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
                 last_size_check = Instant::now();
                 if capture.layout_changed() {
                     // announce the new size or monitors; the viewer starts a fresh picture
-                    capture = Capture::new(capture.selected)?;
-                    if let Some(inj) = &*injector {
-                        inj.set_region(capture.ox, capture.oy, capture.w, capture.h);
-                    }
+                    capture = open(capture.selected())?;
+                    apply_region(&injector, &capture);
                     for m in capture.announce(view_only) {
                         writer.send(&m)?;
                     }
@@ -573,7 +422,12 @@ fn session_loop(mut rd: Reader, writer: &mut Writer, policy: &Policy) -> Result<
 }
 
 /// Accept loop: one viewer at a time, others are dropped immediately.
-pub fn run(listener: TcpListener, id: Arc<Identity>, policy: Arc<Policy>, log: impl Fn(&str) + Send + Sync + 'static) {
+pub fn run(
+    listener: TcpListener,
+    id: Arc<Identity>,
+    policy: Arc<Policy>,
+    log: impl Fn(&str) + Send + Sync + 'static,
+) {
     let busy = Arc::new(AtomicBool::new(false));
     run_shared(listener, id, policy, Arc::new(log), busy);
 }
@@ -581,15 +435,30 @@ pub fn run(listener: TcpListener, id: Arc<Identity>, policy: Arc<Policy>, log: i
 pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Like [`run`], with the "a session is running" flag shared with other ways in (the relay).
-pub fn run_shared(listener: TcpListener, id: Arc<Identity>, policy: Arc<Policy>, log: Log, busy: Arc<AtomicBool>) {
+pub fn run_shared(
+    listener: TcpListener,
+    id: Arc<Identity>,
+    policy: Arc<Policy>,
+    log: Log,
+    busy: Arc<AtomicBool>,
+) {
     for stream in listener.incoming().flatten() {
         handle_stream(stream, &id, &policy, &busy, &log);
     }
 }
 
 /// Serve one incoming connection (direct or through the relay) on its own thread, unless a session is running.
-pub fn handle_stream(stream: TcpStream, id: &Arc<Identity>, policy: &Arc<Policy>, busy: &Arc<AtomicBool>, log: &Log) {
-    let from = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+pub fn handle_stream(
+    stream: TcpStream,
+    id: &Arc<Identity>,
+    policy: &Arc<Policy>,
+    busy: &Arc<AtomicBool>,
+    log: &Log,
+) {
+    let from = stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
     if busy.swap(true, Ordering::SeqCst) {
         log(&format!("refused {from}: a session is already running"));
         return;
@@ -617,51 +486,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dirty_rects_find_only_what_changed() {
-        let (w, h) = (200usize, 130usize);
-        let a = vec![0u8; w * h * 4];
-        // first frame (no previous): everything, merged into one run per tile row
-        let all = dirty_rects(&[], &a, w, h);
-        assert_eq!(all.len(), 3, "rows: 64 + 64 + 2 px");
-        assert!(all.iter().all(|r| r.0 == 0 && r.2 == w));
-        assert_eq!(all[2], (0, 128, w, 2));
-        // identical frames: nothing
-        assert!(dirty_rects(&a, &a, w, h).is_empty());
-        // change one pixel at (70, 10): tile column 1, tile row 0
-        let mut b = a.clone();
-        b[(10 * w + 70) * 4] = 9;
-        assert_eq!(dirty_rects(&a, &b, w, h), vec![(64, 0, 64, 64)]);
-        // change pixels in tile columns 0 and 2 of row 1: two separate runs
-        let mut c = a.clone();
-        c[(70 * w + 3) * 4] = 1;
-        c[(70 * w + 140) * 4] = 1;
-        assert_eq!(dirty_rects(&a, &c, w, h), vec![(0, 64, 64, 64), (128, 64, 64, 64)]);
-        // last partial column / row
-        let mut d = a.clone();
-        d[(129 * w + 199) * 4 + 1] = 5;
-        assert_eq!(dirty_rects(&a, &d, w, h), vec![(192, 128, 8, 2)]);
-    }
-
-    #[test]
     fn reconnect_grace_only_covers_the_same_viewer_for_a_short_time() {
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let p = Policy::new(false, true, vec![], None);
         assert!(!p.permits(a.public()), "nobody is approved at first");
         p.remember(&a.public().fingerprint_string());
-        assert!(p.permits(a.public()), "same identity right after its session");
+        assert!(
+            p.permits(a.public()),
+            "same identity right after its session"
+        );
         assert!(!p.permits(b.public()), "another identity is not covered");
         let mut p = Policy::new(false, true, vec![], None);
         p.reconnect_grace = Duration::ZERO;
         p.remember(&a.public().fingerprint_string());
         assert!(!p.permits(a.public()), "grace 0 always asks");
-    }
-
-    #[test]
-    fn extract_copies_the_right_pixels() {
-        let w = 4;
-        let cur: Vec<u8> = (0..4 * 3 * 4).map(|i| i as u8).collect();
-        let e = extract(&cur, w, (1, 1, 2, 2));
-        assert_eq!(e.len(), 16);
-        assert_eq!(&e[..8], &cur[(w + 1) * 4..(w + 1) * 4 + 8]);
     }
 }

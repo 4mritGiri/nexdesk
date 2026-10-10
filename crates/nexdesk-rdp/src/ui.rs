@@ -28,7 +28,6 @@ fn mix(a: u32, b: u32, t: f32) -> u32 {
     ch(16) << 16 | ch(8) << 8 | ch(0)
 }
 
-
 // ------------------------------------------------------------------ text
 //
 // Anti-aliased TrueType text (fontdue) when a system font is found, else the 8x8 bitmap font.
@@ -123,7 +122,16 @@ impl Canvas<'_> {
 
     /// Rounded rectangle with anti-aliased corners. `corners` = which corners are round
     /// (top-left, top-right, bottom-right, bottom-left).
-    pub fn rrect_corners(&mut self, x: i32, y: i32, w: i32, h: i32, r: i32, color: u32, corners: [bool; 4]) {
+    pub fn rrect_corners(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        r: i32,
+        color: u32,
+        corners: [bool; 4],
+    ) {
         let r = r.min(w / 2).min(h / 2).max(0);
         let x0 = x.max(0);
         let y0 = y.max(0);
@@ -133,8 +141,20 @@ impl Canvas<'_> {
             for xx in x0..x1 {
                 let (lx, ly) = (xx - x, yy - y);
                 // Which corner circle (if any) is this pixel in?
-                let cx = if lx < r { Some((r, 0usize, 3usize)) } else if lx >= w - r { Some((w - r, 1, 2)) } else { None };
-                let cy = if ly < r { Some(r) } else if ly >= h - r { Some(h - r) } else { None };
+                let cx = if lx < r {
+                    Some((r, 0usize, 3usize))
+                } else if lx >= w - r {
+                    Some((w - r, 1, 2))
+                } else {
+                    None
+                };
+                let cy = if ly < r {
+                    Some(r)
+                } else if ly >= h - r {
+                    Some(h - r)
+                } else {
+                    None
+                };
                 let mut cov = 1.0f32;
                 if let (Some((ccx, top_idx, bot_idx)), Some(ccy)) = (cx, cy) {
                     let corner = if ly < r { top_idx } else { bot_idx };
@@ -164,7 +184,17 @@ impl Canvas<'_> {
     }
 
     /// Rounded rectangle outline.
-    pub fn rframe(&mut self, x: i32, y: i32, w: i32, h: i32, r: i32, t: i32, border: u32, fill: u32) {
+    pub fn rframe(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        r: i32,
+        t: i32,
+        border: u32,
+        fill: u32,
+    ) {
         self.rrect(x, y, w, h, r, border);
         self.rrect(x + t, y + t, w - 2 * t, h - 2 * t, (r - t).max(0), fill);
     }
@@ -198,7 +228,11 @@ impl Canvas<'_> {
 
     fn text_in(&mut self, x: i32, y: i32, s: &str, k: i32, color: u32, mono: bool) -> i32 {
         let fonts = font::fonts();
-        let face = if mono { fonts.mono.as_ref().or(fonts.sans.as_ref()) } else { fonts.sans.as_ref() };
+        let face = if mono {
+            fonts.mono.as_ref().or(fonts.sans.as_ref())
+        } else {
+            fonts.sans.as_ref()
+        };
         let Some(f) = face else {
             return self.text_bitmap(x, y, s, k, color);
         };
@@ -226,7 +260,11 @@ impl Canvas<'_> {
                         continue;
                     }
                     let i = yy as usize * self.w + xx as usize;
-                    self.buf[i] = if a == 255 { color } else { mix(self.buf[i], color, a as f32 / 255.0) };
+                    self.buf[i] = if a == 255 {
+                        color
+                    } else {
+                        mix(self.buf[i], color, a as f32 / 255.0)
+                    };
                 }
             }
             pen += m.advance_width;
@@ -237,7 +275,11 @@ impl Canvas<'_> {
     fn text_bitmap(&mut self, x: i32, y: i32, s: &str, k: i32, color: u32) -> i32 {
         let mut cx = x;
         for ch in s.chars() {
-            let idx = if (ch as u32) < 128 { ch as usize } else { b'?' as usize };
+            let idx = if (ch as u32) < 128 {
+                ch as usize
+            } else {
+                b'?' as usize
+            };
             let glyph = font8x8::legacy::BASIC_LEGACY[idx];
             for (row, bits) in glyph.iter().enumerate() {
                 for col in 0..8 {
@@ -262,11 +304,18 @@ pub fn text_width_mono(s: &str, k: i32) -> i32 {
 
 fn width_in(s: &str, k: i32, mono: bool) -> i32 {
     let fonts = font::fonts();
-    let face = if mono { fonts.mono.as_ref().or(fonts.sans.as_ref()) } else { fonts.sans.as_ref() };
+    let face = if mono {
+        fonts.mono.as_ref().or(fonts.sans.as_ref())
+    } else {
+        fonts.sans.as_ref()
+    };
     match face {
         Some(f) => {
             let px = font::px(k);
-            s.chars().map(|c| font::advance(mono, f, c, px)).sum::<f32>().ceil() as i32
+            s.chars()
+                .map(|c| font::advance(mono, f, c, px))
+                .sum::<f32>()
+                .ceil() as i32
         }
         None => s.chars().count() as i32 * 8 * k,
     }
@@ -344,8 +393,20 @@ const TOOL_STEP: i32 = 32;
 
 impl Toolbar {
     pub fn new(title: String) -> Self {
-        let tabs = vec![TabInfo { title: title.clone(), active: true, state: TabState::Live }];
-        Self { title, pinned: false, docked: false, paused: false, actual: false, tabs, shown_until: None }
+        let tabs = vec![TabInfo {
+            title: title.clone(),
+            active: true,
+            state: TabState::Live,
+        }];
+        Self {
+            title,
+            pinned: false,
+            docked: false,
+            paused: false,
+            actual: false,
+            tabs,
+            shown_until: None,
+        }
     }
 
     /// Keep (or make) the bar visible for a little while.
@@ -354,7 +415,11 @@ impl Toolbar {
     }
 
     pub fn visible(&self) -> bool {
-        self.pinned || self.shown_until.map(|t| Instant::now() < t).unwrap_or(false)
+        self.pinned
+            || self
+                .shown_until
+                .map(|t| Instant::now() < t)
+                .unwrap_or(false)
     }
 
     pub fn hide_deadline(&self) -> Option<Instant> {
@@ -391,10 +456,18 @@ impl Toolbar {
             (BarHit::Restore, c0 + 2 * step, 14 * u),
         ];
         // Session tools sit on the right; the pin (floating bar only) is the last one.
-        let last = if self.docked { x + w - 22 * u } else { x + w - 26 * u - TOOL_STEP * u };
+        let last = if self.docked {
+            x + w - 22 * u
+        } else {
+            x + w - 26 * u - TOOL_STEP * u
+        };
         let tools = [BarHit::Cad, BarHit::Shot, BarHit::Scale, BarHit::Pause];
         for (i, hit) in tools.iter().enumerate() {
-            v.push((*hit, last - (3 - i as i32) * TOOL_STEP * u, TOOL_STEP / 2 * u - u));
+            v.push((
+                *hit,
+                last - (3 - i as i32) * TOOL_STEP * u,
+                TOOL_STEP / 2 * u - u,
+            ));
         }
         if !self.docked {
             v.push((BarHit::Pin, x + w - 26 * u, 16 * u));
@@ -409,7 +482,12 @@ impl Toolbar {
         let tools_left = self
             .buttons(win_w, u)
             .iter()
-            .filter(|b| matches!(b.0, BarHit::Cad | BarHit::Shot | BarHit::Scale | BarHit::Pause | BarHit::Pin))
+            .filter(|b| {
+                matches!(
+                    b.0,
+                    BarHit::Cad | BarHit::Shot | BarHit::Scale | BarHit::Pause | BarHit::Pin
+                )
+            })
             .map(|b| b.1 - b.2)
             .min()
             .unwrap_or(x + w);
@@ -417,7 +495,9 @@ impl Toolbar {
         let n = self.tabs.len().max(1) as i32;
         let plus = 30 * u;
         let each = ((room - plus) / n - 4 * u).clamp(40 * u, 190 * u);
-        let tabs = (0..n).map(|i| (tab_left + i * (each + 4 * u), each)).collect();
+        let tabs = (0..n)
+            .map(|i| (tab_left + i * (each + 4 * u), each))
+            .collect();
         (tabs, tab_left + n * (each + 4 * u))
     }
 
@@ -437,7 +517,11 @@ impl Toolbar {
         if py >= tab_y0 && py < tab_y1 {
             for (i, (tx, tw)) in tabs.iter().enumerate() {
                 if px >= *tx && px < tx + tw {
-                    return if px >= tx + tw - 24 * u { BarHit::TabClose(i) } else { BarHit::Tab(i) };
+                    return if px >= tx + tw - 24 * u {
+                        BarHit::TabClose(i)
+                    } else {
+                        BarHit::Tab(i)
+                    };
                 }
             }
             if px >= plus_x && px < plus_x + 28 * u {
@@ -453,11 +537,29 @@ impl Toolbar {
             BarHit::Close => "Disconnect",
             BarHit::Minimize => "Minimize",
             BarHit::Restore => "Toggle full screen",
-            BarHit::Pin => if self.pinned { "Unpin bar" } else { "Pin bar" },
+            BarHit::Pin => {
+                if self.pinned {
+                    "Unpin bar"
+                } else {
+                    "Pin bar"
+                }
+            }
             BarHit::Cad => "Send Ctrl+Alt+Del",
             BarHit::Shot => "Copy screen to clipboard",
-            BarHit::Scale => if self.actual { "Fit to window" } else { "Actual size (1:1)" },
-            BarHit::Pause => if self.paused { "Resume" } else { "Pause" },
+            BarHit::Scale => {
+                if self.actual {
+                    "Fit to window"
+                } else {
+                    "Actual size (1:1)"
+                }
+            }
+            BarHit::Pause => {
+                if self.paused {
+                    "Resume"
+                } else {
+                    "Pause"
+                }
+            }
             BarHit::TabClose(_) => "Close tab",
             BarHit::NewTab => "New connection: pick one in the NexDesk window",
             BarHit::Tab(_) | BarHit::None | BarHit::Bar => return None,
@@ -471,7 +573,15 @@ impl Toolbar {
             c.rect(x, y + h - u, w, u, EDGE);
         } else {
             // hangs from the top edge: only the bottom corners are round
-            c.rrect_corners(x - u, y, w + 2 * u, h + u, 16 * u, EDGE, [false, false, true, true]);
+            c.rrect_corners(
+                x - u,
+                y,
+                w + 2 * u,
+                h + u,
+                16 * u,
+                EDGE,
+                [false, false, true, true],
+            );
             c.rrect_corners(x, y, w, h, 15 * u, BAR, [false, false, true, true]);
         }
         let cy = y + h / 2;
@@ -522,9 +632,22 @@ impl Toolbar {
                     if hot {
                         c.rrect(cx - 14 * u, cy - 14 * u, 28 * u, 28 * u, 8 * u, BAR_HOVER);
                     } else if on {
-                        c.rrect(cx - 14 * u, cy - 14 * u, 28 * u, 28 * u, 8 * u, mix(BAR, ACCENT, 0.35));
+                        c.rrect(
+                            cx - 14 * u,
+                            cy - 14 * u,
+                            28 * u,
+                            28 * u,
+                            8 * u,
+                            mix(BAR, ACCENT, 0.35),
+                        );
                     }
-                    let col = if on { ACCENT_HI } else if hot { FG } else { DIM };
+                    let col = if on {
+                        ACCENT_HI
+                    } else if hot {
+                        FG
+                    } else {
+                        DIM
+                    };
                     draw_tool_icon(c, hit, cx, cy, u, col, self.actual, self.paused);
                 }
             }
@@ -535,7 +658,13 @@ impl Toolbar {
         for (i, ((tx, tw), info)) in tab_rects.iter().zip(self.tabs.iter()).enumerate() {
             let (tab_h, tab_y) = (28 * u, cy - 14 * u);
             let hot = matches!(hover, BarHit::Tab(j) | BarHit::TabClose(j) if j == i);
-            let bg = if info.active { 0x00_3a_3a_3a } else if hot { 0x00_33_33_33 } else { BAR };
+            let bg = if info.active {
+                0x00_3a_3a_3a
+            } else if hot {
+                0x00_33_33_33
+            } else {
+                BAR
+            };
             c.rrect(*tx, tab_y, *tw, tab_h, 9 * u, bg);
             let dot = match info.state {
                 TabState::Connecting => DOT_OFF,
@@ -544,7 +673,17 @@ impl Toolbar {
                 TabState::Failed => RED,
             };
             if info.active {
-                c.rect(tx + 10 * u, tab_y + tab_h - 2 * u, tw - 20 * u, 2 * u, if info.state == TabState::Paused { WARN } else { ACCENT_HI });
+                c.rect(
+                    tx + 10 * u,
+                    tab_y + tab_h - 2 * u,
+                    tw - 20 * u,
+                    2 * u,
+                    if info.state == TabState::Paused {
+                        WARN
+                    } else {
+                        ACCENT_HI
+                    },
+                );
             }
             c.circle(tx + 12 * u, cy, 4 * u, dot);
             let close_w = 24 * u;
@@ -554,15 +693,39 @@ impl Toolbar {
                 label.push_str(" (paused)");
             }
             let label = truncate(&label, label_room, k);
-            c.text(tx + 22 * u, cy - 4 * k, &label, k, if info.active { FG } else { DIM });
+            c.text(
+                tx + 22 * u,
+                cy - 4 * k,
+                &label,
+                k,
+                if info.active { FG } else { DIM },
+            );
             // close "x"
             let (xc, xr) = (tx + tw - 13 * u, 5 * u);
             if matches!(hover, BarHit::TabClose(j) if j == i) {
                 c.circle(xc, cy, 9 * u, BAR_HOVER);
             }
-            let xcol = if matches!(hover, BarHit::TabClose(j) if j == i) { FG } else { DIM };
-            c.line(xc - xr / 2 * 1, cy - xr / 2 * 1, xc + xr / 2, cy + xr / 2, u.max(1), xcol);
-            c.line(xc - xr / 2, cy + xr / 2, xc + xr / 2, cy - xr / 2, u.max(1), xcol);
+            let xcol = if matches!(hover, BarHit::TabClose(j) if j == i) {
+                FG
+            } else {
+                DIM
+            };
+            c.line(
+                xc - xr / 2 * 1,
+                cy - xr / 2 * 1,
+                xc + xr / 2,
+                cy + xr / 2,
+                u.max(1),
+                xcol,
+            );
+            c.line(
+                xc - xr / 2,
+                cy + xr / 2,
+                xc + xr / 2,
+                cy - xr / 2,
+                u.max(1),
+                xcol,
+            );
         }
         {
             let pc = plus_x + 14 * u;
@@ -576,15 +739,16 @@ impl Toolbar {
 
         // Tooltip under the hovered button.
         if let Some(tip) = self.tip(hover) {
-            let anchor = buttons
-                .iter()
-                .find(|b| b.0 == hover)
-                .map(|b| b.1)
-                .or_else(|| match hover {
-                    BarHit::TabClose(i) => tab_rects.get(i).map(|(tx, tw)| tx + tw - 13 * u),
-                    BarHit::NewTab => Some(plus_x + 14 * u),
-                    _ => None,
-                });
+            let anchor =
+                buttons
+                    .iter()
+                    .find(|b| b.0 == hover)
+                    .map(|b| b.1)
+                    .or_else(|| match hover {
+                        BarHit::TabClose(i) => tab_rects.get(i).map(|(tx, tw)| tx + tw - 13 * u),
+                        BarHit::NewTab => Some(plus_x + 14 * u),
+                        _ => None,
+                    });
             if let Some(cx) = anchor {
                 let tw = text_width(tip, k);
                 let (bw, bh) = (tw + 16 * u, 22 * u);
@@ -599,7 +763,16 @@ impl Toolbar {
 }
 
 /// Simple glyphs for the session tools, built from rectangles/lines so they stay crisp at any scale.
-fn draw_tool_icon(c: &mut Canvas, hit: BarHit, cx: i32, cy: i32, u: i32, col: u32, actual: bool, paused: bool) {
+fn draw_tool_icon(
+    c: &mut Canvas,
+    hit: BarHit,
+    cx: i32,
+    cy: i32,
+    u: i32,
+    col: u32,
+    actual: bool,
+    paused: bool,
+) {
     let t = u.max(1);
     match hit {
         BarHit::Cad => {
@@ -672,11 +845,19 @@ impl Modal {
     }
 
     fn line_h(line: &str) -> i32 {
-        if line.is_empty() { 10 } else { 21 }
+        if line.is_empty() {
+            10
+        } else {
+            21
+        }
     }
 
     fn line_w(line: &str, u: i32) -> i32 {
-        if Self::is_mono(line) { text_width_mono(line, u.max(1)) } else { text_width(line, u.max(1)) }
+        if Self::is_mono(line) {
+            text_width_mono(line, u.max(1))
+        } else {
+            text_width(line, u.max(1))
+        }
     }
 
     fn geometry(&self, win_w: i32, win_h: i32, u: i32) -> (i32, i32, i32, i32) {
@@ -687,18 +868,28 @@ impl Modal {
             .chain(std::iter::once(text_width(&self.heading, 2 * u) + 60 * u))
             .max()
             .unwrap_or(0);
-        let w = (widest + 2 * Self::PAD * u).max(480 * u).min((win_w - 20).max(1));
+        let w = (widest + 2 * Self::PAD * u)
+            .max(480 * u)
+            .min((win_w - 20).max(1));
         let body: i32 = self.lines.iter().map(|(l, _)| Self::line_h(l)).sum();
         let h = (Self::PAD + Self::HEAD + body + 24 + 32 + 20) * u;
         ((win_w - w) / 2, ((win_h - h) / 2).max(0), w, h)
     }
 
-    fn button_rects(&self, win_w: i32, win_h: i32, u: i32) -> (Option<(i32, i32, i32, i32)>, (i32, i32, i32, i32)) {
+    fn button_rects(
+        &self,
+        win_w: i32,
+        win_h: i32,
+        u: i32,
+    ) -> (Option<(i32, i32, i32, i32)>, (i32, i32, i32, i32)) {
         let (x, y, w, h) = self.geometry(win_w, win_h, u);
         let (bw, bh) = (180 * u, 36 * u);
         let by = y + h - bh - 20 * u;
         let reject = (x + w - bw - 20 * u, by, bw, bh);
-        let accept = self.accept.as_ref().map(|_| (x + w - 2 * bw - 32 * u, by, bw, bh));
+        let accept = self
+            .accept
+            .as_ref()
+            .map(|_| (x + w - 2 * bw - 32 * u, by, bw, bh));
         (accept, reject)
     }
 
@@ -724,21 +915,56 @@ impl Modal {
         }
         let (x, y, w, h) = self.geometry(c.w as i32, c.h as i32, u);
         // soft shadow, border, card
-        c.rrect(x - 3 * u, y + u, w + 6 * u, h + 5 * u, 19 * u, 0x00_10_10_10);
+        c.rrect(
+            x - 3 * u,
+            y + u,
+            w + 6 * u,
+            h + 5 * u,
+            19 * u,
+            0x00_10_10_10,
+        );
         c.rrect(x - u, y - u, w + 2 * u, h + 2 * u, 15 * u, EDGE);
         c.rrect(x, y, w, h, 14 * u, BAR);
         // icon badge + heading
         let danger = self.accent == DANGER;
-        let tone = if danger { DANGER } else if self.accent == WARN { WARN } else { ACCENT_HI };
+        let tone = if danger {
+            DANGER
+        } else if self.accent == WARN {
+            WARN
+        } else {
+            ACCENT_HI
+        };
         let (ix, iy) = (x + Self::PAD * u + 14 * u, y + Self::PAD * u + 14 * u);
         c.circle(ix, iy, 14 * u, mix(BAR, tone, 0.22));
         c.circle(ix, iy, 10 * u, tone);
-        let glyph = if danger || self.accent == WARN { "!" } else { "i" };
+        let glyph = if danger || self.accent == WARN {
+            "!"
+        } else {
+            "i"
+        };
         let gw = text_width(glyph, u.max(1) + 1);
-        c.text(ix - gw / 2, iy - 4 * (u.max(1) + 1), glyph, u.max(1) + 1, 0x00_20_20_20);
-        c.text(x + (Self::PAD + 36) * u, y + Self::PAD * u + 14 * u - 8 * 2 * u / 2, &self.heading, 2 * u, if danger { DANGER } else { FG });
+        c.text(
+            ix - gw / 2,
+            iy - 4 * (u.max(1) + 1),
+            glyph,
+            u.max(1) + 1,
+            0x00_20_20_20,
+        );
+        c.text(
+            x + (Self::PAD + 36) * u,
+            y + Self::PAD * u + 14 * u - 8 * 2 * u / 2,
+            &self.heading,
+            2 * u,
+            if danger { DANGER } else { FG },
+        );
         // divider
-        c.rect(x + Self::PAD * u, y + (Self::PAD + Self::HEAD - 6) * u, w - 2 * Self::PAD * u, u, EDGE);
+        c.rect(
+            x + Self::PAD * u,
+            y + (Self::PAD + Self::HEAD - 6) * u,
+            w - 2 * Self::PAD * u,
+            u,
+            EDGE,
+        );
         // body
         let mut ly = y + (Self::PAD + Self::HEAD + 6) * u;
         for (line, color) in self.lines.iter() {
@@ -752,7 +978,13 @@ impl Modal {
         let (a, r) = self.button_rects(c.w as i32, c.h as i32, u);
         let mut button = |rect: (i32, i32, i32, i32), label: &str, primary: bool, hot: bool| {
             let bg = match (primary, danger, hot) {
-                (true, true, _) => if hot { 0x00_f6_61_51 } else { 0x00_c0_1c_28 },
+                (true, true, _) => {
+                    if hot {
+                        0x00_f6_61_51
+                    } else {
+                        0x00_c0_1c_28
+                    }
+                }
                 (true, false, true) => ACCENT_HI,
                 (true, false, false) => ACCENT,
                 (false, _, true) => 0x00_4a_4a_4a,
@@ -760,7 +992,13 @@ impl Modal {
             };
             c.rrect(rect.0, rect.1, rect.2, rect.3, 10 * u, bg);
             let tw = text_width(label, u.max(1));
-            c.text(rect.0 + (rect.2 - tw) / 2, rect.1 + (rect.3 - 8 * u.max(1)) / 2, label, u.max(1), 0x00_ff_ff_ff);
+            c.text(
+                rect.0 + (rect.2 - tw) / 2,
+                rect.1 + (rect.3 - 8 * u.max(1)) / 2,
+                label,
+                u.max(1),
+                0x00_ff_ff_ff,
+            );
         };
         if let (Some(rect), Some(label)) = (a, self.accept.as_deref()) {
             button(rect, label, true, hover == ModalHit::Accept);
@@ -771,7 +1009,11 @@ impl Modal {
 
 /// Wrap `s` into chunks of at most `n` chars (used for long fingerprints).
 pub fn wrap(s: &str, n: usize) -> Vec<String> {
-    s.chars().collect::<Vec<_>>().chunks(n.max(1)).map(|c| c.iter().collect()).collect()
+    s.chars()
+        .collect::<Vec<_>>()
+        .chunks(n.max(1))
+        .map(|c| c.iter().collect())
+        .collect()
 }
 
 /// Word-wrap `s` to about `n` characters per line; keeps explicit line breaks.
@@ -830,10 +1072,16 @@ mod tests {
     /// Writes a preview PNG when NEXDESK_PREVIEW_DIR is set (manual look at the overlay).
     #[test]
     fn preview_render() {
-        let Ok(dir) = std::env::var("NEXDESK_PREVIEW_DIR") else { return };
+        let Ok(dir) = std::env::var("NEXDESK_PREVIEW_DIR") else {
+            return;
+        };
         let (w, h) = (1100usize, 600usize);
         let mut buf = vec![0x00_30_40_55u32; w * h];
-        let mut c = Canvas { buf: &mut buf, w, h };
+        let mut c = Canvas {
+            buf: &mut buf,
+            w,
+            h,
+        };
         let mut t = Toolbar::new("Yaman Desktop (192.168.1.149)".into());
         t.docked = true;
         t.draw(&mut c, 1, BarHit::None);
@@ -841,14 +1089,23 @@ mod tests {
             heading: "Trust this computer?".into(),
             lines: vec![
                 ("NexDesk cannot verify who this computer is.".into(), WARN),
-                ("Connect only if you recognise the fingerprint below.".into(), DIM),
+                (
+                    "Connect only if you recognise the fingerprint below.".into(),
+                    DIM,
+                ),
                 (String::new(), FG),
                 ("Computer:  192.168.1.149:3389".into(), FG),
                 ("Subject:  CN=YAMAN-PC".into(), FG),
                 (String::new(), FG),
                 ("Fingerprint (SHA-256):".into(), DIM),
-                ("  9F:2A:11:C0:5B:7E:90:AA:34:0D:E2:19:77:C1:B3:08".into(), ACCENT),
-                ("  4E:5A:6B:7C:8D:9E:AF:B0:C1:D2:E3:F4:05:16:27:38".into(), ACCENT),
+                (
+                    "  9F:2A:11:C0:5B:7E:90:AA:34:0D:E2:19:77:C1:B3:08".into(),
+                    ACCENT,
+                ),
+                (
+                    "  4E:5A:6B:7C:8D:9E:AF:B0:C1:D2:E3:F4:05:16:27:38".into(),
+                    ACCENT,
+                ),
             ],
             accent: WARN,
             accept: Some("Trust and connect".into()),
@@ -856,21 +1113,40 @@ mod tests {
             reply: None,
         };
         m.draw(&mut c, 1, ModalHit::None);
-        Toast { text: "Screen copied to clipboard".into(), until: Instant::now() }.draw(&mut c, 1);
+        Toast {
+            text: "Screen copied to clipboard".into(),
+            until: Instant::now(),
+        }
+        .draw(&mut c, 1);
         let mut rgb = Vec::new();
-        for p in &buf { rgb.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]); }
-        image::RgbImage::from_raw(w as u32, h as u32, rgb).unwrap().save(format!("{dir}/preview.png")).unwrap();
+        for p in &buf {
+            rgb.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]);
+        }
+        image::RgbImage::from_raw(w as u32, h as u32, rgb)
+            .unwrap()
+            .save(format!("{dir}/preview.png"))
+            .unwrap();
     }
 
     #[test]
     fn tab_hits() {
         let mut t = Toolbar::new("a".into());
         t.docked = true;
-        t.tabs.push(TabInfo { title: "b".into(), active: false, state: TabState::Live });
+        t.tabs.push(TabInfo {
+            title: "b".into(),
+            active: false,
+            state: TabState::Live,
+        });
         let (tabs, plus) = t.tab_layout(1920, 1);
         assert_eq!(tabs.len(), 2);
-        assert_eq!(t.hit(1920, 1, (tabs[1].0 + 10) as f64, 20.0), BarHit::Tab(1));
-        assert_eq!(t.hit(1920, 1, (tabs[0].0 + tabs[0].1 - 8) as f64, 20.0), BarHit::TabClose(0));
+        assert_eq!(
+            t.hit(1920, 1, (tabs[1].0 + 10) as f64, 20.0),
+            BarHit::Tab(1)
+        );
+        assert_eq!(
+            t.hit(1920, 1, (tabs[0].0 + tabs[0].1 - 8) as f64, 20.0),
+            BarHit::TabClose(0)
+        );
         assert_eq!(t.hit(1920, 1, (plus + 8) as f64, 20.0), BarHit::NewTab);
         assert_eq!(t.hit(1920, 1, (plus + 8) as f64, 2.0), BarHit::Bar);
     }
@@ -885,7 +1161,10 @@ mod tests {
         assert_eq!(t.hit(1920, 1, (x + 82) as f64, 20.0), BarHit::Restore);
         assert_eq!(t.hit(1920, 1, (x + w - 26) as f64, 20.0), BarHit::Pin);
         assert_eq!(t.hit(1920, 1, (x + w / 2) as f64, 5.0), BarHit::Bar);
-        assert_eq!(t.hit(1920, 1, (x + w / 2) as f64, (h + 3) as f64), BarHit::None);
+        assert_eq!(
+            t.hit(1920, 1, (x + w / 2) as f64, (h + 3) as f64),
+            BarHit::None
+        );
         assert_eq!(t.hit(1920, 1, 3.0, 5.0), BarHit::None);
     }
 
@@ -926,17 +1205,29 @@ mod tests {
     #[test]
     fn drawing_stays_inside_the_buffer() {
         let mut buf = vec![0u32; 200 * 100];
-        let mut c = Canvas { buf: &mut buf, w: 200, h: 100 };
+        let mut c = Canvas {
+            buf: &mut buf,
+            w: 200,
+            h: 100,
+        };
         // far outside / partially outside must not panic
         c.rect(-50, -50, 400, 400, 1);
         c.text(180, 90, "overflow text", 3, 2);
         c.line(-10, -10, 300, 300, 3, 3);
-        let t = Toolbar::new("a very long host name that cannot possibly fit in this tiny window".into());
+        let t = Toolbar::new(
+            "a very long host name that cannot possibly fit in this tiny window".into(),
+        );
         t.draw(&mut c, 2, BarHit::Close);
         let mut t2 = Toolbar::new("x".into());
         t2.paused = true;
         t2.actual = true;
-        for hit in [BarHit::Cad, BarHit::Shot, BarHit::Scale, BarHit::Pause, BarHit::Pin] {
+        for hit in [
+            BarHit::Cad,
+            BarHit::Shot,
+            BarHit::Scale,
+            BarHit::Pause,
+            BarHit::Pin,
+        ] {
             t2.draw(&mut c, 2, hit);
             t2.docked = !t2.docked;
         }
@@ -963,8 +1254,14 @@ mod tests {
         };
         let (a, r) = m.button_rects(1000, 700, 1);
         let a = a.unwrap();
-        assert_eq!(m.hit(1000, 700, 1, (a.0 + 5) as f64, (a.1 + 5) as f64), ModalHit::Accept);
-        assert_eq!(m.hit(1000, 700, 1, (r.0 + 5) as f64, (r.1 + 5) as f64), ModalHit::Reject);
+        assert_eq!(
+            m.hit(1000, 700, 1, (a.0 + 5) as f64, (a.1 + 5) as f64),
+            ModalHit::Accept
+        );
+        assert_eq!(
+            m.hit(1000, 700, 1, (r.0 + 5) as f64, (r.1 + 5) as f64),
+            ModalHit::Reject
+        );
         assert_eq!(m.hit(1000, 700, 1, 1.0, 1.0), ModalHit::None);
     }
 
@@ -981,31 +1278,50 @@ mod preview {
     /// Writes /tmp-style PNGs for eyeballing the overlays: NEXDESK_PREVIEW_DIR=dir cargo test preview
     #[test]
     fn render_previews() {
-        let Some(dir) = std::env::var_os("NEXDESK_PREVIEW_DIR") else { return };
+        let Some(dir) = std::env::var_os("NEXDESK_PREVIEW_DIR") else {
+            return;
+        };
         let (w, h) = (1100usize, 620usize);
         let save = |name: &str, buf: &[u32]| {
             let mut raw = Vec::new();
             for p in buf {
                 raw.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]);
             }
-            let img = image_stub::save(&std::path::Path::new(&dir).join(name), w as u32, h as u32, &raw);
+            let img = image_stub::save(
+                &std::path::Path::new(&dir).join(name),
+                w as u32,
+                h as u32,
+                &raw,
+            );
             let _ = img;
         };
         // fake "remote desktop"
         let mut buf = vec![0x00_30_60_a0u32; w * h];
         {
-            let mut c = Canvas { buf: &mut buf, w, h };
+            let mut c = Canvas {
+                buf: &mut buf,
+                w,
+                h,
+            };
             c.rect(40, 80, 500, 300, 0x00_ee_ee_ee);
             c.text(60, 100, "Remote Windows desktop", 3, 0x00_22_22_22);
             let mut t = Toolbar::new("win-server.corp.example:3389".into());
             t.pinned = true;
             t.draw(&mut c, 1, BarHit::Close);
-            Toast { text: "2 file(s) ready: press Ctrl+V on the remote desktop".into(), until: Instant::now() }.draw(&mut c, 1);
+            Toast {
+                text: "2 file(s) ready: press Ctrl+V on the remote desktop".into(),
+                until: Instant::now(),
+            }
+            .draw(&mut c, 1);
         }
         save("bar.ppm", &buf);
         let mut buf = vec![0x00_30_60_a0u32; w * h];
         {
-            let mut c = Canvas { buf: &mut buf, w, h };
+            let mut c = Canvas {
+                buf: &mut buf,
+                w,
+                h,
+            };
             let mut t = Toolbar::new("nexdesk - 172.31.203.37".into());
             t.docked = true;
             t.draw(&mut c, 1, BarHit::Close);
@@ -1013,17 +1329,30 @@ mod preview {
         save("docked.ppm", &buf);
         let mut buf = vec![BG; w * h];
         {
-            let mut c = Canvas { buf: &mut buf, w, h };
+            let mut c = Canvas {
+                buf: &mut buf,
+                w,
+                h,
+            };
             let m = Modal {
                 heading: "Unknown server certificate".into(),
                 lines: vec![
-                    ("The identity of the remote computer could not be verified.".into(), WARN),
-                    ("Connect only if you recognise the fingerprint below.".into(), DIM),
+                    (
+                        "The identity of the remote computer could not be verified.".into(),
+                        WARN,
+                    ),
+                    (
+                        "Connect only if you recognise the fingerprint below.".into(),
+                        DIM,
+                    ),
                     (String::new(), FG),
                     ("Computer : win-server.corp.example:3389".into(), FG),
                     ("Subject  : CN=WIN-SERVER".into(), FG),
                     ("Fingerprint:".into(), FG),
-                    ("  sha256:0aff3b1c9d2e4f5a6b7c8d9e0f1a2b3c4d5e".into(), ACCENT),
+                    (
+                        "  sha256:0aff3b1c9d2e4f5a6b7c8d9e0f1a2b3c4d5e".into(),
+                        ACCENT,
+                    ),
                     ("  6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f".into(), ACCENT),
                 ],
                 accent: WARN,

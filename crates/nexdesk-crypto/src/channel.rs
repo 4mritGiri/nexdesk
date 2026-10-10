@@ -19,7 +19,10 @@ struct Direction {
 
 impl Direction {
     fn new(key: [u8; 32]) -> Self {
-        Self { key: Zeroizing::new(key), counter: 0 }
+        Self {
+            key: Zeroizing::new(key),
+            counter: 0,
+        }
     }
 
     fn nonce(&self) -> Nonce {
@@ -33,7 +36,8 @@ impl Direction {
         if self.counter % REKEY_EVERY == 0 {
             let hk = Hkdf::<Sha256>::from_prk(&*self.key).map_err(|_| Error::Exhausted)?;
             let mut next = [0u8; 32];
-            hk.expand(b"nexdesk rekey", &mut next).map_err(|_| Error::Exhausted)?;
+            hk.expand(b"nexdesk rekey", &mut next)
+                .map_err(|_| Error::Exhausted)?;
             self.key = Zeroizing::new(next);
         }
         Ok(())
@@ -58,7 +62,13 @@ impl Sealer {
         }
         let c = ChaCha20Poly1305::new(Key::from_slice(&*self.dir.key));
         let out = c
-            .encrypt(&self.dir.nonce(), Payload { msg: plaintext, aad })
+            .encrypt(
+                &self.dir.nonce(),
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
             .map_err(|_| Error::Record)?;
         self.dir.advance()?;
         Ok(out)
@@ -90,8 +100,12 @@ pub struct Session {
 impl Session {
     pub(crate) fn new(send_key: [u8; 32], recv_key: [u8; 32], id: [u8; 32]) -> Self {
         Self {
-            send: Sealer { dir: Direction::new(send_key) },
-            recv: Opener { dir: Direction::new(recv_key) },
+            send: Sealer {
+                dir: Direction::new(send_key),
+            },
+            recv: Opener {
+                dir: Direction::new(recv_key),
+            },
             id,
         }
     }

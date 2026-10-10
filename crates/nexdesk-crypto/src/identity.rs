@@ -1,6 +1,11 @@
 //! Long-term device identity: an Ed25519 key and an ML-DSA-65 key, both derived from stored 32-byte seeds.
-use ed25519_dalek::{Signature as EdSig, Signer, SigningKey as EdSk, Verifier, VerifyingKey as EdVk};
-use ml_dsa::{EncodedSignature, EncodedVerifyingKey, KeyGen, MlDsa65, Signature as DsaSig, VerifyingKey as DsaVk};
+use ed25519_dalek::{
+    Signature as EdSig, Signer, SigningKey as EdSk, Verifier, VerifyingKey as EdVk,
+};
+use ml_dsa::{
+    EncodedSignature, EncodedVerifyingKey, KeyGen, MlDsa65, Signature as DsaSig,
+    VerifyingKey as DsaVk,
+};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -38,7 +43,8 @@ impl IdentityPublic {
         let ed: [u8; ED_PK] = b[..ED_PK].try_into().map_err(|_| Error::Malformed)?;
         EdVk::from_bytes(&ed).map_err(|_| Error::Malformed)?;
         let dsa = b[ED_PK..].to_vec();
-        let enc = EncodedVerifyingKey::<MlDsa65>::try_from(dsa.as_slice()).map_err(|_| Error::Malformed)?;
+        let enc = EncodedVerifyingKey::<MlDsa65>::try_from(dsa.as_slice())
+            .map_err(|_| Error::Malformed)?;
         let _ = DsaVk::<MlDsa65>::decode(&enc);
         Ok(Self { ed, dsa })
     }
@@ -54,13 +60,22 @@ impl IdentityPublic {
 
     /// `SHA256:` + 64 hex digits in groups of 8, e.g. for a trust prompt.
     pub fn fingerprint_string(&self) -> String {
-        let hex: String = self.fingerprint().iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = self
+            .fingerprint()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         let groups: Vec<&str> = (0..8).map(|i| &hex[i * 8..i * 8 + 8]).collect();
         format!("SHA256:{}", groups.join("-"))
     }
 
     /// Both signatures must verify (logical AND), so breaking only one algorithm is not enough.
-    pub(crate) fn verify(&self, label: &[u8], transcript: &[u8; 32], sig: &[u8]) -> Result<(), Error> {
+    pub(crate) fn verify(
+        &self,
+        label: &[u8],
+        transcript: &[u8; 32],
+        sig: &[u8],
+    ) -> Result<(), Error> {
         if sig.len() != SIG_LEN {
             return Err(Error::Auth);
         }
@@ -69,7 +84,8 @@ impl IdentityPublic {
         let es = EdSig::from_slice(&sig[..ED_SIG]).map_err(|_| Error::Auth)?;
         let ed_ok = vk.verify(&msg, &es).is_ok();
 
-        let enc = EncodedVerifyingKey::<MlDsa65>::try_from(self.dsa.as_slice()).map_err(|_| Error::Auth)?;
+        let enc = EncodedVerifyingKey::<MlDsa65>::try_from(self.dsa.as_slice())
+            .map_err(|_| Error::Auth)?;
         let dvk = DsaVk::<MlDsa65>::decode(&enc);
         let ds = EncodedSignature::<MlDsa65>::try_from(&sig[ED_SIG..]).map_err(|_| Error::Auth)?;
         let ds = DsaSig::<MlDsa65>::decode(&ds).ok_or(Error::Auth)?;
@@ -145,7 +161,8 @@ impl Identity {
         let msg = signed_message(label, transcript);
         let es = EdSk::from_bytes(&self.ed_seed).sign(&msg);
         let kp = <MlDsa65 as KeyGen>::key_gen_internal(&(*self.dsa_seed).into());
-        let ds = kp.signing_key()
+        let ds = kp
+            .signing_key()
             .sign_deterministic(&msg, label)
             .map_err(|_| Error::Auth)?;
         let mut out = Vec::with_capacity(SIG_LEN);

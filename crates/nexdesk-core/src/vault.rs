@@ -37,10 +37,16 @@ pub struct KdfParams {
 
 impl KdfParams {
     /// 64 MiB, 3 passes: about 0.3 s on a laptop. Resists GPU guessing far better than PBKDF2.
-    pub const DEFAULT: KdfParams = KdfParams { m_kib: 64 * 1024, t: 3, p: 1 };
+    pub const DEFAULT: KdfParams = KdfParams {
+        m_kib: 64 * 1024,
+        t: 3,
+        p: 1,
+    };
 
     fn sane(&self) -> bool {
-        (8..=1024 * 1024).contains(&self.m_kib) && (1..=12).contains(&self.t) && (1..=16).contains(&self.p)
+        (8..=1024 * 1024).contains(&self.m_kib)
+            && (1..=12).contains(&self.t)
+            && (1..=16).contains(&self.p)
     }
 }
 
@@ -62,7 +68,10 @@ impl fmt::Display for VaultError {
             VaultError::AlreadyExists => write!(f, "a vault already exists"),
             VaultError::Corrupt => write!(f, "the vault file is damaged or not a NexDesk vault"),
             VaultError::WrongKey => write!(f, "wrong master password or recovery key"),
-            VaultError::Weak => write!(f, "the master password must be at least {MIN_MASTER_LEN} characters"),
+            VaultError::Weak => write!(
+                f,
+                "the master password must be at least {MIN_MASTER_LEN} characters"
+            ),
             VaultError::Io(e) => write!(f, "vault file error: {e}"),
         }
     }
@@ -89,7 +98,11 @@ pub struct Vault {
 
 impl fmt::Debug for Vault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Vault({} entries, locked contents hidden)", self.entries.len())
+        write!(
+            f,
+            "Vault({} entries, locked contents hidden)",
+            self.entries.len()
+        )
     }
 }
 
@@ -127,11 +140,14 @@ fn seal(key: &Key, aad: &[u8], plain: &[u8]) -> ([u8; 24], Vec<u8>) {
 
 fn open(key: &Key, aad: &[u8], nonce: &[u8], ct: &[u8]) -> Result<Vec<u8>, VaultError> {
     let c = XChaCha20Poly1305::new((&key.0).into());
-    c.decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad }).map_err(|_| VaultError::WrongKey)
+    c.decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad })
+        .map_err(|_| VaultError::WrongKey)
 }
 
 fn esc(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n")
+    s.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
 }
 fn unesc(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
@@ -168,14 +184,20 @@ pub fn encode_recovery_key(k: &[u8; 32]) -> String {
     if bits > 0 {
         out.push(B32[((buf << (5 - bits)) & 31) as usize] as char);
     }
-    out.as_bytes().chunks(4).map(|c| std::str::from_utf8(c).unwrap_or("")).collect::<Vec<_>>().join("-")
+    out.as_bytes()
+        .chunks(4)
+        .map(|c| std::str::from_utf8(c).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 pub fn decode_recovery_key(s: &str) -> Option<[u8; 32]> {
     let (mut buf, mut bits) = (0u32, 0u32);
     let mut out = Vec::with_capacity(32);
     for ch in s.chars().filter(|c| !matches!(c, '-' | ' ' | '\t' | '\n')) {
-        let v = B32.iter().position(|&b| b as char == ch.to_ascii_uppercase())? as u32;
+        let v = B32
+            .iter()
+            .position(|&b| b as char == ch.to_ascii_uppercase())? as u32;
         buf = (buf << 5) | v;
         bits += 5;
         if bits >= 8 {
@@ -192,7 +214,11 @@ impl Vault {
     }
 
     /// Create a new vault. Returns it (unlocked) and the recovery key to show to the user once.
-    pub fn create(path: &Path, master: &str, params: KdfParams) -> Result<(Vault, String), VaultError> {
+    pub fn create(
+        path: &Path,
+        master: &str,
+        params: KdfParams,
+    ) -> Result<(Vault, String), VaultError> {
         if master.chars().count() < MIN_MASTER_LEN {
             return Err(VaultError::Weak);
         }
@@ -242,7 +268,9 @@ impl Vault {
         h
     }
 
-    fn read_raw(path: &Path) -> Result<(KdfParams, [u8; 16], [u8; WRAP_LEN], [u8; WRAP_LEN], Vec<u8>), VaultError> {
+    fn read_raw(
+        path: &Path,
+    ) -> Result<(KdfParams, [u8; 16], [u8; WRAP_LEN], [u8; WRAP_LEN], Vec<u8>), VaultError> {
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(VaultError::Missing),
@@ -253,18 +281,42 @@ impl Vault {
             return Err(VaultError::Corrupt);
         }
         let u = |i: usize| u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
-        let params = KdfParams { m_kib: u(4), t: u(8), p: u(12) };
+        let params = KdfParams {
+            m_kib: u(4),
+            t: u(8),
+            p: u(12),
+        };
         if !params.sane() {
             return Err(VaultError::Corrupt);
         }
         let salt: [u8; 16] = data[16..32].try_into().map_err(|_| VaultError::Corrupt)?;
-        let w1: [u8; WRAP_LEN] = data[32..32 + WRAP_LEN].try_into().map_err(|_| VaultError::Corrupt)?;
-        let w2: [u8; WRAP_LEN] = data[32 + WRAP_LEN..32 + 2 * WRAP_LEN].try_into().map_err(|_| VaultError::Corrupt)?;
+        let w1: [u8; WRAP_LEN] = data[32..32 + WRAP_LEN]
+            .try_into()
+            .map_err(|_| VaultError::Corrupt)?;
+        let w2: [u8; WRAP_LEN] = data[32 + WRAP_LEN..32 + 2 * WRAP_LEN]
+            .try_into()
+            .map_err(|_| VaultError::Corrupt)?;
         Ok((params, salt, w1, w2, data[32 + 2 * WRAP_LEN..].to_vec()))
     }
 
-    fn finish_unlock(path: &Path, params: KdfParams, salt: [u8; 16], w1: [u8; WRAP_LEN], w2: [u8; WRAP_LEN], body: Vec<u8>, dk: Key) -> Result<Vault, VaultError> {
-        let mut v = Vault { path: path.to_path_buf(), params, salt, wrap1: w1, wrap2: w2, dk, entries: BTreeMap::new() };
+    fn finish_unlock(
+        path: &Path,
+        params: KdfParams,
+        salt: [u8; 16],
+        w1: [u8; WRAP_LEN],
+        w2: [u8; WRAP_LEN],
+        body: Vec<u8>,
+        dk: Key,
+    ) -> Result<Vault, VaultError> {
+        let mut v = Vault {
+            path: path.to_path_buf(),
+            params,
+            salt,
+            wrap1: w1,
+            wrap2: w2,
+            dk,
+            entries: BTreeMap::new(),
+        };
         let aad = v.header_aad();
         // authenticate the header: it is the AAD of the body
         if body.len() < 24 + 16 {
@@ -394,7 +446,11 @@ impl Vault {
 mod tests {
     use super::*;
 
-    const FAST: KdfParams = KdfParams { m_kib: 64, t: 1, p: 1 };
+    const FAST: KdfParams = KdfParams {
+        m_kib: 64,
+        t: 1,
+        p: 1,
+    };
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("nexdesk-vault-{name}-{}", std::process::id()));
@@ -420,11 +476,23 @@ mod tests {
     #[test]
     fn wrong_password_and_weak_password() {
         let p = tmp("wrong");
-        assert!(matches!(Vault::create(&p, "short", FAST), Err(VaultError::Weak)));
+        assert!(matches!(
+            Vault::create(&p, "short", FAST),
+            Err(VaultError::Weak)
+        ));
         Vault::create(&p, "long enough pw", FAST).unwrap();
-        assert!(matches!(Vault::unlock(&p, "long enough px"), Err(VaultError::WrongKey)));
-        assert!(matches!(Vault::create(&p, "long enough pw", FAST), Err(VaultError::AlreadyExists)));
-        assert!(matches!(Vault::unlock(&p.with_file_name("nothing"), "x"), Err(VaultError::Missing)));
+        assert!(matches!(
+            Vault::unlock(&p, "long enough px"),
+            Err(VaultError::WrongKey)
+        ));
+        assert!(matches!(
+            Vault::create(&p, "long enough pw", FAST),
+            Err(VaultError::AlreadyExists)
+        ));
+        assert!(matches!(
+            Vault::unlock(&p.with_file_name("nothing"), "x"),
+            Err(VaultError::Missing)
+        ));
     }
 
     #[test]
@@ -457,7 +525,10 @@ mod tests {
             let mut bad = good.clone();
             bad[i] ^= 0x01;
             std::fs::write(&p, &bad).unwrap();
-            assert!(Vault::unlock(&p, "tamper test pw").is_err(), "flip at byte {i} went unnoticed");
+            assert!(
+                Vault::unlock(&p, "tamper test pw").is_err(),
+                "flip at byte {i} went unnoticed"
+            );
         }
         std::fs::write(&p, &good).unwrap();
         assert!(Vault::unlock(&p, "tamper test pw").is_ok());
@@ -472,11 +543,18 @@ mod tests {
         let raw = std::fs::read(&p).unwrap();
         let hay = String::from_utf8_lossy(&raw);
         assert!(!hay.contains("hunter2") && !hay.contains("Bank"));
-        assert_eq!(raw.len() as u64, empty_len, "padding should hide a small change in size");
+        assert_eq!(
+            raw.len() as u64,
+            empty_len,
+            "padding should hide a small change in size"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
 
@@ -502,7 +580,10 @@ mod tests {
         let mut d = std::fs::read(&p).unwrap();
         d[4..8].copy_from_slice(&u32::MAX.to_le_bytes()); // 4 TiB of Argon2 memory
         std::fs::write(&p, d).unwrap();
-        assert!(matches!(Vault::unlock(&p, "dos test pw 1"), Err(VaultError::Corrupt)));
+        assert!(matches!(
+            Vault::unlock(&p, "dos test pw 1"),
+            Err(VaultError::Corrupt)
+        ));
     }
 
     #[test]

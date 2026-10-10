@@ -61,11 +61,17 @@ pub fn parse_uri_list(data: &str) -> Vec<PathBuf> {
         let Some(rest) = line.strip_prefix("file://") else {
             continue;
         };
-        let path = if let Some(p) = rest.strip_prefix("localhost") { p } else { rest };
+        let path = if let Some(p) = rest.strip_prefix("localhost") {
+            p
+        } else {
+            rest
+        };
         if !path.starts_with('/') {
             continue; // remote host authority: refuse
         }
-        out.push(PathBuf::from(std::ffi::OsString::from_vec(percent_decode(path))));
+        out.push(PathBuf::from(std::ffi::OsString::from_vec(percent_decode(
+            path,
+        ))));
     }
     out
 }
@@ -128,7 +134,9 @@ pub fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>, String> {
         return Err("unsupported DIB size".into());
     }
     if !(bpp == 24 || bpp == 32) || !(compression == 0 || compression == 3) {
-        return Err(format!("unsupported DIB format ({bpp} bpp, compression {compression})"));
+        return Err(format!(
+            "unsupported DIB format ({bpp} bpp, compression {compression})"
+        ));
     }
     // BI_BITFIELDS stores three masks after the header (only the standard BGR layout is supported).
     let mut off = size;
@@ -154,7 +162,8 @@ pub fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>, String> {
     }
     let img = image::RgbaImage::from_raw(w as u32, ah as u32, rgba).ok_or("bad image buffer")?;
     let mut out = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    img.write_to(&mut out, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
     Ok(out.into_inner())
 }
 
@@ -168,7 +177,10 @@ mod tests {
         assert_eq!(&rdp[rdp.len() - 2..], &[0, 0]);
         assert_eq!(text_from_rdp(&rdp), "a\nb\nc é 😀");
         // CRLF on the wire
-        let units: Vec<u16> = rdp.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = rdp
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
         assert_eq!(&units[..5], &[b'a' as u16, 13, 10, b'b' as u16, 13]);
     }
 
@@ -182,9 +194,15 @@ mod tests {
     #[test]
     fn uri_list_parsing() {
         let l = "# comment\r\nfile:///tmp/a%20b.txt\r\nfile://localhost/tmp/c\r\nfile://otherhost/x\r\nhttp://x/y\r\n";
-        assert_eq!(parse_uri_list(l), vec![PathBuf::from("/tmp/a b.txt"), PathBuf::from("/tmp/c")]);
+        assert_eq!(
+            parse_uri_list(l),
+            vec![PathBuf::from("/tmp/a b.txt"), PathBuf::from("/tmp/c")]
+        );
         let g = "copy\nfile:///home/u/%C3%A9.txt\nfile:///x";
-        assert_eq!(parse_uri_list(g), vec![PathBuf::from("/home/u/é.txt"), PathBuf::from("/x")]);
+        assert_eq!(
+            parse_uri_list(g),
+            vec![PathBuf::from("/home/u/é.txt"), PathBuf::from("/x")]
+        );
         assert!(parse_uri_list("cut").is_empty());
     }
 

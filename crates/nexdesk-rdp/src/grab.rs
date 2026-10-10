@@ -112,7 +112,9 @@ mod linux {
 
             // Find the master keyboard (normally id 3, but ask the server).
             let mut count: c_int = 0;
-            let infos = unsafe { (xi.XIQueryDevice)(display, x11_dl::xinput2::XIAllMasterDevices, &mut count) };
+            let infos = unsafe {
+                (xi.XIQueryDevice)(display, x11_dl::xinput2::XIAllMasterDevices, &mut count)
+            };
             if infos.is_null() {
                 return Err("XIQueryDevice failed (no XInput2?)".into());
             }
@@ -129,7 +131,8 @@ mod linux {
 
             // Deliver key press/release to our window as XI2 events (what winit listens to).
             let mut mask: [c_uchar; 4] = [0; 4];
-            mask[0] = ((1u32 << x11_dl::xinput2::XI_KeyPress) | (1u32 << x11_dl::xinput2::XI_KeyRelease)) as c_uchar;
+            mask[0] = ((1u32 << x11_dl::xinput2::XI_KeyPress)
+                | (1u32 << x11_dl::xinput2::XI_KeyRelease)) as c_uchar;
             let mut event_mask = x11_dl::xinput2::XIEventMask {
                 deviceid: device,
                 mask_len: mask.len() as c_int,
@@ -152,7 +155,12 @@ mod linux {
             if status != x11_dl::xinput2::XIGrabSuccess {
                 return Err(format!("XIGrabDevice refused (status {status})"));
             }
-            Ok(Self { xlib, xi, display, device })
+            Ok(Self {
+                xlib,
+                xi,
+                display,
+                device,
+            })
         }
 
         fn stop(self) {
@@ -247,13 +255,18 @@ mod linux {
                 .bind(&qh, 1..=1, ())
                 .map_err(|_| "no wl_seat".to_string())?;
 
-            let id = unsafe { ObjectId::from_ptr(wl_surface::WlSurface::interface(), surface.cast()) }
-                .map_err(|e| e.to_string())?;
+            let id =
+                unsafe { ObjectId::from_ptr(wl_surface::WlSurface::interface(), surface.cast()) }
+                    .map_err(|e| e.to_string())?;
             let surface = wl_surface::WlSurface::from_id(&conn, id).map_err(|e| e.to_string())?;
 
             let inhibitor = manager.inhibit_shortcuts(&surface, &seat, &qh, ());
             queue.roundtrip(&mut WlState).map_err(|e| e.to_string())?;
-            Ok(Self { conn, queue, inhibitor })
+            Ok(Self {
+                conn,
+                queue,
+                inhibitor,
+            })
         }
 
         fn stop(mut self) {

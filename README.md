@@ -1,6 +1,6 @@
 # NexDesk
 
-NexDesk is an enterprise-oriented Rust RDP client built on IronRDP with a GPUI desktop manager and an isolated session/process boundary.
+NexDesk is an open-source (MIT OR Apache-2.0) remote-access suite written in Rust: an RDP client built on IronRDP with a GPUI desktop manager, a native remote-control stack (agent, viewer, self-hosted relay) and, next, a terminal with SSH. The goal is one free, auditable tool for remote desktop, remote support, a multi-protocol connection manager and a terminal on Linux, Windows and macOS. See `docs/VISION.md`.
 
 ## Workspace
 
@@ -30,7 +30,7 @@ Needs a current stable Rust toolchain (<https://rustup.rs>) and the Linux develo
 
 ```bash
 sudo apt install build-essential pkg-config clang cmake git \
-  libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libx11-xcb-dev libxcb1-dev libxi-dev \
+  libpipewire-0.3-dev clang libclang-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libx11-xcb-dev libxcb1-dev libxi-dev \
   libfontconfig-dev libvulkan-dev libssl-dev libzstd-dev
 ```
 
@@ -141,3 +141,12 @@ Failures now show the underlying cause (refused / timed out / unreachable / sign
 `nexdesk-agent` shares an X11 screen; `nexdesk-peer-view HOST:PORT` shows and controls it, over a hybrid post-quantum authenticated channel with a consent prompt. See `docs/PEER.md` (how to try it, what is enforced, what is missing) and `docs/CRYPTO.md`. To reach computers behind NAT by a nine digit ID, run `nexdesk-relay` on a server both sides can reach (see `docs/RELAY.md`). Tests: `xvfb-run -a cargo test -p nexdesk-peer -p nexdesk-network`.
 
 In the manager, open **Remote Control** to connect to or share a computer without a terminal; text clipboard and the pointer image are synchronised too.
+
+## Platforms
+
+Linux (X11 and Wayland) is the primary platform; the viewer, relay and libraries build on Windows and macOS in CI. Details and what is still missing: `docs/PLATFORMS.md`. Code layout: `docs/ARCHITECTURE.md`.
+
+## Licence
+
+Dual licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Contributions are accepted under the same terms.
+NexDesk is original code: please do not submit code copied from other remote-desktop projects.

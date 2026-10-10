@@ -28,7 +28,7 @@ Section: net
 Priority: optional
 Architecture: $ARCH
 Installed-Size: $SIZE
-Depends: libc6, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libxcb1, libxi6, libwayland-client0, libfontconfig1, libvulkan1
+Depends: libc6, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libxcb1, libxi6, libwayland-client0, libfontconfig1, libvulkan1, libpipewire-0.3-0
 Recommends: mesa-vulkan-drivers
 Maintainer: NexDesk <nexdesk@localhost>
 Description: NexDesk RDP connection manager

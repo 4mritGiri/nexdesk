@@ -92,7 +92,10 @@ fn parse_args() -> Result<Option<Args>> {
         capture_keys: true,
         clipboard: true,
         drop_paste: true,
-        tls: std::env::var("NEXDESK_TLS").ok().and_then(|v| tls::Policy::parse(&v)).unwrap_or(tls::Policy::Ask),
+        tls: std::env::var("NEXDESK_TLS")
+            .ok()
+            .and_then(|v| tls::Policy::parse(&v))
+            .unwrap_or(tls::Policy::Ask),
         forget_host: false,
         backend: None,
         speed: None,
@@ -121,10 +124,10 @@ fn parse_args() -> Result<Option<Args>> {
             "--forget-host" => a.forget_host = true,
             "--perf" => {
                 let v = val("--perf")?;
-                a.speed = Some(
-                    nexdesk_core::profiles::Speed::parse(&v)
-                        .with_context(|| format!("--perf: use lan, balanced or slow (got {v:?})"))?,
-                );
+                a.speed =
+                    Some(nexdesk_core::profiles::Speed::parse(&v).with_context(|| {
+                        format!("--perf: use lan, balanced or slow (got {v:?})")
+                    })?);
             }
             "--native-frame" => a.native_frame = true,
             "--new-window" => a.new_window = true,
@@ -132,7 +135,8 @@ fn parse_args() -> Result<Option<Args>> {
             "--wayland" => a.backend = Some(Backend::Wayland),
             "--tls" => {
                 let v = val("--tls")?;
-                a.tls = tls::Policy::parse(&v).with_context(|| format!("--tls: unknown mode {v:?}"))?;
+                a.tls =
+                    tls::Policy::parse(&v).with_context(|| format!("--tls: unknown mode {v:?}"))?;
             }
             other => bail!("unknown argument: {other}\n\n{HELP}"),
         }
@@ -176,11 +180,14 @@ fn main() -> Result<()> {
         .domain
         .clone()
         .or_else(|| file.domain().map(str::to_owned));
-    let file_speed: Option<String> = file.get_int("connection type").map(|v| match v {
-        6 => "lan",
-        1 | 2 | 3 => "slow",
-        _ => "balanced",
-    }.to_string());
+    let file_speed: Option<String> = file.get_int("connection type").map(|v| {
+        match v {
+            6 => "lan",
+            1 | 2 | 3 => "slow",
+            _ => "balanced",
+        }
+        .to_string()
+    });
     let (fw, fh) = file.desktop_size().unwrap_or((1920, 1080));
     let (width, height) = (args.width.unwrap_or(fw), args.height.unwrap_or(fh));
 
@@ -209,7 +216,10 @@ fn main() -> Result<()> {
         tls: args.tls,
         speed,
         forget_host: args.forget_host,
-        profile: std::env::var("NEXDESK_PROFILE").ok().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| host.clone()),
+        profile: std::env::var("NEXDESK_PROFILE")
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+            .unwrap_or_else(|| host.clone()),
     };
 
     // A viewer window is already open: add this connection to it as a tab and wait until it closes.
@@ -242,7 +252,13 @@ fn main() -> Result<()> {
     #[cfg(not(unix))]
     let _ = listener;
 
-    let mut app = App::new(app::Options { native_frame: args.native_frame, proxy }, spec);
+    let mut app = App::new(
+        app::Options {
+            native_frame: args.native_frame,
+            proxy,
+        },
+        spec,
+    );
     event_loop.run_app(&mut app)?;
 
     // Leave without running destructors: the window system, clipboard threads and the

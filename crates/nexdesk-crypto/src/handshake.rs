@@ -230,7 +230,15 @@ impl Responder {
         let enc_auth = aead_seal(&k_r2i, &th1, &auth_blob(me, LABEL_R, &th1)?)?;
         msg2.extend_from_slice(&enc_auth);
         let th2 = hash(&[&th1, &enc_auth]);
-        Ok((ResponderWaiting { prk, k_i2r, th2, enc_auth }, msg2))
+        Ok((
+            ResponderWaiting {
+                prk,
+                k_i2r,
+                th2,
+                enc_auth,
+            },
+            msg2,
+        ))
     }
 }
 
@@ -310,7 +318,17 @@ mod tests {
         for (msg, len) in [(1usize, MSG1_LEN), (2, MSG2_LEN), (3, MSG3_LEN)] {
             for pos in (0..len).step_by(97).chain([len - 1]) {
                 let v = Identity::generate().unwrap();
-                let r = run(v, &a, |n, m| if n == msg { m[pos] ^= 0x01 }, true, true);
+                let r = run(
+                    v,
+                    &a,
+                    |n, m| {
+                        if n == msg {
+                            m[pos] ^= 0x01
+                        }
+                    },
+                    true,
+                    true,
+                );
                 assert!(r.is_err(), "msg{msg} byte {pos} flip was accepted");
             }
         }
@@ -327,7 +345,10 @@ mod tests {
     #[test]
     fn wrong_length_and_version_are_refused() {
         let a = Identity::generate().unwrap();
-        assert_eq!(Responder::respond(&a, &[0u8; 10]).err(), Some(Error::Malformed));
+        assert_eq!(
+            Responder::respond(&a, &[0u8; 10]).err(),
+            Some(Error::Malformed)
+        );
         let (_, mut m1) = Initiator::start(Identity::generate().unwrap()).unwrap();
         m1[3] = b'9';
         assert_eq!(Responder::respond(&a, &m1).err(), Some(Error::Version));
@@ -335,7 +356,11 @@ mod tests {
 
     #[test]
     fn impostor_agent_with_other_identity_is_visible_to_the_pin_check() {
-        let (v, real, fake) = (Identity::generate().unwrap(), Identity::generate().unwrap(), Identity::generate().unwrap());
+        let (v, real, fake) = (
+            Identity::generate().unwrap(),
+            Identity::generate().unwrap(),
+            Identity::generate().unwrap(),
+        );
         let pinned = real.public().fingerprint();
         let (iw, m1) = Initiator::start(v).unwrap();
         let (_rw, m2) = Responder::respond(&fake, &m1).unwrap();
@@ -406,13 +431,19 @@ mod tests {
         let th = [7u8; 32];
         let sig = id.sign(LABEL_R, &th).unwrap();
         assert!(id.public().verify(LABEL_R, &th, &sig).is_ok());
-        assert!(id.public().verify(LABEL_I, &th, &sig).is_err(), "role separation");
+        assert!(
+            id.public().verify(LABEL_I, &th, &sig).is_err(),
+            "role separation"
+        );
         let mut a = sig.clone();
         a[70] ^= 1; // inside the ML-DSA part
         assert!(id.public().verify(LABEL_R, &th, &a).is_err());
         let mut b = sig.clone();
         b[3] ^= 1; // inside the Ed25519 part
         assert!(id.public().verify(LABEL_R, &th, &b).is_err());
-        assert!(id.public().verify(LABEL_R, &[8u8; 32], &sig).is_err(), "other transcript");
+        assert!(
+            id.public().verify(LABEL_R, &[8u8; 32], &sig).is_err(),
+            "other transcript"
+        );
     }
 }

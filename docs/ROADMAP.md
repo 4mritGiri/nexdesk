@@ -1,5 +1,7 @@
 # Implementation plan
 
+The overall goal and principles are in `docs/VISION.md`: one open-source tool for remote desktop, remote support, multi-protocol connections and a terminal. Phases below deliver it; **P7** (terminal and SSH) is the newest.
+
 Order is chosen by: (1) fixes something users hit daily, (2) needs no upstream work, (3) unlocks later phases.
 Details and feasibility per feature are in `docs/FEATURE_MATRIX.md`.
 
@@ -33,15 +35,18 @@ Policy file, audit log, Kerberos/SSO, `.deb` + Flatpak, signed releases, smartca
 ## P5 – NexDesk native remote control (months; a second product, see `docs/REMOTE.md`)
 Own host agent + protocol + rendezvous/relay server so Linux/macOS machines, machines behind NAT and Windows Home can be controlled by ID.
 * **P5a** direct IP, Linux X11 host agent, viewer engine, pinned-key handshake, accept prompt, clipboard, software codec. **Done so far (prototype, `docs/PEER.md`)**: agent + viewer over the hybrid handshake, X11 capture with tile diff + LZ4, mouse/keyboard/wheel via XTEST, consent/allow-list/view-only, pinning, end-to-end test on Xvfb. **Left**: clipboard, cursor shape, resize, reconnect, manager UI entry, encrypted identity store, XShm/video codec.
-* **P5b** Wayland host (portal/PipeWire/libei), Windows host, audio, files, chat, multi-monitor, recording, TCP tunnels, unattended service.
+* **P5b** Wayland host (built, see docs/PEER.md; needs real-desktop testing), Windows host, audio, files, chat, multi-monitor, recording, TCP tunnels, unattended service.
 * **P5c** rendezvous + relay, IDs, NAT hole punching, 2FA, self-hosting docs, shared address book. **Done so far (prototype, `docs/RELAY.md`)**: `nexdesk-network` relay, connect by 9 digit ID, end-to-end handshake through the relay, limits. Left: hole punching, relay auth, failover, Docker image, 2FA.
 * **P5d** Windows login screen/UAC service, privacy mode, hardware codecs, macOS host.
 * **P6** mobile and web clients, enterprise server tier (OIDC/LDAP, web console, audit).
 Security design (hybrid post-quantum handshake X25519+ML-KEM, dual signatures, consent-by-default, audit, supply chain): `docs/SECURITY_DESIGN.md`. The crypto crate (`crates/nexdesk-crypto`, see `docs/CRYPTO.md`) is written first and reviewed before anything else in P5. **Step 1 done (prototype, unreviewed)**: hybrid handshake + record layer + tests.
-Prerequisite decision: licence (permissive vs AGPL) and the own-code rule (do not copy code from other remote-desktop projects).
+Licence decided: `MIT OR Apache-2.0`. Own-code rule: do not copy code from other remote-desktop projects.
+
+## P7 – Terminal and SSH (see `docs/VISION.md`)
+New crate `nexdesk-term`: local shell and SSH tabs, split panes, host-key pinning, port forwarding, SFTP panel, saved hosts shared with the connection manager and vault.
 
 ## Explicit non-goals (see matrix for reasons)
-Virtual display driver injection, mounting remote folders in Nautilus, clipboard compression, VNC protocol, interoperating with other remote-desktop products' clients and servers. (NAT hole-punching and a relay moved into P5c; SSH tunnels for RDP stay in P2.)
+Virtual display driver injection, mounting remote folders in Nautilus, clipboard compression, interoperating with other remote-desktop products' native protocols (a VNC *client* entry in the connection manager is allowed, see P2). (NAT hole-punching and a relay moved into P5c; SSH tunnels for RDP stay in P2.)
 
 ## Risks
 * IronRDP features (RDPEGFX, RAIL, gateway, smartcard) are upstream dependencies; we vendor-patch only small hooks.

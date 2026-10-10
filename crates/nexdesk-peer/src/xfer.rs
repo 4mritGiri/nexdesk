@@ -40,8 +40,8 @@ pub fn sanitize_rel(path: &str) -> Result<PathBuf, &'static str> {
 
 /// The folder where received files go: `Downloads/NexDesk` (from `~/.config/user-dirs.dirs` if set).
 pub fn download_dir() -> Option<PathBuf> {
-    let home = PathBuf::from(std::env::var_os("HOME")?);
-    let dirs = std::fs::read_to_string(home.join(".config/user-dirs.dirs")).ok();
+    let home = crate::paths::home_dir()?;
+    let dirs = crate::paths::user_dirs_file();
     let mut base = home.join("Downloads");
     if let Some(text) = dirs {
         for line in text.lines() {
@@ -50,7 +50,11 @@ pub fn download_dir() -> Option<PathBuf> {
                 if let Some(rest) = v.strip_prefix("$HOME") {
                     let rest = rest.trim_start_matches('/');
                     if !rest.contains("..") {
-                        base = if rest.is_empty() { home.clone() } else { home.join(rest) };
+                        base = if rest.is_empty() {
+                            home.clone()
+                        } else {
+                            home.join(rest)
+                        };
                     }
                 } else if v.starts_with('/') && !v.contains("..") {
                     base = PathBuf::from(v);
@@ -92,7 +96,12 @@ pub struct Receiver {
 
 impl Receiver {
     pub fn new(root: PathBuf) -> Self {
-        Self { root, offered: None, batch: None, cur: None }
+        Self {
+            root,
+            offered: None,
+            batch: None,
+            cur: None,
+        }
     }
 
     /// A new offer. Refused while another transfer is running.
@@ -103,7 +112,12 @@ impl Receiver {
         if count == 0 || count > MAX_FILES || total > MAX_BATCH_BYTES {
             return Err("transfer too large");
         }
-        self.offered = Some(Batch { id: batch, count, total, ..Batch::default() });
+        self.offered = Some(Batch {
+            id: batch,
+            count,
+            total,
+            ..Batch::default()
+        });
         Ok(())
     }
 
@@ -117,7 +131,11 @@ impl Receiver {
     }
 
     pub fn start(&mut self, batch: u32, id: u32, size: u64, path: &str) -> Result<(), String> {
-        let b = self.batch.as_mut().filter(|b| b.id == batch).ok_or("files that were not accepted")?;
+        let b = self
+            .batch
+            .as_mut()
+            .filter(|b| b.id == batch)
+            .ok_or("files that were not accepted")?;
         if self.cur.is_some() {
             return Err("a file is already open".into());
         }
@@ -136,7 +154,10 @@ impl Receiver {
         if !dir_real.starts_with(&root_real) {
             return Err("unsafe folder".into());
         }
-        let name = dest.file_name().and_then(|n| n.to_str()).ok_or("bad file name")?;
+        let name = dest
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("bad file name")?;
         let part = dir.join(format!(".{name}.{id}.nexdesk-part"));
         let mut oo = OpenOptions::new();
         oo.write(true).create_new(true);
@@ -145,18 +166,34 @@ impl Receiver {
             use std::os::unix::fs::OpenOptionsExt;
             oo.mode(0o600);
         }
-        let file = oo.open(&part).map_err(|e| format!("cannot create the file: {e}"))?;
-        self.cur = Some(Current { id, file, part, dest, size, got: 0, acked: 0 });
+        let file = oo
+            .open(&part)
+            .map_err(|e| format!("cannot create the file: {e}"))?;
+        self.cur = Some(Current {
+            id,
+            file,
+            part,
+            dest,
+            size,
+            got: 0,
+            acked: 0,
+        });
         Ok(())
     }
 
     /// Store a chunk. `Some(bytes)` means an acknowledgement should be sent.
     pub fn chunk(&mut self, id: u32, data: &[u8]) -> Result<Option<u64>, String> {
-        let c = self.cur.as_mut().filter(|c| c.id == id).ok_or("data for a file that is not open")?;
+        let c = self
+            .cur
+            .as_mut()
+            .filter(|c| c.id == id)
+            .ok_or("data for a file that is not open")?;
         if data.len() > MAX_CHUNK || c.got + data.len() as u64 > c.size {
             return Err("more data than announced".into());
         }
-        c.file.write_all(data).map_err(|e| format!("cannot write: {e}"))?;
+        c.file
+            .write_all(data)
+            .map_err(|e| format!("cannot write: {e}"))?;
         c.got += data.len() as u64;
         if c.got - c.acked >= ACK_EVERY {
             c.acked = c.got;
@@ -167,16 +204,28 @@ impl Receiver {
 
     /// Finish the file: size must match exactly. Returns where it was stored and the final byte count.
     pub fn end(&mut self, id: u32) -> Result<(PathBuf, u64), String> {
-        let c = self.cur.take().filter(|c| c.id == id).ok_or("end of a file that is not open")?;
+        let c = self
+            .cur
+            .take()
+            .filter(|c| c.id == id)
+            .ok_or("end of a file that is not open")?;
         if c.got != c.size {
             let _ = std::fs::remove_file(&c.part);
             return Err("the file ended early".into());
         }
-        c.file.sync_all().map_err(|e| format!("cannot write: {e}"))?;
+        c.file
+            .sync_all()
+            .map_err(|e| format!("cannot write: {e}"))?;
         drop(c.file);
-        let dest = unique_link(&c.part, &c.dest).map_err(|e| format!("cannot save the file: {e}"))?;
+        let dest =
+            unique_link(&c.part, &c.dest).map_err(|e| format!("cannot save the file: {e}"))?;
         let _ = std::fs::remove_file(&c.part);
-        if self.batch.as_ref().map(|b| b.started >= b.count).unwrap_or(false) {
+        if self
+            .batch
+            .as_ref()
+            .map(|b| b.started >= b.count)
+            .unwrap_or(false)
+        {
             self.batch = None;
         }
         Ok((dest, c.size))
@@ -199,8 +248,16 @@ impl Receiver {
 
 /// Give `part` its final name without ever replacing an existing file: `name`, `name (1)`, ...
 fn unique_link(part: &Path, dest: &Path) -> std::io::Result<PathBuf> {
-    let stem = dest.file_stem().and_then(|s| s.to_str()).unwrap_or("file").to_string();
-    let ext = dest.extension().and_then(|s| s.to_str()).map(|e| format!(".{e}")).unwrap_or_default();
+    let stem = dest
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let ext = dest
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
     let dir = dest.parent().unwrap_or_else(|| Path::new("."));
     let mut candidate = dest.to_path_buf();
     for i in 1..1000 {
@@ -212,7 +269,10 @@ fn unique_link(part: &Path, dest: &Path) -> std::io::Result<PathBuf> {
             Err(e) => return Err(e),
         }
     }
-    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "too many files with that name"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "too many files with that name",
+    ))
 }
 
 // -------------------------------------------------------------------------------------------- sending
@@ -240,7 +300,11 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<Item>, String> {
     let mut total = 0u64;
     let mut stack: Vec<(PathBuf, String)> = Vec::new();
     for p in paths {
-        let name = p.file_name().and_then(|n| n.to_str()).ok_or("a dropped item has no usable name")?.to_string();
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("a dropped item has no usable name")?
+            .to_string();
         stack.push((p.clone(), name));
     }
     while let Some((path, rel)) = stack.pop() {
@@ -249,7 +313,10 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<Item>, String> {
             continue;
         }
         if md.is_dir() {
-            let mut kids: Vec<_> = std::fs::read_dir(&path).map_err(|e| format!("cannot read {rel}: {e}"))?.flatten().collect();
+            let mut kids: Vec<_> = std::fs::read_dir(&path)
+                .map_err(|e| format!("cannot read {rel}: {e}"))?
+                .flatten()
+                .collect();
             kids.sort_by_key(|k| k.file_name());
             for k in kids.into_iter().rev() {
                 if let Some(n) = k.file_name().to_str() {
@@ -258,13 +325,20 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<Item>, String> {
             }
         } else if md.is_file() {
             if md.len() > MAX_FILE_SIZE {
-                return Err(format!("{rel} is larger than the {} GiB limit", MAX_FILE_SIZE >> 30));
+                return Err(format!(
+                    "{rel} is larger than the {} GiB limit",
+                    MAX_FILE_SIZE >> 30
+                ));
             }
             if sanitize_rel(&rel).is_err() {
                 continue; // a name the other side would refuse anyway
             }
             total = total.saturating_add(md.len());
-            items.push(Item { abs: path, rel, size: md.len() });
+            items.push(Item {
+                abs: path,
+                rel,
+                size: md.len(),
+            });
             if items.len() as u32 > MAX_FILES {
                 return Err(format!("more than {MAX_FILES} files"));
             }
@@ -291,7 +365,13 @@ pub fn send(
 ) -> Result<usize, String> {
     let total: u64 = items.iter().map(|i| i.size).sum();
     let first = items[0].rel.clone();
-    out.send(Msg::FilesOffer { batch, count: items.len() as u32, total, first }).map_err(|_| "disconnected")?;
+    out.send(Msg::FilesOffer {
+        batch,
+        count: items.len() as u32,
+        total,
+        first,
+    })
+    .map_err(|_| "disconnected")?;
     match events.recv_timeout(Duration::from_secs(120)) {
         Ok(Event::Answer(true)) => {}
         Ok(Event::Answer(false)) => return Err("the other side said no".into()),
@@ -303,11 +383,20 @@ pub fn send(
     for (n, it) in items.iter().enumerate() {
         let id = n as u32;
         let mut f = File::open(&it.abs).map_err(|e| format!("cannot open {}: {e}", it.rel))?;
-        out.send(Msg::FileStart { batch, id, size: it.size, path: it.rel.clone() }).map_err(|_| "disconnected")?;
+        out.send(Msg::FileStart {
+            batch,
+            id,
+            size: it.size,
+            path: it.rel.clone(),
+        })
+        .map_err(|_| "disconnected")?;
         let (mut sent, mut acked) = (0u64, 0u64);
         while sent < it.size {
             if cancel.load(Ordering::Relaxed) {
-                let _ = out.send(Msg::FileAbort { batch, reason: "cancelled".into() });
+                let _ = out.send(Msg::FileAbort {
+                    batch,
+                    reason: "cancelled".into(),
+                });
                 return Err("cancelled".into());
             }
             while sent - acked >= WINDOW {
@@ -319,8 +408,13 @@ pub fn send(
                 }
             }
             let want = ((it.size - sent) as usize).min(MAX_CHUNK);
-            f.read_exact(&mut buf[..want]).map_err(|e| format!("cannot read {}: {e}", it.rel))?;
-            out.send(Msg::FileChunk { id, data: buf[..want].to_vec() }).map_err(|_| "disconnected")?;
+            f.read_exact(&mut buf[..want])
+                .map_err(|e| format!("cannot read {}: {e}", it.rel))?;
+            out.send(Msg::FileChunk {
+                id,
+                data: buf[..want].to_vec(),
+            })
+            .map_err(|_| "disconnected")?;
             sent += want as u64;
             done += want as u64;
             progress(done, total);
@@ -346,7 +440,11 @@ mod tests {
 
     fn temp(name: &str) -> PathBuf {
         static N: AtomicU32 = AtomicU32::new(0);
-        let d = std::env::temp_dir().join(format!("nexdesk-xfer-{}-{}-{name}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let d = std::env::temp_dir().join(format!(
+            "nexdesk-xfer-{}-{}-{name}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -354,8 +452,23 @@ mod tests {
 
     #[test]
     fn names_from_the_network_are_checked() {
-        assert_eq!(sanitize_rel("a/b/c.txt").unwrap(), PathBuf::from("a/b/c.txt"));
-        for bad in ["", "/etc/passwd", "../x", "a/../../x", "a//b", "a/./b", "a\\b", "a/\u{0}b", "a/\nb", "./", "a/"] {
+        assert_eq!(
+            sanitize_rel("a/b/c.txt").unwrap(),
+            PathBuf::from("a/b/c.txt")
+        );
+        for bad in [
+            "",
+            "/etc/passwd",
+            "../x",
+            "a/../../x",
+            "a//b",
+            "a/./b",
+            "a\\b",
+            "a/\u{0}b",
+            "a/\nb",
+            "./",
+            "a/",
+        ] {
             assert!(sanitize_rel(bad).is_err(), "{bad:?}");
         }
         assert!(sanitize_rel(&"x".repeat(256)).is_err());
@@ -383,8 +496,17 @@ mod tests {
         assert!(r.chunk(0, b"abcd").is_err(), "more than announced");
         r.chunk(0, b"ab").unwrap();
         assert!(r.end(0).is_err(), "ended early");
-        assert!(!root.join("a.txt").exists(), "an incomplete file never appears");
-        assert!(std::fs::read_dir(&root).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("nexdesk-part")), "partial file removed");
+        assert!(
+            !root.join("a.txt").exists(),
+            "an incomplete file never appears"
+        );
+        assert!(
+            std::fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().contains("nexdesk-part")),
+            "partial file removed"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -402,7 +524,11 @@ mod tests {
         r.chunk(0, b"new").unwrap();
         let (p, _) = r.end(0).unwrap();
         assert_eq!(p, root.join("a (1).txt"));
-        assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"mine", "nothing is overwritten");
+        assert_eq!(
+            std::fs::read(root.join("a.txt")).unwrap(),
+            b"mine",
+            "nothing is overwritten"
+        );
         assert_eq!(std::fs::read(&p).unwrap(), b"new");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -412,7 +538,9 @@ mod tests {
         let src = temp("src");
         std::fs::create_dir_all(src.join("proj/sub")).unwrap();
         std::fs::write(src.join("proj/a.txt"), b"hello").unwrap();
-        let big: Vec<u8> = (0..(5 * 1024 * 1024 + 123)).map(|i| (i % 251) as u8).collect();
+        let big: Vec<u8> = (0..(5 * 1024 * 1024 + 123))
+            .map(|i| (i % 251) as u8)
+            .collect();
         std::fs::write(src.join("proj/sub/big.bin"), &big).unwrap();
         std::fs::write(src.join("proj/empty"), b"").unwrap();
         #[cfg(unix)]
@@ -434,12 +562,22 @@ mod tests {
         let mut stored = 0;
         while let Ok(m) = out_rx.recv() {
             match m {
-                Msg::FilesOffer { batch, count, total, .. } => {
+                Msg::FilesOffer {
+                    batch,
+                    count,
+                    total,
+                    ..
+                } => {
                     rx.offer(batch, count, total).unwrap();
                     rx.answer(batch, true);
                     ev_tx.send(Event::Answer(true)).unwrap();
                 }
-                Msg::FileStart { batch, id, size, path } => rx.start(batch, id, size, &path).unwrap(),
+                Msg::FileStart {
+                    batch,
+                    id,
+                    size,
+                    path,
+                } => rx.start(batch, id, size, &path).unwrap(),
                 Msg::FileChunk { id, data } => {
                     if let Some(b) = rx.chunk(id, &data).unwrap() {
                         ev_tx.send(Event::Ack { id, bytes: b }).unwrap();

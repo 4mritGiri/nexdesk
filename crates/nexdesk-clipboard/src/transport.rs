@@ -18,7 +18,10 @@ pub enum TransportEvent {
     /// (empty = the clipboard has no owner / is empty).
     OwnerChanged(Vec<String>),
     /// Result of [`Transport::read`].
-    ReadDone { token: u64, result: Result<Vec<u8>, String> },
+    ReadDone {
+        token: u64,
+        result: Result<Vec<u8>, String>,
+    },
 }
 
 pub type EventSink = Arc<dyn Fn(TransportEvent) + Send + Sync>;

@@ -25,7 +25,11 @@ pub fn default_path() -> Option<PathBuf> {
 }
 
 fn clean(s: &str) -> String {
-    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().to_string()
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 impl AddressBooks {
@@ -34,7 +38,10 @@ impl AddressBooks {
     }
 
     pub fn load(path: &Path) -> Self {
-        let mut me = Self { books: Vec::new(), path: Some(path.to_path_buf()) };
+        let mut me = Self {
+            books: Vec::new(),
+            path: Some(path.to_path_buf()),
+        };
         if let Ok(text) = std::fs::read_to_string(path) {
             for line in text.lines() {
                 let mut p = line.splitn(2, '\t');
@@ -52,7 +59,9 @@ impl AddressBooks {
     }
 
     fn save(&self) -> io::Result<()> {
-        let Some(path) = &self.path else { return Ok(()) };
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -75,10 +84,17 @@ impl AddressBooks {
         if name.is_empty() {
             return Err("Name is empty");
         }
-        if self.books.iter().any(|b| b.name.eq_ignore_ascii_case(&name)) {
+        if self
+            .books
+            .iter()
+            .any(|b| b.name.eq_ignore_ascii_case(&name))
+        {
             return Err("An address book with this name already exists");
         }
-        self.books.push(Book { name, members: Vec::new() });
+        self.books.push(Book {
+            name,
+            members: Vec::new(),
+        });
         self.save().map_err(|_| "Could not save address books")
     }
 
@@ -88,7 +104,11 @@ impl AddressBooks {
     }
 
     pub fn add(&mut self, book: &str, connection: &str) -> Result<(), &'static str> {
-        let b = self.books.iter_mut().find(|b| b.name == book).ok_or("No such address book")?;
+        let b = self
+            .books
+            .iter_mut()
+            .find(|b| b.name == book)
+            .ok_or("No such address book")?;
         if !b.members.iter().any(|m| m == connection) {
             b.members.push(connection.to_string());
         }

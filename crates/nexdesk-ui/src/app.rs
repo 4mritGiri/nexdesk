@@ -8,20 +8,20 @@ use crate::{
 
 use gpui::{
     div, fill, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem, Context,
-    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    FontWeight, GlobalElementId, KeyBinding, LayoutId, PaintQuad, Pixels, Point, Render, ResizeEdge,
-    MouseButton, Decorations, WindowBackgroundAppearance, WindowControlArea, WindowDecorations, ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, WindowBounds,
-    WindowOptions,
+    CursorStyle, Decorations, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    FocusHandle, FontWeight, GlobalElementId, KeyBinding, LayoutId, MouseButton, PaintQuad, Pixels,
+    Point, Render, ResizeEdge, ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowDecorations, WindowOptions,
 };
 
 use gpui_platform::application;
 use nexdesk_core::{
-    credentials::Secret,
     books::AddressBooks,
-    settings::{Settings, Theme, TlsMode},
-    vault::{KdfParams, Vault, VaultError},
+    credentials::Secret,
     logs::{self, Kind as LogKind, Level as LogLevel},
     profiles::{file_stem_for, Profile, Speed},
+    settings::{Settings, Theme, TlsMode},
+    vault::{KdfParams, Vault, VaultError},
 };
 use nexdesk_session::SessionState;
 
@@ -249,7 +249,11 @@ pub struct Editor {
     error: Option<String>,
 }
 
-fn make_input(cx: &mut Context<NexDeskApp>, placeholder: &'static str, value: &str) -> Entity<TextInput> {
+fn make_input(
+    cx: &mut Context<NexDeskApp>,
+    placeholder: &'static str,
+    value: &str,
+) -> Entity<TextInput> {
     let input = cx.new(|cx| TextInput::new(cx, false, placeholder));
     input.update(cx, |i, cx| i.set_value(value, cx));
     input
@@ -272,7 +276,9 @@ impl NexDeskApp {
 
         let prefs = Settings::load();
         crate::theme::set_theme(prefs.theme);
-        let vault_exists = nexdesk_core::vault::default_path().map(|p| Vault::exists(&p)).unwrap_or(false);
+        let vault_exists = nexdesk_core::vault::default_path()
+            .map(|p| Vault::exists(&p))
+            .unwrap_or(false);
         let mut me = Self {
             state: ManagerState::load(engine_path),
             nav: Navigation::default(),
@@ -321,7 +327,9 @@ impl NexDeskApp {
             relay_input: make_input(
                 cx,
                 "relay.example.com:21117",
-                &nexdesk_peer::store::default_dir().and_then(|d| nexdesk_peer::store::load_relay(&d)).unwrap_or_default(),
+                &nexdesk_peer::store::default_dir()
+                    .and_then(|d| nexdesk_peer::store::load_relay(&d))
+                    .unwrap_or_default(),
             ),
             agent_id: None,
             relay_status: String::new(),
@@ -342,7 +350,11 @@ impl NexDeskApp {
             window.focus(&me.root_focus, cx); // so Esc and Enter reach the window even before anything is clicked
         }
         // Enter inside a field does what its button does.
-        let (a, c, p) = (me.remote_addr.clone(), me.chat_input.clone(), me.password_input.clone());
+        let (a, c, p) = (
+            me.remote_addr.clone(),
+            me.chat_input.clone(),
+            me.password_input.clone(),
+        );
         cx.subscribe(&a, |this, _, _: &TextInputEvent, cx| {
             this.remote_connect(cx);
             cx.notify();
@@ -361,7 +373,6 @@ impl NexDeskApp {
         .detach();
         me
     }
-
 
     /// Change a preference, save it and apply it immediately.
     fn update_settings(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Settings)) {
@@ -382,7 +393,9 @@ impl NexDeskApp {
     }
 
     fn vault_exists() -> bool {
-        Self::vault_file().map(|p| Vault::exists(&p)).unwrap_or(false)
+        Self::vault_file()
+            .map(|p| Vault::exists(&p))
+            .unwrap_or(false)
     }
 
     fn open_vault_dialog(&mut self, kind: VaultDlg, window: &mut Window, cx: &mut Context<Self>) {
@@ -415,7 +428,9 @@ impl NexDeskApp {
     }
 
     fn vault_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(kind) = self.vault_dialog else { return };
+        let Some(kind) = self.vault_dialog else {
+            return;
+        };
         let pw1 = self.vault_pw1.read(cx).value().to_string();
         let pw2 = self.vault_pw2.read(cx).value().to_string();
         let rec = self.vault_rec.read(cx).value().to_string();
@@ -456,7 +471,12 @@ impl NexDeskApp {
             },
             VaultDlg::UseRecovery => match Vault::unlock_with_recovery(&path, &rec) {
                 Ok(v) => {
-                    logs::alarm(LogLevel::Warn, "Vault unlocked with the recovery key", "", "choose a new master password");
+                    logs::alarm(
+                        LogLevel::Warn,
+                        "Vault unlocked with the recovery key",
+                        "",
+                        "choose a new master password",
+                    );
                     self.vault = Some(v);
                     self.open_vault_dialog(VaultDlg::ChangeMaster, window, cx);
                 }
@@ -523,14 +543,21 @@ impl NexDeskApp {
     }
 
     /// Start the session; on success optionally remember the password in the vault.
-    fn launch(&mut self, profile: Profile, password: Secret, save: bool, cx: &mut Context<Self>) -> Result<u64, String> {
+    fn launch(
+        &mut self,
+        profile: Profile,
+        password: Secret,
+        save: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, String> {
         let name = profile.name.clone();
         match self.state.sessions.start(profile, password.clone()) {
             Ok((id, _)) => {
                 if save {
                     if let Some(v) = self.vault.as_mut() {
                         if let Err(e) = v.set(&name, password) {
-                            self.state.status = format!("Connected, but the password could not be saved: {e}");
+                            self.state.status =
+                                format!("Connected, but the password could not be saved: {e}");
                         }
                     }
                 }
@@ -541,7 +568,6 @@ impl NexDeskApp {
             Err(e) => Err(e.to_string()),
         }
     }
-
 
     // ------------------------------------------------------------------
     // Remote Control (viewer and agent run as separate processes)
@@ -556,16 +582,32 @@ impl NexDeskApp {
                 Ok(Ok(fp)) => {
                     let addr = addr.clone();
                     let known = nexdesk_peer::store::default_dir()
-                        .map(|d| nexdesk_core::knownhosts::KnownHosts::load(&d.join("known_agents")))
+                        .map(|d| {
+                            nexdesk_core::knownhosts::KnownHosts::load(&d.join("known_agents"))
+                        })
                         .unwrap_or_else(nexdesk_core::knownhosts::KnownHosts::in_memory);
                     let key = if self.pending_relay.is_some() {
-                        nexdesk_core::knownhosts::host_key(&format!("id-{addr}"), nexdesk_peer::DEFAULT_PORT)
+                        nexdesk_core::knownhosts::host_key(
+                            &format!("id-{addr}"),
+                            nexdesk_peer::DEFAULT_PORT,
+                        )
                     } else {
-                        let (host, port) = addr.rsplit_once(':').map(|(h, p)| (h.to_string(), p.parse().unwrap_or(nexdesk_peer::DEFAULT_PORT))).unwrap_or((addr.clone(), nexdesk_peer::DEFAULT_PORT));
+                        let (host, port) = addr
+                            .rsplit_once(':')
+                            .map(|(h, p)| {
+                                (
+                                    h.to_string(),
+                                    p.parse().unwrap_or(nexdesk_peer::DEFAULT_PORT),
+                                )
+                            })
+                            .unwrap_or((addr.clone(), nexdesk_peer::DEFAULT_PORT));
                         nexdesk_core::knownhosts::host_key(&host, port)
                     };
                     self.remote_probe = None;
-                    if matches!(known.lookup(&key, &fp), nexdesk_core::knownhosts::Lookup::Match) {
+                    if matches!(
+                        known.lookup(&key, &fp),
+                        nexdesk_core::knownhosts::Lookup::Match
+                    ) {
                         let relay = self.pending_relay.clone();
                         self.start_viewer(&addr, relay.as_deref(), None);
                     } else {
@@ -627,7 +669,8 @@ impl NexDeskApp {
             self.relay_status.clear();
             self.remote_msg = "The sharing agent stopped.".into();
         }
-        self.viewers.retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_))));
+        self.viewers
+            .retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_))));
         if changed {
             cx.notify();
         }
@@ -639,7 +682,14 @@ impl NexDeskApp {
             Ok(c) => {
                 self.viewers.push(c);
                 self.remote_msg = format!("Opened a remote control window for {addr}.");
-                nexdesk_core::logs::console(LogLevel::Info, "remote", &format!("viewer started for {addr}{}", if relay.is_some() { " (via relay)" } else { "" }));
+                nexdesk_core::logs::console(
+                    LogLevel::Info,
+                    "remote",
+                    &format!(
+                        "viewer started for {addr}{}",
+                        if relay.is_some() { " (via relay)" } else { "" }
+                    ),
+                );
             }
             Err(e) => self.remote_msg = e,
         }
@@ -656,7 +706,10 @@ impl NexDeskApp {
             return Ok(None);
         }
         if !nexdesk_peer::control::valid_addr(&raw) {
-            return Err("The relay server must look like relay.example.com or relay.example.com:21117.".into());
+            return Err(
+                "The relay server must look like relay.example.com or relay.example.com:21117."
+                    .into(),
+            );
         }
         if nexdesk_peer::control::is_wildcard_host(&raw) {
             return Err("0.0.0.0 is the address a relay listens on, not where to find it. Enter the real address of the computer that runs nexdesk-relay, for example 192.168.1.20:21117 (the same on every computer). On a local network you can skip the relay and connect to the other computer's address instead.".into());
@@ -664,7 +717,11 @@ impl NexDeskApp {
         if let Some(d) = &dir {
             let _ = nexdesk_peer::store::save_relay(d, &raw);
         }
-        Ok(Some(if raw.contains(':') { raw } else { format!("{raw}:{}", nexdesk_network::DEFAULT_RELAY_PORT) }))
+        Ok(Some(if raw.contains(':') {
+            raw
+        } else {
+            format!("{raw}:{}", nexdesk_network::DEFAULT_RELAY_PORT)
+        }))
     }
 
     fn remote_connect(&mut self, cx: &mut Context<Self>) {
@@ -674,7 +731,8 @@ impl NexDeskApp {
             match self.relay_setting(cx) {
                 Ok(Some(r)) => (compact, Some(r)),
                 Ok(None) => {
-                    self.remote_msg = "To connect by ID, enter the relay server in the box below first.".into();
+                    self.remote_msg =
+                        "To connect by ID, enter the relay server in the box below first.".into();
                     return;
                 }
                 Err(e) => {
@@ -685,7 +743,8 @@ impl NexDeskApp {
         } else if nexdesk_peer::control::valid_addr(&raw) {
             (nexdesk_peer::control::with_port(&raw), None)
         } else {
-            self.remote_msg = "Enter a nine digit ID, or an address like 192.168.1.20 or pc.lan:21118.".into();
+            self.remote_msg =
+                "Enter a nine digit ID, or an address like 192.168.1.20 or pc.lan:21118.".into();
             return;
         };
         let (tx, rx) = std::sync::mpsc::channel();
@@ -717,11 +776,21 @@ impl NexDeskApp {
                 return;
             }
         };
-        match nexdesk_peer::control::Agent::start(&listen, relay.as_deref(), self.share_view_only, self.share_clipboard) {
+        match nexdesk_peer::control::Agent::start(
+            &listen,
+            relay.as_deref(),
+            self.share_view_only,
+            self.share_clipboard,
+        ) {
             Ok(a) => {
                 self.agent = Some(a);
-                self.remote_msg = "Sharing started. Every viewer must be approved here first.".into();
-                nexdesk_core::logs::console(LogLevel::Info, "remote", "screen sharing started (consent required per viewer)");
+                self.remote_msg =
+                    "Sharing started. Every viewer must be approved here first.".into();
+                nexdesk_core::logs::console(
+                    LogLevel::Info,
+                    "remote",
+                    "screen sharing started (consent required per viewer)",
+                );
             }
             Err(e) => self.remote_msg = e,
         }
@@ -741,7 +810,8 @@ impl NexDeskApp {
         }
         if let Some(a) = self.agent.as_mut() {
             a.send_chat(&text);
-            self.chat_log.push((true, nexdesk_peer::wire::clean_chat(&text)));
+            self.chat_log
+                .push((true, nexdesk_peer::wire::clean_chat(&text)));
             if self.chat_log.len() > 100 {
                 self.chat_log.remove(0);
             }
@@ -872,7 +942,12 @@ impl NexDeskApp {
         }
     }
 
-    fn open_editor(&mut self, existing: Option<Profile>, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_editor(
+        &mut self,
+        existing: Option<Profile>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.pending_delete = None;
         let original = existing.as_ref().map(|p| p.name.clone());
         let p = existing.unwrap_or_default();
@@ -881,12 +956,22 @@ impl NexDeskApp {
         let host = make_input(cx, "host or host:port", &p.host);
         let user = make_input(cx, "User name", &p.user);
         let domain = make_input(cx, "Domain (optional)", &p.domain);
-        let pre_cmd = make_input(cx, "e.g. nmcli con up \"Work VPN\"  (optional)", &p.pre_command);
-        let post_cmd = make_input(cx, "e.g. nmcli con down \"Work VPN\"  (optional)", &p.post_command);
+        let pre_cmd = make_input(
+            cx,
+            "e.g. nmcli con up \"Work VPN\"  (optional)",
+            &p.pre_command,
+        );
+        let post_cmd = make_input(
+            cx,
+            "e.g. nmcli con down \"Work VPN\"  (optional)",
+            &p.post_command,
+        );
         let width = make_input(cx, "1920", &p.width.to_string());
         let height = make_input(cx, "1080", &p.height.to_string());
         let first = host.read(cx).focus_handle.clone();
-        for input in [&name, &host, &user, &domain, &pre_cmd, &post_cmd, &width, &height] {
+        for input in [
+            &name, &host, &user, &domain, &pre_cmd, &post_cmd, &width, &height,
+        ] {
             cx.subscribe(input, |this, _, _: &TextInputEvent, cx| {
                 if this.editor.is_some() {
                     this.save_editor(cx);
@@ -931,7 +1016,9 @@ impl NexDeskApp {
             self.cancel_password_dialog(window, cx);
         } else if self.editor.is_some() {
             self.editor = None;
-        } else if self.vault_dialog.is_some() && self.vault_dialog != Some(VaultDlg::ShowRecoveryKey) {
+        } else if self.vault_dialog.is_some()
+            && self.vault_dialog != Some(VaultDlg::ShowRecoveryKey)
+        {
             self.vault_dialog = None;
         } else {
             return;
@@ -1023,13 +1110,16 @@ impl NexDeskApp {
             .ok_or("No config directory available on this system")?;
         let original = self.editor.as_ref().and_then(|e| e.original.clone());
         let new_stem = file_stem_for(&profile.name);
-        let clashes = store.list().iter().any(|p| {
-            file_stem_for(&p.name) == new_stem && Some(&p.name) != original.as_ref()
-        });
+        let clashes = store
+            .list()
+            .iter()
+            .any(|p| file_stem_for(&p.name) == new_stem && Some(&p.name) != original.as_ref());
         if clashes {
             return Err("A connection with this name already exists".into());
         }
-        store.save(profile).map_err(|e| format!("Save failed: {e}"))?;
+        store
+            .save(profile)
+            .map_err(|e| format!("Save failed: {e}"))?;
         if let Some(old) = original {
             if file_stem_for(&old) != new_stem {
                 let _ = store.delete(&old); // rename: drop the old file
@@ -1075,7 +1165,10 @@ impl NexDeskApp {
         };
         p.name = format!("{} (copy)", p.name);
         let result = match self.state.store.as_ref() {
-            Some(store) => store.save(&p).map(|_| store.list()).map_err(|e| e.to_string()),
+            Some(store) => store
+                .save(&p)
+                .map(|_| store.list())
+                .map_err(|e| e.to_string()),
             None => Err("No config directory available".to_string()),
         };
         match result {
@@ -1107,7 +1200,10 @@ impl NexDeskApp {
         }
         self.pending_delete = None;
         let result = match self.state.store.as_ref() {
-            Some(store) => store.delete(&profile.name).map(|_| store.list()).map_err(|e| e.to_string()),
+            Some(store) => store
+                .delete(&profile.name)
+                .map(|_| store.list())
+                .map_err(|e| e.to_string()),
             None => Err("No config directory available".to_string()),
         };
         match result {
@@ -1142,10 +1238,16 @@ impl NexDeskApp {
         }
 
         // A saved password in the unlocked vault skips the prompt.
-        if let Some(saved) = self.vault.as_ref().and_then(|v| v.get(&self.state.profiles[index].name)) {
+        if let Some(saved) = self
+            .vault
+            .as_ref()
+            .and_then(|v| v.get(&self.state.profiles[index].name))
+        {
             let profile = self.state.profiles[index].clone();
             match self.launch(profile, saved, false, cx) {
-                Ok(id) => self.state.status = format!("Session #{id} is connecting (saved password)..."),
+                Ok(id) => {
+                    self.state.status = format!("Session #{id} is connecting (saved password)...")
+                }
                 Err(e) => self.state.status = format!("Unable to start the RDP session: {e}"),
             }
             cx.notify();
@@ -1257,7 +1359,11 @@ impl Render for NexDeskApp {
         let status: SharedString = self.state.status.clone().into();
 
         let filter = self.search_input.read(cx).value().trim().to_lowercase();
-        let has_saved_pw = match (&self.vault, self.selected_profile.and_then(|i| self.state.profiles.get(i))) {
+        let has_saved_pw = match (
+            &self.vault,
+            self.selected_profile
+                .and_then(|i| self.state.profiles.get(i)),
+        ) {
             (Some(v), Some(p)) => v.has(&p.name),
             _ => false,
         };
@@ -1268,14 +1374,27 @@ impl Render for NexDeskApp {
             window.request_animation_frame(); // keep repainting while the scan runs
         }
         let content = match self.nav.screen {
-            Screen::Connections => {
-                connection_view(profiles, self.selected_profile, self.pending_delete, self.grid_view, filter, has_saved_pw, cx)
-                    .into_any_element()
-            }
+            Screen::Connections => connection_view(
+                profiles,
+                self.selected_profile,
+                self.pending_delete,
+                self.grid_view,
+                filter,
+                has_saved_pw,
+                cx,
+            )
+            .into_any_element(),
 
             Screen::Sessions => session_view(sessions, cx).into_any_element(),
 
-            Screen::Devices => devices_view(&self.state.profiles, &self.conn_log, &filter, self.scan.as_ref(), cx).into_any_element(),
+            Screen::Devices => devices_view(
+                &self.state.profiles,
+                &self.conn_log,
+                &filter,
+                self.scan.as_ref(),
+                cx,
+            )
+            .into_any_element(),
 
             Screen::Remote => remote_view(
                 self.remote_addr.clone(),
@@ -1305,13 +1424,21 @@ impl Render for NexDeskApp {
             )
             .into_any_element(),
 
-            Screen::Logs(kind) => logs_view(kind, &self.log_entries, &filter, self.confirm_clear, cx).into_any_element(),
+            Screen::Logs(kind) => {
+                logs_view(kind, &self.log_entries, &filter, self.confirm_clear, cx)
+                    .into_any_element()
+            }
 
-            Screen::Settings => settings_view(&self.prefs, self.vault_status(), cx).into_any_element(),
+            Screen::Settings => {
+                settings_view(&self.prefs, self.vault_status(), cx).into_any_element()
+            }
         };
 
         if matches!(self.nav.screen, Screen::Logs(_) | Screen::Devices)
-            && self.log_loaded.map(|t| t.elapsed().as_secs() >= 3).unwrap_or(true)
+            && self
+                .log_loaded
+                .map(|t| t.elapsed().as_secs() >= 3)
+                .unwrap_or(true)
         {
             self.refresh_logs();
         }
@@ -1336,7 +1463,12 @@ impl Render for NexDeskApp {
             .flex_1()
             .flex()
             .min_h_0()
-            .child(sidebar_view(self.nav.screen, self.sidebar_collapsed, self.logs_open, cx))
+            .child(sidebar_view(
+                self.nav.screen,
+                self.sidebar_collapsed,
+                self.logs_open,
+                cx,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -1371,7 +1503,9 @@ impl Render for NexDeskApp {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .when(rounded, |d| d.rounded(px(12.)).border_1().border_color(border()))
+            .when(rounded, |d| {
+                d.rounded(px(12.)).border_1().border_color(border())
+            })
             .child(header_view(hv, client, cx))
             .child(body);
 
@@ -1385,7 +1519,11 @@ impl Render for NexDeskApp {
                     .unwrap_or_else(|| "Connection".into()),
                 self.password_input.clone(),
                 self.password_error.clone(),
-                if self.vault.is_some() { Some(self.save_pw) } else { None },
+                if self.vault.is_some() {
+                    Some(self.save_pw)
+                } else {
+                    None
+                },
                 Self::vault_exists(),
                 cx,
             ));
@@ -1423,7 +1561,11 @@ impl Render for NexDeskApp {
             ));
         }
         if let Some((count, bytes, first)) = self.files_request.clone() {
-            let size = if bytes >= 1 << 30 { format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64) } else { format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64) };
+            let size = if bytes >= 1 << 30 {
+                format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64)
+            } else {
+                format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64)
+            };
             main = main.child(remote_dialog(
                 "Receive files?",
                 vec![
@@ -1467,7 +1609,11 @@ impl Render for NexDeskApp {
         if let Some(k) = self.vault_dialog {
             main = main.child(vault_dialog_view(
                 k,
-                [self.vault_pw1.clone(), self.vault_pw2.clone(), self.vault_rec.clone()],
+                [
+                    self.vault_pw1.clone(),
+                    self.vault_pw2.clone(),
+                    self.vault_rec.clone(),
+                ],
                 self.vault_error.clone(),
                 self.vault_new_key.clone(),
                 Self::vault_exists(),
@@ -1484,9 +1630,17 @@ impl Render for NexDeskApp {
             .on_action(cx.listener(|this, _: &AppEscape, window, cx| this.escape(window, cx)))
             .on_action(cx.listener(|this, _: &AppConfirm, window, cx| this.confirm(window, cx)))
             // Solid layer under everything, so nothing from the desktop shows through the window.
-            .child(div().absolute().inset_0().bg(bg()).when(rounded, |d| d.rounded(px(12.))))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(bg())
+                    .when(rounded, |d| d.rounded(px(12.))),
+            )
             .child(main)
-            .when(client && !window.is_maximized(), |d| d.children(resize_handles()))
+            .when(client && !window.is_maximized(), |d| {
+                d.children(resize_handles())
+            })
     }
 }
 
@@ -1505,14 +1659,50 @@ fn resize_handles() -> Vec<gpui::AnyElement> {
             })
     };
     vec![
-        mk("rz-t", E::Top, C::ResizeUpDown).top_0().left(px(K)).right(px(K)).h(px(T)).into_any_element(),
-        mk("rz-b", E::Bottom, C::ResizeUpDown).bottom_0().left(px(K)).right(px(K)).h(px(T)).into_any_element(),
-        mk("rz-l", E::Left, C::ResizeLeftRight).left_0().top(px(K)).bottom(px(K)).w(px(T)).into_any_element(),
-        mk("rz-r", E::Right, C::ResizeLeftRight).right_0().top(px(K)).bottom(px(K)).w(px(T)).into_any_element(),
-        mk("rz-tl", E::TopLeft, C::ResizeUpLeftDownRight).top_0().left_0().size(px(K)).into_any_element(),
-        mk("rz-tr", E::TopRight, C::ResizeUpRightDownLeft).top_0().right_0().size(px(K)).into_any_element(),
-        mk("rz-bl", E::BottomLeft, C::ResizeUpRightDownLeft).bottom_0().left_0().size(px(K)).into_any_element(),
-        mk("rz-br", E::BottomRight, C::ResizeUpLeftDownRight).bottom_0().right_0().size(px(K)).into_any_element(),
+        mk("rz-t", E::Top, C::ResizeUpDown)
+            .top_0()
+            .left(px(K))
+            .right(px(K))
+            .h(px(T))
+            .into_any_element(),
+        mk("rz-b", E::Bottom, C::ResizeUpDown)
+            .bottom_0()
+            .left(px(K))
+            .right(px(K))
+            .h(px(T))
+            .into_any_element(),
+        mk("rz-l", E::Left, C::ResizeLeftRight)
+            .left_0()
+            .top(px(K))
+            .bottom(px(K))
+            .w(px(T))
+            .into_any_element(),
+        mk("rz-r", E::Right, C::ResizeLeftRight)
+            .right_0()
+            .top(px(K))
+            .bottom(px(K))
+            .w(px(T))
+            .into_any_element(),
+        mk("rz-tl", E::TopLeft, C::ResizeUpLeftDownRight)
+            .top_0()
+            .left_0()
+            .size(px(K))
+            .into_any_element(),
+        mk("rz-tr", E::TopRight, C::ResizeUpRightDownLeft)
+            .top_0()
+            .right_0()
+            .size(px(K))
+            .into_any_element(),
+        mk("rz-bl", E::BottomLeft, C::ResizeUpRightDownLeft)
+            .bottom_0()
+            .left_0()
+            .size(px(K))
+            .into_any_element(),
+        mk("rz-br", E::BottomRight, C::ResizeUpLeftDownRight)
+            .bottom_0()
+            .right_0()
+            .size(px(K))
+            .into_any_element(),
     ]
 }
 
@@ -1584,7 +1774,12 @@ fn popup_header(
         .border_color(border())
         .child(dot)
         .when_some(icon, |d, name| d.child(ico(name, 18., accent_hover())))
-        .child(div().text_lg().font_weight(FontWeight::BOLD).child(title.into()))
+        .child(
+            div()
+                .text_lg()
+                .font_weight(FontWeight::BOLD)
+                .child(title.into()),
+        )
 }
 
 /// Round-rect icon button used in the header (glyph from the system font).
@@ -1611,7 +1806,17 @@ fn hbtn(
                 .hover(|s| s.bg(hover()))
                 .on_click(cx.listener(move |this, _e, window, cx| action(this, window, cx)))
         })
-        .child(ico(glyph, 18., if !enabled { dim() } else if active { accent_hover() } else { icon() }))
+        .child(ico(
+            glyph,
+            18.,
+            if !enabled {
+                dim()
+            } else if active {
+                accent_hover()
+            } else {
+                icon()
+            },
+        ))
 }
 
 /// Vector icon from `assets/icons`, tinted with `color`.
@@ -1694,58 +1899,123 @@ fn header_view(h: HeaderState, client: bool, cx: &mut Context<NexDeskApp>) -> im
         })
         // traffic lights
         .child(
-            div().flex().items_center().gap(px(8.)).mr_1().when(client, |d| {
-                d.child(dot("dot-close", dot_close(), cx, |w| w.remove_window()))
-                    .child(dot("dot-min", dot_min(), cx, |w| w.minimize_window()))
-                    .child(dot("dot-max", dot_max(), cx, |w| w.zoom_window()))
-            }),
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .mr_1()
+                .when(client, |d| {
+                    d.child(dot("dot-close", dot_close(), cx, |w| w.remove_window()))
+                        .child(dot("dot-min", dot_min(), cx, |w| w.minimize_window()))
+                        .child(dot("dot-max", dot_max(), cx, |w| w.zoom_window()))
+                }),
         )
-        .child(hbtn("h-sidebar", "sidebar", true, !h.sidebar_collapsed, cx, |this, _w, cx| {
-            let v = !this.sidebar_collapsed;
-            this.sidebar_collapsed = v;
-            this.update_settings(cx, |s| s.sidebar_collapsed = v);
-        }))
+        .child(hbtn(
+            "h-sidebar",
+            "sidebar",
+            true,
+            !h.sidebar_collapsed,
+            cx,
+            |this, _w, cx| {
+                let v = !this.sidebar_collapsed;
+                this.sidebar_collapsed = v;
+                this.update_settings(cx, |s| s.sidebar_collapsed = v);
+            },
+        ))
         // back / forward
         .child(
             div()
                 .flex()
                 .rounded(px(9.))
                 .bg(panel())
-                .child(hbtn("h-back", "back", h.can_back, false, cx, |this, _w, cx| this.go_back(cx)))
-                .child(hbtn("h-fwd", "forward", h.can_forward, false, cx, |this, _w, cx| this.go_forward(cx))),
+                .child(hbtn(
+                    "h-back",
+                    "back",
+                    h.can_back,
+                    false,
+                    cx,
+                    |this, _w, cx| this.go_back(cx),
+                ))
+                .child(hbtn(
+                    "h-fwd",
+                    "forward",
+                    h.can_forward,
+                    false,
+                    cx,
+                    |this, _w, cx| this.go_forward(cx),
+                )),
         )
         .child(centre)
-        .child(hbtn("h-search", "search", h.searchable, h.search_open, cx, |this, w, cx| {
-            this.toggle_search(w, cx)
-        }))
+        .child(hbtn(
+            "h-search",
+            "search",
+            h.searchable,
+            h.search_open,
+            cx,
+            |this, w, cx| this.toggle_search(w, cx),
+        ))
         .child(
             div()
                 .flex()
                 .rounded(px(9.))
                 .bg(panel())
-                .child(hbtn("h-grid", "grid", h.on_connections, h.on_connections && h.grid_view, cx, |this, _w, cx| {
-                    this.grid_view = true;
-                    this.update_settings(cx, |s| s.grid_view = true);
-                }))
-                .child(hbtn("h-list", "list", h.on_connections, h.on_connections && !h.grid_view, cx, |this, _w, cx| {
-                    this.grid_view = false;
-                    this.update_settings(cx, |s| s.grid_view = false);
-                })),
+                .child(hbtn(
+                    "h-grid",
+                    "grid",
+                    h.on_connections,
+                    h.on_connections && h.grid_view,
+                    cx,
+                    |this, _w, cx| {
+                        this.grid_view = true;
+                        this.update_settings(cx, |s| s.grid_view = true);
+                    },
+                ))
+                .child(hbtn(
+                    "h-list",
+                    "list",
+                    h.on_connections,
+                    h.on_connections && !h.grid_view,
+                    cx,
+                    |this, _w, cx| {
+                        this.grid_view = false;
+                        this.update_settings(cx, |s| s.grid_view = false);
+                    },
+                )),
         )
-        .child(hbtn("h-menu", "menu", true, h.menu_open, cx, |this, _w, cx| {
-            this.menu_open = !this.menu_open;
-            cx.notify();
-        }))
+        .child(hbtn(
+            "h-menu",
+            "menu",
+            true,
+            h.menu_open,
+            cx,
+            |this, _w, cx| {
+                this.menu_open = !this.menu_open;
+                cx.notify();
+            },
+        ))
 }
 
 // ============================================================================
 // Sidebar (collapsible)
 // ============================================================================
 
-fn sidebar_view(active: Screen, collapsed: bool, logs_open: bool, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
+fn sidebar_view(
+    active: Screen,
+    collapsed: bool,
+    logs_open: bool,
+    cx: &mut Context<NexDeskApp>,
+) -> impl IntoElement {
     let in_logs = matches!(active, Screen::Logs(_));
     let sub = |icon: &'static str, kind: LogKind, cx: &mut Context<NexDeskApp>| {
-        sidebar_button(icon, kind.label(), collapsed, active == Screen::Logs(kind), Screen::Logs(kind), !collapsed, cx)
+        sidebar_button(
+            icon,
+            kind.label(),
+            collapsed,
+            active == Screen::Logs(kind),
+            Screen::Logs(kind),
+            !collapsed,
+            cx,
+        )
     };
     div()
         .id("sidebar")
@@ -1757,11 +2027,51 @@ fn sidebar_view(active: Screen, collapsed: bool, logs_open: bool, cx: &mut Conte
         .flex_col()
         .gap_1()
         .overflow_y_scroll()
-        .child(sidebar_button("connections", "Connections", collapsed, active == Screen::Connections, Screen::Connections, false, cx))
-        .child(sidebar_button("devices", "Devices", collapsed, active == Screen::Devices, Screen::Devices, false, cx))
-        .child(sidebar_button("zap", "Remote Control", collapsed, active == Screen::Remote, Screen::Remote, false, cx))
-        .child(sidebar_button("book", "Address Books", collapsed, active == Screen::AddressBooks, Screen::AddressBooks, false, cx))
-        .child(sidebar_button("sessions", "Sessions", collapsed, active == Screen::Sessions, Screen::Sessions, false, cx))
+        .child(sidebar_button(
+            "connections",
+            "Connections",
+            collapsed,
+            active == Screen::Connections,
+            Screen::Connections,
+            false,
+            cx,
+        ))
+        .child(sidebar_button(
+            "devices",
+            "Devices",
+            collapsed,
+            active == Screen::Devices,
+            Screen::Devices,
+            false,
+            cx,
+        ))
+        .child(sidebar_button(
+            "zap",
+            "Remote Control",
+            collapsed,
+            active == Screen::Remote,
+            Screen::Remote,
+            false,
+            cx,
+        ))
+        .child(sidebar_button(
+            "book",
+            "Address Books",
+            collapsed,
+            active == Screen::AddressBooks,
+            Screen::AddressBooks,
+            false,
+            cx,
+        ))
+        .child(sidebar_button(
+            "sessions",
+            "Sessions",
+            collapsed,
+            active == Screen::Sessions,
+            Screen::Sessions,
+            false,
+            cx,
+        ))
         .child(div().h(px(1.)).my_2().mx_2().bg(border()))
         // Logs group: header expands/collapses the four sub-pages (icons only when the sidebar is collapsed)
         .when(!collapsed, |d| {
@@ -1782,9 +2092,27 @@ fn sidebar_view(active: Screen, collapsed: bool, logs_open: bool, cx: &mut Conte
                         this.logs_open = !this.logs_open;
                         cx.notify();
                     }))
-                    .child(div().w(px(22.)).flex().justify_center().child(ico("logs", 18., if in_logs { accent_hover() } else { icon() })))
-                    .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child("Logs"))
-                    .child(ico(if logs_open { "chevron-down" } else { "chevron-right" }, 14., dim())),
+                    .child(div().w(px(22.)).flex().justify_center().child(ico(
+                        "logs",
+                        18.,
+                        if in_logs { accent_hover() } else { icon() },
+                    )))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Logs"),
+                    )
+                    .child(ico(
+                        if logs_open {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        14.,
+                        dim(),
+                    )),
             )
         })
         .when(collapsed || logs_open || in_logs, |d| {
@@ -1794,7 +2122,15 @@ fn sidebar_view(active: Screen, collapsed: bool, logs_open: bool, cx: &mut Conte
                 .child(sub("log-console", LogKind::Console, cx))
         })
         .child(div().h(px(1.)).my_2().mx_2().bg(border()))
-        .child(sidebar_button("settings", "Settings", collapsed, active == Screen::Settings, Screen::Settings, false, cx))
+        .child(sidebar_button(
+            "settings",
+            "Settings",
+            collapsed,
+            active == Screen::Settings,
+            Screen::Settings,
+            false,
+            cx,
+        ))
 }
 
 fn sidebar_button(
@@ -1822,10 +2158,17 @@ fn sidebar_button(
         .cursor_pointer()
         .when(!active, |d| d.hover(|s| s.bg(row_hover())))
         .on_click(cx.listener(move |this, _event, _window, cx| this.navigate(screen, cx)))
-        .child(div().w(px(22.)).flex().justify_center().child(ico(icon, 18., if active { accent_hover() } else { crate::theme::icon() })))
+        .child(div().w(px(22.)).flex().justify_center().child(ico(
+            icon,
+            18.,
+            if active {
+                accent_hover()
+            } else {
+                crate::theme::icon()
+            },
+        )))
         .when(!collapsed, |d| d.child(div().text_sm().child(label)))
 }
-
 
 // ============================================================================
 // Remote Control
@@ -1843,7 +2186,9 @@ fn field(input: Entity<TextInput>, cx: &mut Context<NexDeskApp>) -> impl IntoEle
         .flex()
         .items_center()
         .cursor(CursorStyle::IBeam)
-        .on_mouse_down(MouseButton::Left, move |_e, window, cx| window.focus(&handle, cx))
+        .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+            window.focus(&handle, cx)
+        })
         .child(div().w_full().child(input))
 }
 
@@ -1865,7 +2210,17 @@ fn remote_view(
     chat_input: Entity<TextInput>,
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
-    let card = || div().flex_1().min_w(px(300.)).p_5().rounded(px(12.)).bg(panel()).flex().flex_col().gap_3();
+    let card = || {
+        div()
+            .flex_1()
+            .min_w(px(300.))
+            .p_5()
+            .rounded(px(12.))
+            .bg(panel())
+            .flex()
+            .flex_col()
+            .gap_3()
+    };
     let title = |t: &'static str| div().text_base().font_weight(FontWeight::SEMIBOLD).child(t);
     let hint = |t: String| div().text_xs().text_color(muted()).child(t);
     let has_relay = !relay_input.read(cx).value().trim().is_empty();
@@ -1875,51 +2230,74 @@ fn remote_view(
     mine = match (&agent_id, sharing) {
         (Some(id), _) => {
             let spaced = format!("{} {} {}", &id[0..3], &id[3..6], &id[6..9]);
-            mine.child(hint("Your ID - tell it to the person who will connect".into()))
-                .child(div().text_3xl().font_weight(FontWeight::SEMIBOLD).child(spaced))
-                .child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(toolbar_button_dyn(
-                            "id-copy".into(),
-                            "Copy ID",
-                            true,
-                            cx.listener(|this, _e, _w, cx| {
-                                this.copy_id(cx);
-                                cx.notify();
-                            }),
-                        ))
-                        .child(toolbar_button_dyn(
-                            "id-new".into(),
-                            "New ID",
-                            true,
-                            cx.listener(|this, _e, _w, cx| {
-                                this.new_id(cx);
-                                cx.notify();
-                            }),
-                        )),
-                )
+            mine.child(hint(
+                "Your ID - tell it to the person who will connect".into(),
+            ))
+            .child(
+                div()
+                    .text_3xl()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(spaced),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(toolbar_button_dyn(
+                        "id-copy".into(),
+                        "Copy ID",
+                        true,
+                        cx.listener(|this, _e, _w, cx| {
+                            this.copy_id(cx);
+                            cx.notify();
+                        }),
+                    ))
+                    .child(toolbar_button_dyn(
+                        "id-new".into(),
+                        "New ID",
+                        true,
+                        cx.listener(|this, _e, _w, cx| {
+                            this.new_id(cx);
+                            cx.notify();
+                        }),
+                    )),
+            )
         }
         (None, true) => mine
             .child(hint("Sharing is on".into()))
-            .child(div().text_sm().child(if has_relay { "Getting your ID..." } else { "No ID yet: add a relay server under Settings below, then turn sharing off and on." })),
+            .child(div().text_sm().child(if has_relay {
+                "Getting your ID..."
+            } else {
+                "No ID yet: add a relay server under Settings below, then turn sharing off and on."
+            })),
         (None, false) => mine
             .child(hint("Sharing is off. Turn it on to get an ID.".into()))
-            .child(div().text_3xl().font_weight(FontWeight::SEMIBOLD).text_color(muted()).child("--- --- ---")),
+            .child(
+                div()
+                    .text_3xl()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(muted())
+                    .child("--- --- ---"),
+            ),
     };
     if sharing && !relay_status.is_empty() {
         mine = mine.child(hint(format!("Server: {relay_status}")));
     }
     if sharing {
         if let Some(fp) = fingerprint {
-            mine = mine.child(hint(format!("Fingerprint (the other person checks it once): {fp}")));
+            mine = mine.child(hint(format!(
+                "Fingerprint (the other person checks it once): {fp}"
+            )));
         }
     }
     mine = mine
         .child(div().flex().child(toolbar_button_dyn(
             "share-toggle".into(),
-            if sharing { "Turn sharing off" } else { "Turn sharing on" },
+            if sharing {
+                "Turn sharing off"
+            } else {
+                "Turn sharing on"
+            },
             true,
             cx.listener(|this, _e, _w, cx| {
                 this.toggle_agent(cx);
@@ -1942,18 +2320,26 @@ fn remote_view(
                 cx.notify();
             }),
         )))
-        .when(open_windows > 0, |d| d.child(hint(format!("{open_windows} remote window(s) open"))))
-        .child(hint("The first time, you compare a fingerprint to be sure it is the right computer.".into()));
+        .when(open_windows > 0, |d| {
+            d.child(hint(format!("{open_windows} remote window(s) open")))
+        })
+        .child(hint(
+            "The first time, you compare a fingerprint to be sure it is the right computer.".into(),
+        ));
 
     // Chat with whoever is connected to this computer (only while sharing)
     let chat_card = sharing.then(|| {
         let mut lines = div().flex().flex_col().gap_1().min_h(px(60.));
         if chat.is_empty() {
-            lines = lines.child(hint("Messages between you and the person connected appear here.".into()));
+            lines = lines.child(hint(
+                "Messages between you and the person connected appear here.".into(),
+            ));
         }
         for (mine, t) in chat.iter().rev().take(12).rev() {
             lines = lines.child(
-                div().text_sm().child(format!("{} {t}", if *mine { "You:" } else { "Them:" })),
+                div()
+                    .text_sm()
+                    .child(format!("{} {t}", if *mine { "You:" } else { "Them:" })),
             );
         }
         div()
@@ -1981,21 +2367,36 @@ fn remote_view(
                         }),
                     )),
             )
-            .child(hint("Files sent to you are saved in Downloads/NexDesk after you accept them.".into()))
+            .child(hint(
+                "Files sent to you are saved in Downloads/NexDesk after you accept them.".into(),
+            ))
     });
 
     // Bottom: settings, hidden by default
-    let mut options = div().w_full().p_4().rounded(px(12.)).bg(panel()).flex().flex_col().gap_3().child(
-        div().flex().items_center().justify_between().child(title("Settings")).child(toolbar_button_dyn(
-            "remote-adv".into(),
-            if advanced { "Hide" } else { "Show" },
-            true,
-            cx.listener(|this, _e, _w, cx| {
-                this.remote_adv = !this.remote_adv;
-                cx.notify();
-            }),
-        )),
-    );
+    let mut options = div()
+        .w_full()
+        .p_4()
+        .rounded(px(12.))
+        .bg(panel())
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(title("Settings"))
+                .child(toolbar_button_dyn(
+                    "remote-adv".into(),
+                    if advanced { "Hide" } else { "Show" },
+                    true,
+                    cx.listener(|this, _e, _w, cx| {
+                        this.remote_adv = !this.remote_adv;
+                        cx.notify();
+                    }),
+                )),
+        );
     if advanced {
         options = options
             .child(hint("Relay server: lets people reach you by ID over the internet. Leave empty to use only your local network. Set it before turning sharing on.".into()))
@@ -2030,8 +2431,18 @@ fn remote_view(
         .flex()
         .flex_col()
         .gap_3()
-        .child(div().w_full().flex().flex_wrap().gap_3().child(mine).child(theirs))
-        .when(!msg.is_empty(), |d| d.child(div().text_sm().child(msg.to_string())))
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .gap_3()
+                .child(mine)
+                .child(theirs),
+        )
+        .when(!msg.is_empty(), |d| {
+            d.child(div().text_sm().child(msg.to_string()))
+        })
         .children(chat_card)
         .child(options)
 }
@@ -2069,7 +2480,12 @@ fn remote_dialog(
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(title))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
+                )
                 .child(body)
                 .child(
                     div()
@@ -2096,7 +2512,11 @@ fn connection_view(
     cx: &mut Context<NexDeskApp>,
 ) -> impl IntoElement {
     let mut grid = div().flex().gap_3();
-    grid = if grid_view { grid.flex_wrap() } else { grid.flex_col().gap_1() };
+    grid = if grid_view {
+        grid.flex_wrap()
+    } else {
+        grid.flex_col().gap_1()
+    };
 
     let total = profiles.len();
     let mut shown = 0;
@@ -2219,10 +2639,36 @@ fn connection_view(
                             .overflow_hidden()
                             .child(profile.name.clone()),
                     )
-                    .child(div().w(px(220.)).text_sm().text_color(muted()).overflow_hidden().child(profile.host.clone()))
-                    .child(div().w(px(120.)).text_sm().text_color(muted()).overflow_hidden().child(profile.user.clone()))
-                    .child(div().w(px(100.)).text_xs().text_color(muted()).child(format!("{}×{}", profile.width, profile.height)))
-                    .child(div().w(px(90.)).text_xs().text_color(muted()).child(profile.speed.label())),
+                    .child(
+                        div()
+                            .w(px(220.))
+                            .text_sm()
+                            .text_color(muted())
+                            .overflow_hidden()
+                            .child(profile.host.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(120.))
+                            .text_sm()
+                            .text_color(muted())
+                            .overflow_hidden()
+                            .child(profile.user.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(100.))
+                            .text_xs()
+                            .text_color(muted())
+                            .child(format!("{}×{}", profile.width, profile.height)),
+                    )
+                    .child(
+                        div()
+                            .w(px(90.))
+                            .text_xs()
+                            .text_color(muted())
+                            .child(profile.speed.label()),
+                    ),
             );
         }
     }
@@ -2247,7 +2693,11 @@ fn connection_view(
 
     let has_selection = selected_profile.is_some();
     let confirming = pending_delete.is_some() && pending_delete == selected_profile;
-    let delete_label = if confirming { "Confirm delete" } else { "Delete" };
+    let delete_label = if confirming {
+        "Confirm delete"
+    } else {
+        "Delete"
+    };
 
     div()
         .flex()
@@ -2259,18 +2709,47 @@ fn connection_view(
                 .items_center()
                 .gap_2()
                 .child(action_button("Connect", has_selection, cx))
-                .child(toolbar_button("New", true, false, NexDeskApp::open_editor_new, cx))
-                .child(toolbar_button("Edit", has_selection, false, NexDeskApp::open_editor_edit, cx))
-                .child(toolbar_button("Duplicate", has_selection, false, NexDeskApp::duplicate_selected, cx))
-                .when(has_saved_pw, |d| d.child(toolbar_button("Forget password", true, false, |this, _w, cx| this.forget_saved_password(cx), cx)))
-                .child(toolbar_button(delete_label, has_selection, confirming, NexDeskApp::delete_selected, cx)),
+                .child(toolbar_button(
+                    "New",
+                    true,
+                    false,
+                    NexDeskApp::open_editor_new,
+                    cx,
+                ))
+                .child(toolbar_button(
+                    "Edit",
+                    has_selection,
+                    false,
+                    NexDeskApp::open_editor_edit,
+                    cx,
+                ))
+                .child(toolbar_button(
+                    "Duplicate",
+                    has_selection,
+                    false,
+                    NexDeskApp::duplicate_selected,
+                    cx,
+                ))
+                .when(has_saved_pw, |d| {
+                    d.child(toolbar_button(
+                        "Forget password",
+                        true,
+                        false,
+                        |this, _w, cx| this.forget_saved_password(cx),
+                        cx,
+                    ))
+                })
+                .child(toolbar_button(
+                    delete_label,
+                    has_selection,
+                    confirming,
+                    NexDeskApp::delete_selected,
+                    cx,
+                )),
         )
-        .child(
-            div()
-                .text_sm()
-                .text_color(muted())
-                .child("Double-click a connection to open it. Passwords are never stored in .rdp files."),
-        )
+        .child(div().text_sm().text_color(muted()).child(
+            "Double-click a connection to open it. Passwords are never stored in .rdp files.",
+        ))
         .child(grid)
 }
 
@@ -2303,12 +2782,18 @@ fn devices_view(
             continue;
         }
         seen.push(host_lc.clone());
-        if !filter.is_empty() && ![&p.name, &p.host, &p.user].iter().any(|f| f.to_lowercase().contains(filter)) {
+        if !filter.is_empty()
+            && ![&p.name, &p.host, &p.user]
+                .iter()
+                .any(|f| f.to_lowercase().contains(filter))
+        {
             continue;
         }
         shown += 1;
         let (name, port) = match p.host.trim().rsplit_once(':') {
-            Some((h, port)) if port.parse::<u16>().is_ok() => (h.to_string(), port.parse::<u16>().unwrap_or(3389)),
+            Some((h, port)) if port.parse::<u16>().is_ok() => {
+                (h.to_string(), port.parse::<u16>().unwrap_or(3389))
+            }
             _ => (p.host.trim().to_string(), 3389),
         };
         let key = nexdesk_core::knownhosts::host_key(&name, port);
@@ -2396,7 +2881,9 @@ fn devices_view(
         );
     }
     if shown == 0 {
-        list = list.child(empty_card("No devices yet. Computers appear here once you save a connection."));
+        list = list.child(empty_card(
+            "No devices yet. Computers appear here once you save a connection.",
+        ));
     }
     div()
         .w_full()
@@ -2404,7 +2891,11 @@ fn devices_view(
         .flex_col()
         .gap_3()
         .child(nearby_card(scan, profiles, cx))
-        .child(div().text_sm().text_color(muted()).child("Computers you have connections to, with last activity and certificate status."))
+        .child(
+            div().text_sm().text_color(muted()).child(
+                "Computers you have connections to, with last activity and certificate status.",
+            ),
+        )
         .child(list)
 }
 
@@ -2416,13 +2907,19 @@ fn nearby_card(
 ) -> impl IntoElement {
     let running = scan.map(|s| !s.is_done()).unwrap_or(false);
     let status = match scan {
-        None => "Look for computers on your network that accept Remote Desktop connections (port 3389).".to_string(),
+        None => {
+            "Look for computers on your network that accept Remote Desktop connections (port 3389)."
+                .to_string()
+        }
         Some(s) if running => {
             let (a, b) = s.progress();
             format!("Scanning your network... {a}/{b}")
         }
         Some(s) if s.total == 0 => "No network connection found.".to_string(),
-        Some(s) => format!("Scan finished: {} computer(s) with Remote Desktop found.", s.results().len()),
+        Some(s) => format!(
+            "Scan finished: {} computer(s) with Remote Desktop found.",
+            s.results().len()
+        ),
     };
     let mut card = div()
         .w_full()
@@ -2442,16 +2939,31 @@ fn nearby_card(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Nearby computers"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Nearby computers"),
+                        )
                         .child(div().text_xs().text_color(muted()).child(status)),
                 )
                 .child(toolbar_button_dyn(
                     "scan-network".into(),
-                    if running { "Scanning..." } else if scan.is_some() { "Scan again" } else { "Scan network" },
+                    if running {
+                        "Scanning..."
+                    } else if scan.is_some() {
+                        "Scan again"
+                    } else {
+                        "Scan network"
+                    },
                     !running,
                     cx.listener(|this, _e, _w, cx| {
                         this.scan = Some(nexdesk_core::discover::Scan::start());
-                        nexdesk_core::logs::console(LogLevel::Info, "discover", "network scan started (TCP 3389, local subnet)");
+                        nexdesk_core::logs::console(
+                            LogLevel::Info,
+                            "discover",
+                            "network scan started (TCP 3389, local subnet)",
+                        );
                         cx.notify();
                     }),
                 )),
@@ -2461,7 +2973,12 @@ fn nearby_card(
             let ip = f.ip.to_string();
             let saved = profiles.iter().position(|p| {
                 let h = p.host.trim();
-                h == ip || h.strip_suffix(":3389") == Some(ip.as_str()) || f.name.as_deref().map(|n| n.eq_ignore_ascii_case(h)).unwrap_or(false)
+                h == ip
+                    || h.strip_suffix(":3389") == Some(ip.as_str())
+                    || f.name
+                        .as_deref()
+                        .map(|n| n.eq_ignore_ascii_case(h))
+                        .unwrap_or(false)
             });
             let title = f.name.clone().unwrap_or_else(|| ip.clone());
             let sub = match (&f.name, f.is_self) {
@@ -2506,7 +3023,9 @@ fn nearby_card(
                             format!("nearby-add-{i}"),
                             "Add connection",
                             true,
-                            cx.listener(move |this, _e, window, cx| this.add_discovered(host.clone(), window, cx)),
+                            cx.listener(move |this, _e, window, cx| {
+                                this.add_discovered(host.clone(), window, cx)
+                            }),
                         )
                         .into_any_element(),
                     }),
@@ -2522,7 +3041,15 @@ fn nearby_card(
 }
 
 fn empty_card(msg: &'static str) -> impl IntoElement {
-    div().w_full().p_8().rounded(px(12.)).bg(panel()).text_color(muted()).flex().justify_center().child(msg)
+    div()
+        .w_full()
+        .p_8()
+        .rounded(px(12.))
+        .bg(panel())
+        .text_color(muted())
+        .flex()
+        .justify_center()
+        .child(msg)
 }
 
 /// Small pill button with a runtime id and an arbitrary click handler.
@@ -2543,7 +3070,11 @@ fn toolbar_button_dyn(
         .text_sm()
         .bg(panel_2())
         .text_color(if enabled { text() } else { muted() })
-        .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(hover())).on_click(on_click))
+        .when(enabled, |d| {
+            d.cursor_pointer()
+                .hover(|s| s.bg(hover()))
+                .on_click(on_click)
+        })
         .child(label)
 }
 
@@ -2578,11 +3109,22 @@ fn books_view(
                     cx.notify();
                 }))
                 .child(div().text_sm().overflow_hidden().child(b.name.clone()))
-                .child(div().text_xs().text_color(muted()).child(b.members.len().to_string())),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted())
+                        .child(b.members.len().to_string()),
+                ),
         );
     }
     if books.books.is_empty() {
-        left = left.child(div().text_sm().text_color(muted()).p_2().child("No address books yet."));
+        left = left.child(
+            div()
+                .text_sm()
+                .text_color(muted())
+                .p_2()
+                .child("No address books yet."),
+        );
     }
     left = left.child(
         div()
@@ -2599,7 +3141,11 @@ fn books_view(
                     let name = this.book_input.read(cx).value().to_string();
                     match this.books.create(&name) {
                         Ok(()) => {
-                            this.book_sel = this.books.books.iter().position(|b| b.name.eq_ignore_ascii_case(name.trim()));
+                            this.book_sel = this
+                                .books
+                                .books
+                                .iter()
+                                .position(|b| b.name.eq_ignore_ascii_case(name.trim()));
                             this.book_input.update(cx, |i, cx| i.set_value("", cx));
                             this.state.status = format!("Created address book \"{}\"", name.trim());
                         }
@@ -2623,7 +3169,12 @@ fn books_view(
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().text_lg().font_weight(FontWeight::BOLD).child(book_name.clone()))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::BOLD)
+                            .child(book_name.clone()),
+                    )
                     .child(toolbar_button_dyn(
                         "book-delete".into(),
                         "Delete book",
@@ -2638,7 +3189,9 @@ fn books_view(
             let mut rows = div().flex().flex_col().gap_1();
             let mut any = false;
             for m in &book.members {
-                let Some(pi) = profiles.iter().position(|p| &p.name == m) else { continue };
+                let Some(pi) = profiles.iter().position(|p| &p.name == m) else {
+                    continue;
+                };
                 any = true;
                 let p = &profiles[pi];
                 let (b1, m1) = (book_name.clone(), m.clone());
@@ -2651,8 +3204,20 @@ fn books_view(
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(p.name.clone()))
-                        .child(div().w(px(220.)).text_xs().text_color(muted()).child(format!("{} · {}", p.host, p.user)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(p.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .w(px(220.))
+                                .text_xs()
+                                .text_color(muted())
+                                .child(format!("{} · {}", p.host, p.user)),
+                        )
                         .child(toolbar_button_dyn(
                             format!("bk-connect-{bi}-{pi}"),
                             "Connect",
@@ -2709,7 +3274,13 @@ fn books_view(
             }
             if addable > 0 {
                 right = right
-                    .child(div().mt_2().text_sm().text_color(muted()).child("Add a connection"))
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_sm()
+                            .text_color(muted())
+                            .child("Add a connection"),
+                    )
                     .child(chips);
             }
         }
@@ -2755,7 +3326,14 @@ fn logs_view(
         }
     };
 
-    let mut head = div().h(px(30.)).px_3().flex().items_center().text_xs().text_color(muted()).font_weight(FontWeight::SEMIBOLD);
+    let mut head = div()
+        .h(px(30.))
+        .px_3()
+        .flex()
+        .items_center()
+        .text_xs()
+        .text_color(muted())
+        .font_weight(FontWeight::SEMIBOLD);
     head = head.child(div().w(px(150.)).flex_none().px_1().child("Time"));
     for (i, c) in cols.iter().enumerate() {
         let d = div().px_1().overflow_hidden();
@@ -2765,7 +3343,12 @@ fn logs_view(
         });
     }
 
-    let mut body = div().flex().flex_col().rounded(px(12.)).bg(panel()).overflow_hidden();
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .rounded(px(12.))
+        .bg(panel())
+        .overflow_hidden();
     body = body.child(head).child(div().h(px(1.)).bg(border()));
     let mut shown = 0;
     for e in entries {
@@ -2848,7 +3431,13 @@ fn logs_view(
 }
 
 fn cell_time(t: String) -> impl IntoElement {
-    div().w(px(150.)).flex_none().px_1().text_xs().text_color(muted()).child(t)
+    div()
+        .w(px(150.))
+        .flex_none()
+        .px_1()
+        .text_xs()
+        .text_color(muted())
+        .child(t)
 }
 
 // ============================================================================
@@ -2942,7 +3531,12 @@ fn session_view(
 // Settings
 // ============================================================================
 
-fn switch(id: &'static str, on: bool, cx: &mut Context<NexDeskApp>, f: fn(&mut Settings, bool)) -> impl IntoElement {
+fn switch(
+    id: &'static str,
+    on: bool,
+    cx: &mut Context<NexDeskApp>,
+    f: fn(&mut Settings, bool),
+) -> impl IntoElement {
     div()
         .id(id)
         .flex_none()
@@ -2958,7 +3552,13 @@ fn switch(id: &'static str, on: bool, cx: &mut Context<NexDeskApp>, f: fn(&mut S
         .child(div().size(px(20.)).rounded_full().bg(gpui::rgb(0xffffff)))
 }
 
-fn seg_btn(id: String, label: &'static str, on: bool, cx: &mut Context<NexDeskApp>, f: impl Fn(&mut Settings) + 'static) -> impl IntoElement {
+fn seg_btn(
+    id: String,
+    label: &'static str,
+    on: bool,
+    cx: &mut Context<NexDeskApp>,
+    f: impl Fn(&mut Settings) + 'static,
+) -> impl IntoElement {
     div()
         .id(SharedString::from(id))
         .px_3()
@@ -2975,7 +3575,11 @@ fn seg_btn(id: String, label: &'static str, on: bool, cx: &mut Context<NexDeskAp
         .child(label)
 }
 
-fn pref_row(title: &'static str, desc: &'static str, control: impl IntoElement) -> impl IntoElement {
+fn pref_row(
+    title: &'static str,
+    desc: &'static str,
+    control: impl IntoElement,
+) -> impl IntoElement {
     div()
         .w_full()
         .min_h(px(60.))
@@ -2995,7 +3599,13 @@ fn pref_row(title: &'static str, desc: &'static str, control: impl IntoElement) 
 }
 
 fn pref_group(title: &'static str, rows: Vec<gpui::AnyElement>) -> impl IntoElement {
-    let mut card = div().w_full().rounded(px(12.)).bg(panel()).overflow_hidden().flex().flex_col();
+    let mut card = div()
+        .w_full()
+        .rounded(px(12.))
+        .bg(panel())
+        .overflow_hidden()
+        .flex()
+        .flex_col();
     let n = rows.len();
     for (i, r) in rows.into_iter().enumerate() {
         card = card.child(r);
@@ -3008,19 +3618,47 @@ fn pref_group(title: &'static str, rows: Vec<gpui::AnyElement>) -> impl IntoElem
         .flex()
         .flex_col()
         .gap_2()
-        .child(div().px_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(muted()).child(title))
+        .child(
+            div()
+                .px_1()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(muted())
+                .child(title),
+        )
         .child(card)
 }
 
 fn settings_view(p: &Settings, vs: VaultStatus, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
     let theme_ctl = div().flex().gap_1().children(Theme::ALL.map(|t| {
-        seg_btn(format!("pref-theme-{}", t.label()), t.label(), p.theme == t, cx, move |s| s.theme = t).into_any_element()
+        seg_btn(
+            format!("pref-theme-{}", t.label()),
+            t.label(),
+            p.theme == t,
+            cx,
+            move |s| s.theme = t,
+        )
+        .into_any_element()
     }));
     let speed_ctl = div().flex().gap_1().children(Speed::ALL.map(|v| {
-        seg_btn(format!("pref-speed-{}", v.label()), v.label(), p.default_speed == v, cx, move |s| s.default_speed = v).into_any_element()
+        seg_btn(
+            format!("pref-speed-{}", v.label()),
+            v.label(),
+            p.default_speed == v,
+            cx,
+            move |s| s.default_speed = v,
+        )
+        .into_any_element()
     }));
     let tls_ctl = div().flex().gap_1().children(TlsMode::ALL.map(|m| {
-        seg_btn(format!("pref-tls-{}", m.label()), m.label(), p.tls == m, cx, move |s| s.tls = m).into_any_element()
+        seg_btn(
+            format!("pref-tls-{}", m.label()),
+            m.label(),
+            p.tls == m,
+            cx,
+            move |s| s.tls = m,
+        )
+        .into_any_element()
     }));
 
     div()
@@ -3061,8 +3699,17 @@ fn settings_view(p: &Settings, vs: VaultStatus, cx: &mut Context<NexDeskApp>) ->
 }
 
 fn vault_rows(vs: VaultStatus, cx: &mut Context<NexDeskApp>) -> Vec<gpui::AnyElement> {
-    let btn = |id: &str, label: &'static str, cx: &mut Context<NexDeskApp>, f: fn(&mut NexDeskApp, &mut Window, &mut Context<NexDeskApp>)| {
-        toolbar_button_dyn(id.to_string(), label, true, cx.listener(move |this, _e, w, cx| f(this, w, cx))).into_any_element()
+    let btn = |id: &str,
+               label: &'static str,
+               cx: &mut Context<NexDeskApp>,
+               f: fn(&mut NexDeskApp, &mut Window, &mut Context<NexDeskApp>)| {
+        toolbar_button_dyn(
+            id.to_string(),
+            label,
+            true,
+            cx.listener(move |this, _e, w, cx| f(this, w, cx)),
+        )
+        .into_any_element()
     };
     let mut rows: Vec<gpui::AnyElement> = Vec::new();
     if !vs.exists {
@@ -3082,8 +3729,15 @@ fn vault_rows(vs: VaultStatus, cx: &mut Context<NexDeskApp>) -> Vec<gpui::AnyEle
                 div()
                     .flex()
                     .gap_2()
-                    .child(btn("vault-unlock", "Unlock", cx, |this, w, cx| this.open_vault_dialog(VaultDlg::Unlock, w, cx)))
-                    .child(btn("vault-recover", "Use recovery key", cx, |this, w, cx| this.open_vault_dialog(VaultDlg::UseRecovery, w, cx))),
+                    .child(btn("vault-unlock", "Unlock", cx, |this, w, cx| {
+                        this.open_vault_dialog(VaultDlg::Unlock, w, cx)
+                    }))
+                    .child(btn(
+                        "vault-recover",
+                        "Use recovery key",
+                        cx,
+                        |this, w, cx| this.open_vault_dialog(VaultDlg::UseRecovery, w, cx),
+                    )),
             )
             .into_any_element(),
         );
@@ -3091,11 +3745,17 @@ fn vault_rows(vs: VaultStatus, cx: &mut Context<NexDeskApp>) -> Vec<gpui::AnyEle
         rows.push(
             pref_row(
                 "Vault is unlocked",
-                if vs.count == 1 { "1 saved password. Connections with a saved password connect without asking." } else { "Connections with a saved password connect without asking." },
+                if vs.count == 1 {
+                    "1 saved password. Connections with a saved password connect without asking."
+                } else {
+                    "Connections with a saved password connect without asking."
+                },
                 div()
                     .flex()
                     .gap_2()
-                    .child(btn("vault-lock", "Lock now", cx, |this, _w, cx| this.lock_vault(cx))),
+                    .child(btn("vault-lock", "Lock now", cx, |this, _w, cx| {
+                        this.lock_vault(cx)
+                    })),
             )
             .into_any_element(),
         );
@@ -3103,7 +3763,9 @@ fn vault_rows(vs: VaultStatus, cx: &mut Context<NexDeskApp>) -> Vec<gpui::AnyEle
             pref_row(
                 "Master password",
                 "Your recovery key keeps working after you change it.",
-                btn("vault-change", "Change…", cx, |this, w, cx| this.open_vault_dialog(VaultDlg::ChangeMaster, w, cx)),
+                btn("vault-change", "Change…", cx, |this, w, cx| {
+                    this.open_vault_dialog(VaultDlg::ChangeMaster, w, cx)
+                }),
             )
             .into_any_element(),
         );
@@ -3113,7 +3775,11 @@ fn vault_rows(vs: VaultStatus, cx: &mut Context<NexDeskApp>) -> Vec<gpui::AnyEle
                 "Remove every password from the vault (the vault itself stays).",
                 btn(
                     "vault-wipe",
-                    if vs.confirm_wipe { "Click again to confirm" } else { "Delete all" },
+                    if vs.confirm_wipe {
+                        "Click again to confirm"
+                    } else {
+                        "Delete all"
+                    },
                     cx,
                     |this, _w, cx| this.wipe_vault_passwords(cx),
                 ),
@@ -3134,7 +3800,14 @@ fn vault_dialog_view(
 ) -> impl IntoElement {
     let [pw1, pw2, rec] = inputs;
     let field = |input: Entity<TextInput>| {
-        div().p_3().rounded(px(8.)).bg(input_bg()).border_1().border_color(border()).line_height(px(24.)).child(input)
+        div()
+            .p_3()
+            .rounded(px(8.))
+            .bg(input_bg())
+            .border_1()
+            .border_color(border())
+            .line_height(px(24.))
+            .child(input)
     };
     let (title, blurb): (&str, &str) = match kind {
         VaultDlg::Setup => ("Set up the password vault", "Choose a master password (at least 8 characters). Saved connection passwords are encrypted with it. NexDesk cannot recover it for you; you will get a recovery key next."),
@@ -3221,22 +3894,24 @@ fn vault_dialog_view(
                 ))
                 .child(div().text_sm().text_color(muted()).child(blurb))
                 .child(body)
-                .when_some(error, |d, e| d.child(div().text_sm().text_color(danger()).child(e)))
+                .when_some(error, |d, e| {
+                    d.child(div().text_sm().text_color(danger()).child(e))
+                })
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(
-                            div().flex().gap_2().when(kind == VaultDlg::Unlock, |d| {
-                                d.child(toolbar_button_dyn(
-                                    "vault-use-recovery".into(),
-                                    "Use recovery key",
-                                    true,
-                                    cx.listener(|this, _e, w, cx| this.open_vault_dialog(VaultDlg::UseRecovery, w, cx)),
-                                ))
-                            }),
-                        )
+                        .child(div().flex().gap_2().when(kind == VaultDlg::Unlock, |d| {
+                            d.child(toolbar_button_dyn(
+                                "vault-use-recovery".into(),
+                                "Use recovery key",
+                                true,
+                                cx.listener(|this, _e, w, cx| {
+                                    this.open_vault_dialog(VaultDlg::UseRecovery, w, cx)
+                                }),
+                            ))
+                        }))
                         .child(
                             div()
                                 .flex()
@@ -3244,7 +3919,11 @@ fn vault_dialog_view(
                                 .when(kind != VaultDlg::ShowRecoveryKey, |d| {
                                     d.child(toolbar_button_dyn(
                                         "vault-cancel".into(),
-                                        if kind == VaultDlg::Unlock { "Skip" } else { "Cancel" },
+                                        if kind == VaultDlg::Unlock {
+                                            "Skip"
+                                        } else {
+                                            "Cancel"
+                                        },
                                         true,
                                         cx.listener(move |this, _e, w, cx| {
                                             if kind == VaultDlg::UseRecovery && vault_exists {
@@ -3269,7 +3948,9 @@ fn vault_dialog_view(
                                         .text_color(on_accent())
                                         .cursor_pointer()
                                         .hover(|s| s.bg(accent_hover()))
-                                        .on_click(cx.listener(|this, _e, w, cx| this.vault_submit(w, cx)))
+                                        .on_click(
+                                            cx.listener(|this, _e, w, cx| this.vault_submit(w, cx)),
+                                        )
                                         .child(primary),
                                 ),
                         ),
@@ -3279,7 +3960,13 @@ fn vault_dialog_view(
 
 // ---- header "⋯" menu and its dialogs
 
-fn menu_item(id: &'static str, label: &'static str, shortcut: &'static str, cx: &mut Context<NexDeskApp>, f: fn(&mut NexDeskApp, &mut Context<NexDeskApp>)) -> impl IntoElement {
+fn menu_item(
+    id: &'static str,
+    label: &'static str,
+    shortcut: &'static str,
+    cx: &mut Context<NexDeskApp>,
+    f: fn(&mut NexDeskApp, &mut Context<NexDeskApp>),
+) -> impl IntoElement {
     div()
         .id(id)
         .h(px(34.))
@@ -3324,10 +4011,20 @@ fn menu_popover(cx: &mut Context<NexDeskApp>) -> impl IntoElement {
                 .shadow_lg()
                 .flex()
                 .flex_col()
-                .child(menu_item("m-prefs", "Preferences", "", cx, |this, cx| this.navigate(Screen::Settings, cx)))
-                .child(menu_item("m-keys", "Keyboard Shortcuts", "", cx, |this, _| this.info_dialog = Some(InfoDialog::Shortcuts)))
+                .child(menu_item("m-prefs", "Preferences", "", cx, |this, cx| {
+                    this.navigate(Screen::Settings, cx)
+                }))
+                .child(menu_item(
+                    "m-keys",
+                    "Keyboard Shortcuts",
+                    "",
+                    cx,
+                    |this, _| this.info_dialog = Some(InfoDialog::Shortcuts),
+                ))
                 .child(div().h(px(1.)).my_1().mx_2().bg(border()))
-                .child(menu_item("m-about", "About NexDesk", "", cx, |this, _| this.info_dialog = Some(InfoDialog::About))),
+                .child(menu_item("m-about", "About NexDesk", "", cx, |this, _| {
+                    this.info_dialog = Some(InfoDialog::About)
+                })),
         )
 }
 
@@ -3371,8 +4068,14 @@ fn shortcut_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
         (
             "Anywhere in NexDesk",
             vec![
-                ("Esc", "Close the open window or menu (a connection request is refused)"),
-                ("Enter", "Confirm in a text field; closes this information window"),
+                (
+                    "Esc",
+                    "Close the open window or menu (a connection request is refused)",
+                ),
+                (
+                    "Enter",
+                    "Confirm in a text field; closes this information window",
+                ),
                 ("Tab / Shift+Tab", "Move between fields"),
             ],
         ),
@@ -3394,7 +4097,10 @@ fn shortcut_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
             vec![
                 ("Ctrl+Alt+Break", "Full screen on or off"),
                 ("Ctrl+Alt+End", "Send Ctrl+Alt+Del to the remote computer"),
-                ("Ctrl+Alt+PageDown / Ctrl+Alt+PageUp", "Next or previous tab"),
+                (
+                    "Ctrl+Alt+PageDown / Ctrl+Alt+PageUp",
+                    "Next or previous tab",
+                ),
                 ("Middle-click a tab", "Close that tab"),
                 ("Mouse to the top edge", "Show the toolbar in full screen"),
             ],
@@ -3405,7 +4111,10 @@ fn shortcut_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("Ctrl+Alt+Pause", "Full screen on or off"),
                 ("Ctrl+Alt+End", "Send Ctrl+Alt+Del"),
                 ("Ctrl+Alt+C", "Open or close the chat"),
-                ("Drop files on the window", "Send them to the other computer"),
+                (
+                    "Drop files on the window",
+                    "Send them to the other computer",
+                ),
             ],
         ),
     ]
@@ -3421,7 +4130,11 @@ fn info_dialog(d: InfoDialog, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
         InfoDialog::Shortcuts => {
             for (section, rows) in shortcut_sections() {
                 let mut group = div().flex().flex_col().gap_2().child(
-                    div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(accent_hover()).child(section.to_uppercase()),
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(accent_hover())
+                        .child(section.to_uppercase()),
                 );
                 for (k, v) in rows {
                     group = group.child(
@@ -3447,7 +4160,14 @@ fn info_dialog(d: InfoDialog, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                     div()
                         .flex()
                         .gap_4()
-                        .child(div().w(px(160.)).flex_none().text_sm().font_weight(FontWeight::SEMIBOLD).child(k))
+                        .child(
+                            div()
+                                .w(px(160.))
+                                .flex_none()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(k),
+                        )
                         .child(div().flex_1().text_sm().text_color(muted()).child(v)),
                 );
             }
@@ -3483,13 +4203,24 @@ fn info_dialog(d: InfoDialog, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                     None,
                     title,
                 ))
-                .child(div().id("info-scroll").flex_1().overflow_y_scroll().child(body))
+                .child(
+                    div()
+                        .id("info-scroll")
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .child(body),
+                )
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(div().text_xs().text_color(muted()).child("Press Esc or Enter to close"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted())
+                                .child("Press Esc or Enter to close"),
+                        )
                         .child(toolbar_button_dyn(
                             "info-close".into(),
                             "Close",
@@ -3663,28 +4394,35 @@ fn checkbox_row(
 
 /// Segmented control: LAN / Balanced / Slow network.
 fn speed_row(current: Speed, cx: &mut Context<NexDeskApp>) -> impl IntoElement {
-    let seg = |id: &'static str, label: &'static str, which: Speed, cx: &mut Context<NexDeskApp>| {
-        let on = current == which;
-        div()
-            .id(id)
-            .px_4()
-            .h(px(30.))
-            .flex()
-            .items_center()
-            .text_sm()
-            .rounded(px(7.))
-            .bg(if on { accent() } else { panel_2() })
-            .text_color(if on { on_accent() } else { text() })
-            .cursor_pointer()
-            .when(!on, |d| d.hover(|s| s.bg(hover())))
-            .on_click(cx.listener(move |this, _e, _w, cx| this.toggle_editor_flag(id, cx)))
-            .child(label)
-    };
+    let seg =
+        |id: &'static str, label: &'static str, which: Speed, cx: &mut Context<NexDeskApp>| {
+            let on = current == which;
+            div()
+                .id(id)
+                .px_4()
+                .h(px(30.))
+                .flex()
+                .items_center()
+                .text_sm()
+                .rounded(px(7.))
+                .bg(if on { accent() } else { panel_2() })
+                .text_color(if on { on_accent() } else { text() })
+                .cursor_pointer()
+                .when(!on, |d| d.hover(|s| s.bg(hover())))
+                .on_click(cx.listener(move |this, _e, _w, cx| this.toggle_editor_flag(id, cx)))
+                .child(label)
+        };
     div()
         .flex()
         .items_center()
         .gap_3()
-        .child(div().w(px(120.)).text_sm().text_color(muted()).child("Connection speed"))
+        .child(
+            div()
+                .w(px(120.))
+                .text_sm()
+                .text_color(muted())
+                .child("Connection speed"),
+        )
         .child(
             div()
                 .flex()
@@ -3739,7 +4477,13 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(div().w(px(120.)).text_sm().text_color(muted()).child("Desktop size"))
+                        .child(
+                            div()
+                                .w(px(120.))
+                                .text_sm()
+                                .text_color(muted())
+                                .child("Desktop size"),
+                        )
                         .child(
                             div()
                                 .w(px(110.))
@@ -3765,8 +4509,18 @@ fn editor_dialog(ed: &Editor, cx: &mut Context<NexDeskApp>) -> impl IntoElement 
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(checkbox_row("clipboard", "Redirect clipboard", ed.clipboard, cx))
-                        .child(checkbox_row("fullscreen", "Start in full screen", ed.fullscreen, cx)),
+                        .child(checkbox_row(
+                            "clipboard",
+                            "Redirect clipboard",
+                            ed.clipboard,
+                            cx,
+                        ))
+                        .child(checkbox_row(
+                            "fullscreen",
+                            "Start in full screen",
+                            ed.fullscreen,
+                            cx,
+                        )),
                 )
                 .when_some(ed.error.clone(), |element, error| {
                     element.child(div().text_sm().text_color(danger()).child(error))
@@ -4003,7 +4757,11 @@ impl TextInput {
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         let offset = offset.min(self.content.len());
         // The end of the selection that stays put while the other end moves.
-        let anchor = if self.selection_reversed { self.selected_range.end } else { self.selected_range.start };
+        let anchor = if self.selection_reversed {
+            self.selected_range.end
+        } else {
+            self.selected_range.start
+        };
 
         if offset < anchor {
             self.selected_range = offset..anchor;
@@ -4033,24 +4791,47 @@ impl TextInput {
     }
 
     fn word_left(&mut self, _a: &InputWordLeft, _w: &mut Window, cx: &mut Context<Self>) {
-        let to = self.prev_word(if self.selected_range.is_empty() { self.cursor_offset() } else { self.selected_range.start });
+        let to = self.prev_word(if self.selected_range.is_empty() {
+            self.cursor_offset()
+        } else {
+            self.selected_range.start
+        });
         self.move_to(to, cx);
     }
 
     fn word_right(&mut self, _a: &InputWordRight, _w: &mut Window, cx: &mut Context<Self>) {
-        let to = self.next_word(if self.selected_range.is_empty() { self.cursor_offset() } else { self.selected_range.end });
+        let to = self.next_word(if self.selected_range.is_empty() {
+            self.cursor_offset()
+        } else {
+            self.selected_range.end
+        });
         self.move_to(to, cx);
     }
 
-    fn select_word_left(&mut self, _a: &InputSelectWordLeft, _w: &mut Window, cx: &mut Context<Self>) {
+    fn select_word_left(
+        &mut self,
+        _a: &InputSelectWordLeft,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.select_to(self.prev_word(self.cursor_offset()), cx);
     }
 
-    fn select_word_right(&mut self, _a: &InputSelectWordRight, _w: &mut Window, cx: &mut Context<Self>) {
+    fn select_word_right(
+        &mut self,
+        _a: &InputSelectWordRight,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.select_to(self.next_word(self.cursor_offset()), cx);
     }
 
-    fn delete_word_back(&mut self, _a: &InputDeleteWordBack, window: &mut Window, cx: &mut Context<Self>) {
+    fn delete_word_back(
+        &mut self,
+        _a: &InputDeleteWordBack,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.selected_range.is_empty() {
             let c = self.cursor_offset();
             if c == 0 {
@@ -4062,7 +4843,12 @@ impl TextInput {
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn delete_word_forward(&mut self, _a: &InputDeleteWordForward, window: &mut Window, cx: &mut Context<Self>) {
+    fn delete_word_forward(
+        &mut self,
+        _a: &InputDeleteWordForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.selected_range.is_empty() {
             let c = self.cursor_offset();
             if c >= self.content.len() {
@@ -4132,12 +4918,7 @@ impl TextInput {
         self.move_to(self.content.len(), cx);
     }
 
-    fn backspace(
-        &mut self,
-        _action: &InputBackspace,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn backspace(&mut self, _action: &InputBackspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let cursor = self.cursor_offset();
 
@@ -4638,89 +5419,113 @@ pub fn run(engine_path: std::path::PathBuf) {
     // Lets the session window's "+" button bring this window to the front.
     #[cfg(unix)]
     let owns_focus_socket = crate::instance::listen();
-    application().with_assets(crate::assets::Assets).run(move |cx: &mut App| {
-        cx.bind_keys([
-            KeyBinding::new("backspace", InputBackspace, Some("NexDeskTextInput")),
-            KeyBinding::new("delete", InputDelete, Some("NexDeskTextInput")),
-            KeyBinding::new("left", InputLeft, Some("NexDeskTextInput")),
-            KeyBinding::new("right", InputRight, Some("NexDeskTextInput")),
-            KeyBinding::new(
-                "shift-left",
-                InputSelectLeft,
-                Some("NexDeskTextInput"),
-            ),
-            KeyBinding::new(
-                "shift-right",
-                InputSelectRight,
-                Some("NexDeskTextInput"),
-            ),
-            KeyBinding::new("cmd-a", InputSelectAll, Some("NexDeskTextInput")),
-            KeyBinding::new("ctrl-a", InputSelectAll, Some("NexDeskTextInput")),
-            KeyBinding::new("cmd-v", InputPaste, Some("NexDeskTextInput")),
-            KeyBinding::new("ctrl-v", InputPaste, Some("NexDeskTextInput")),
-            KeyBinding::new("cmd-c", InputCopy, Some("NexDeskTextInput")),
-            KeyBinding::new("ctrl-c", InputCopy, Some("NexDeskTextInput")),
-            KeyBinding::new("cmd-x", InputCut, Some("NexDeskTextInput")),
-            KeyBinding::new("ctrl-x", InputCut, Some("NexDeskTextInput")),
-            KeyBinding::new("home", InputHome, Some("NexDeskTextInput")),
-            KeyBinding::new("end", InputEnd, Some("NexDeskTextInput")),
-            KeyBinding::new("shift-home", InputSelectHome, Some("NexDeskTextInput")),
-            KeyBinding::new("shift-end", InputSelectEnd, Some("NexDeskTextInput")),
-            KeyBinding::new("ctrl-left", InputWordLeft, Some("NexDeskTextInput")),
-            KeyBinding::new("ctrl-right", InputWordRight, Some("NexDeskTextInput")),
-            KeyBinding::new("alt-left", InputWordLeft, Some("NexDeskTextInput")),
-            KeyBinding::new("alt-right", InputWordRight, Some("NexDeskTextInput")),
-            KeyBinding::new("ctrl-shift-left", InputSelectWordLeft, Some("NexDeskTextInput")),
-            KeyBinding::new("ctrl-shift-right", InputSelectWordRight, Some("NexDeskTextInput")),
-            KeyBinding::new("alt-shift-left", InputSelectWordLeft, Some("NexDeskTextInput")),
-            KeyBinding::new("alt-shift-right", InputSelectWordRight, Some("NexDeskTextInput")),
-            KeyBinding::new("ctrl-backspace", InputDeleteWordBack, Some("NexDeskTextInput")),
-            KeyBinding::new("alt-backspace", InputDeleteWordBack, Some("NexDeskTextInput")),
-            KeyBinding::new("ctrl-delete", InputDeleteWordForward, Some("NexDeskTextInput")),
-            KeyBinding::new("ctrl-home", InputHome, Some("NexDeskTextInput")),
-            KeyBinding::new("ctrl-end", InputEnd, Some("NexDeskTextInput")),
-            KeyBinding::new("up", InputHome, Some("NexDeskTextInput")),
-            KeyBinding::new("down", InputEnd, Some("NexDeskTextInput")),
-            KeyBinding::new("shift-up", InputSelectHome, Some("NexDeskTextInput")),
-            KeyBinding::new("shift-down", InputSelectEnd, Some("NexDeskTextInput")),
-            KeyBinding::new("enter", InputSubmit, Some("NexDeskTextInput")),
-            KeyBinding::new("escape", AppEscape, None),
-            KeyBinding::new("enter", AppConfirm, Some("NexDesk")),
-        ]);
+    application()
+        .with_assets(crate::assets::Assets)
+        .run(move |cx: &mut App| {
+            cx.bind_keys([
+                KeyBinding::new("backspace", InputBackspace, Some("NexDeskTextInput")),
+                KeyBinding::new("delete", InputDelete, Some("NexDeskTextInput")),
+                KeyBinding::new("left", InputLeft, Some("NexDeskTextInput")),
+                KeyBinding::new("right", InputRight, Some("NexDeskTextInput")),
+                KeyBinding::new("shift-left", InputSelectLeft, Some("NexDeskTextInput")),
+                KeyBinding::new("shift-right", InputSelectRight, Some("NexDeskTextInput")),
+                KeyBinding::new("cmd-a", InputSelectAll, Some("NexDeskTextInput")),
+                KeyBinding::new("ctrl-a", InputSelectAll, Some("NexDeskTextInput")),
+                KeyBinding::new("cmd-v", InputPaste, Some("NexDeskTextInput")),
+                KeyBinding::new("ctrl-v", InputPaste, Some("NexDeskTextInput")),
+                KeyBinding::new("cmd-c", InputCopy, Some("NexDeskTextInput")),
+                KeyBinding::new("ctrl-c", InputCopy, Some("NexDeskTextInput")),
+                KeyBinding::new("cmd-x", InputCut, Some("NexDeskTextInput")),
+                KeyBinding::new("ctrl-x", InputCut, Some("NexDeskTextInput")),
+                KeyBinding::new("home", InputHome, Some("NexDeskTextInput")),
+                KeyBinding::new("end", InputEnd, Some("NexDeskTextInput")),
+                KeyBinding::new("shift-home", InputSelectHome, Some("NexDeskTextInput")),
+                KeyBinding::new("shift-end", InputSelectEnd, Some("NexDeskTextInput")),
+                KeyBinding::new("ctrl-left", InputWordLeft, Some("NexDeskTextInput")),
+                KeyBinding::new("ctrl-right", InputWordRight, Some("NexDeskTextInput")),
+                KeyBinding::new("alt-left", InputWordLeft, Some("NexDeskTextInput")),
+                KeyBinding::new("alt-right", InputWordRight, Some("NexDeskTextInput")),
+                KeyBinding::new(
+                    "ctrl-shift-left",
+                    InputSelectWordLeft,
+                    Some("NexDeskTextInput"),
+                ),
+                KeyBinding::new(
+                    "ctrl-shift-right",
+                    InputSelectWordRight,
+                    Some("NexDeskTextInput"),
+                ),
+                KeyBinding::new(
+                    "alt-shift-left",
+                    InputSelectWordLeft,
+                    Some("NexDeskTextInput"),
+                ),
+                KeyBinding::new(
+                    "alt-shift-right",
+                    InputSelectWordRight,
+                    Some("NexDeskTextInput"),
+                ),
+                KeyBinding::new(
+                    "ctrl-backspace",
+                    InputDeleteWordBack,
+                    Some("NexDeskTextInput"),
+                ),
+                KeyBinding::new(
+                    "alt-backspace",
+                    InputDeleteWordBack,
+                    Some("NexDeskTextInput"),
+                ),
+                KeyBinding::new(
+                    "ctrl-delete",
+                    InputDeleteWordForward,
+                    Some("NexDeskTextInput"),
+                ),
+                KeyBinding::new("ctrl-home", InputHome, Some("NexDeskTextInput")),
+                KeyBinding::new("ctrl-end", InputEnd, Some("NexDeskTextInput")),
+                KeyBinding::new("up", InputHome, Some("NexDeskTextInput")),
+                KeyBinding::new("down", InputEnd, Some("NexDeskTextInput")),
+                KeyBinding::new("shift-up", InputSelectHome, Some("NexDeskTextInput")),
+                KeyBinding::new("shift-down", InputSelectEnd, Some("NexDeskTextInput")),
+                KeyBinding::new("enter", InputSubmit, Some("NexDeskTextInput")),
+                KeyBinding::new("escape", AppEscape, None),
+                KeyBinding::new("enter", AppConfirm, Some("NexDesk")),
+            ]);
 
-        let bounds = Bounds::centered(None, size(px(1120.), px(720.)), cx);
+            let bounds = Bounds::centered(None, size(px(1120.), px(720.)), cx);
 
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: None,
-                window_decorations: Some(WindowDecorations::Client),
-                window_background: WindowBackgroundAppearance::Transparent,
-                window_min_size: Some(size(px(760.), px(480.))),
-                app_id: Some("nexdesk".into()),
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| NexDeskApp::new(engine_path.clone(), window, cx)),
-        )
-        .expect("open NexDesk window");
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: None,
+                    window_decorations: Some(WindowDecorations::Client),
+                    window_background: WindowBackgroundAppearance::Transparent,
+                    window_min_size: Some(size(px(760.), px(480.))),
+                    app_id: Some("nexdesk".into()),
+                    ..Default::default()
+                },
+                |window, cx| cx.new(|cx| NexDeskApp::new(engine_path.clone(), window, cx)),
+            )
+            .expect("open NexDesk window");
 
-        cx.activate(true);
+            cx.activate(true);
 
-        // Brings this window to the front when the session window's "+" asks, or a question needs an answer.
-        #[cfg(unix)]
-        cx.spawn(async move |cx| loop {
-            cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
-            if crate::instance::take_raise() {
-                cx.update(|cx| {
-                    cx.activate(true);
-                    for w in cx.windows() {
-                        let _ = w.update(cx, |_, window, _| window.activate_window());
-                    }
-                });
-            }
-        })
-        .detach();
-    });
+            // Brings this window to the front when the session window's "+" asks, or a question needs an answer.
+            #[cfg(unix)]
+            cx.spawn(async move |cx| loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(300))
+                    .await;
+                if crate::instance::take_raise() {
+                    cx.update(|cx| {
+                        cx.activate(true);
+                        for w in cx.windows() {
+                            let _ = w.update(cx, |_, window, _| window.activate_window());
+                        }
+                    });
+                }
+            })
+            .detach();
+        });
     #[cfg(unix)]
     if owns_focus_socket {
         crate::instance::cleanup();

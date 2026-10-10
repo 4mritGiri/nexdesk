@@ -1,0 +1,20 @@
+[
+  {
+    "label": "Debug NexDesk (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "build": {
+      "label": "Build NexDesk",
+      "command": "cargo",
+      "args": ["build"]
+    }
+  },
+  {
+    "label": "Debug NexDesk (GDB)",
+    "adapter": "GDB",
+    "build": {
+      "label": "Build NexDesk",
+      "command": "cargo",
+      "args": ["build"]
+    }
+  }
+]

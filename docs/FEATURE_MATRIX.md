@@ -11,7 +11,7 @@ Feasibility column: **Easy** (days, client only) · **Medium** (1–3 weeks) · 
 
 ## 1. What exists today
 
-| Area | Remmina | NexDesk | Notes |
+| Area | Typical RDP client | NexDesk | Notes |
 |---|---|---|---|
 | Saved connections (.rdp compatible) | yes | **Done** | New / Edit / Duplicate / Delete, `.rdp` import |
 | Manager UI in GNOME Files / macOS style | n/a | **Done (unverified)** | rounded window, red/yellow/green dots, header bar with sidebar toggle, back/forward, path pill, search, grid/list switch; collapsible icon sidebar; double-click to connect. Compile-checked only; not rendered here |
@@ -118,7 +118,7 @@ Architecture and rules: `docs/REMOTE.md`. RDP stays the way to reach Windows Pro
 |---|---|---|---|
 | Control a Windows PC | Easy | **Done (via RDP)** | |
 | Control Linux X11 host | Hard | **Done (prototype)** | `nexdesk-agent` + `nexdesk-peer-view`, direct IP, tested on Xvfb; XShm and a video codec still to do (`docs/PEER.md`) |
-| Control Linux Wayland host | Hard | **Planned P5b** | xdg-desktop-portal ScreenCast + PipeWire, libei; permission prompt limits unattended use |
+| Control Linux Wayland host | Hard | **Built, needs testing on GNOME/KDE** | xdg-desktop-portal ScreenCast + RemoteDesktop + PipeWire (`crates/nexdesk-peer/src/platform/linux/wayland.rs`); the desktop asks the person which screen to share; no unattended use |
 | Control macOS host | Hard | **Planned P5d** | ScreenCaptureKit, CGEvent, permission dialogs |
 | Connect by ID, no port forwarding | Infra | **Done (prototype, relay only)** | `nexdesk-relay`, `docs/RELAY.md`; hole punching, relay auth and failover still to do |
 | Direct IP access | Medium | **Done (prototype)** | agent listens on a port; default 127.0.0.1:21118 |

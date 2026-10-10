@@ -1,7 +1,7 @@
 # NexDesk peer protocol (P5a prototype): agent + viewer
 
 Control a Linux **X11** machine from another Linux machine, directly by IP address, with the hybrid post-quantum handshake from `docs/CRYPTO.md`.
-Direct by IP, or by ID through a relay you run (`docs/RELAY.md`); no other server is involved. **Prototype: unreviewed crypto, no Wayland, no Windows host, no audio/files yet.**
+Direct by IP, or by ID through a relay you run (`docs/RELAY.md`); no other server is involved. **Prototype: unreviewed crypto, Wayland host is new and untested on a real desktop, no Windows host, no audio/files yet.**
 
 ## Try it (two terminals, or two laptops)
 Build: `cargo build --release -p nexdesk-peer` (produces `nexdesk-agent` and `nexdesk-peer-view`).
@@ -72,4 +72,15 @@ Speed: the agent uses XDamage, so a screen that does not change costs almost not
 `xvfb-run -a cargo test -p nexdesk-peer` starts a real X server and checks: the screen arrives pixel-exact, later changes arrive, mouse moves the real pointer, an unapproved viewer receives nothing, a wrong pin aborts the handshake, view-only blocks input, clipboard text both ways, the pointer image, the manager flow (probe, `--trust`, consent over stdin/stdout, deny ends the viewer), a screen resize that keeps the session, two monitors with switching and pointer mapping, an idle screen that stops producing tiles, toolbar layout and hit tests, a viewer that survives an agent restart, a folder upload with decline, no-overwrite and hostile-path refusal plus chat both ways, plus unit tests for diffing, tile bounds and hostile messages.
 
 ## Not done yet
-Wayland host, Windows/macOS host, image/file clipboard, file download and a file manager, audio, a GUI viewer inside the manager window (the viewer is still its own window), encrypted identity storage, rate limiting beyond the delay, fuzzing.
+Windows/macOS host, image/file clipboard, file download and a file manager, audio, a GUI viewer inside the manager window (the viewer is still its own window), encrypted identity storage, rate limiting beyond the delay, fuzzing.
+
+## Wayland host
+
+On a Wayland session the agent shares the screen through `xdg-desktop-portal` (ScreenCast + RemoteDesktop) and PipeWire.
+When a viewer is accepted the desktop shows its own "share your screen" dialog; that dialog is the host-side consent, and
+the person picks which screen. Mouse and keyboard are injected through the RemoteDesktop portal (skipped with `--view-only`).
+
+* Build needs `sudo apt install libpipewire-0.3-dev clang libclang-dev`. `cargo build --no-default-features` drops Wayland support.
+* Runtime needs `xdg-desktop-portal` plus your desktop's backend (GNOME: `xdg-desktop-portal-gnome`, KDE: `-kde`, wlroots: `-wlr`) and PipeWire; Ubuntu has them.
+* One screen per share (the one picked in the dialog). Backend choice is automatic; force with `NEXDESK_BACKEND=x11|wayland`.
+* Tested here: PipeWire frame receiving against a real daemon, the portal handshake against xdg-desktop-portal-wlr in headless sway (stopped at the compositor's screencopy, a sandbox limit). Not tested: a real GNOME/KDE dialog and RemoteDesktop input. Please report what you see.

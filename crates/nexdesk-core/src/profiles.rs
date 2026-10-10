@@ -1,5 +1,5 @@
 //! Saved connections, stored as standard `.rdp` files (one per connection),
-//! so they are also readable by mstsc/Remmina/FreeRDP. Passwords are NEVER stored.
+//! so they are also readable by other RDP clients. Passwords are NEVER stored.
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -169,10 +169,16 @@ impl Profile {
             if self.fullscreen { 2 } else { 1 }
         ));
         if !self.pre_command.trim().is_empty() {
-            s.push_str(&format!("nexdesk pre command:s:{}\r\n", clean(self.pre_command.trim())));
+            s.push_str(&format!(
+                "nexdesk pre command:s:{}\r\n",
+                clean(self.pre_command.trim())
+            ));
         }
         if !self.post_command.trim().is_empty() {
-            s.push_str(&format!("nexdesk post command:s:{}\r\n", clean(self.post_command.trim())));
+            s.push_str(&format!(
+                "nexdesk post command:s:{}\r\n",
+                clean(self.post_command.trim())
+            ));
         }
         s
     }
@@ -187,8 +193,10 @@ impl Profile {
         if self.width < 200 || self.height < 200 {
             return Err("Desktop size is too small (minimum 200x200)");
         }
-        crate::hooks::validate(&self.pre_command).map_err(|_| "Before-connect command is not valid (check quotes)")?;
-        crate::hooks::validate(&self.post_command).map_err(|_| "After-disconnect command is not valid (check quotes)")?;
+        crate::hooks::validate(&self.pre_command)
+            .map_err(|_| "Before-connect command is not valid (check quotes)")?;
+        crate::hooks::validate(&self.post_command)
+            .map_err(|_| "After-disconnect command is not valid (check quotes)")?;
         Ok(())
     }
 }
@@ -308,11 +316,20 @@ mod tests {
         assert!(text.contains("nexdesk pre command:s:"));
         let imported = Profile::from_rdp("x", &RdpFile::parse(&text));
         assert!(imported.pre_command.is_empty() && imported.post_command.is_empty());
-        let bad = Profile { pre_command: "echo 'open".into(), ..sample() };
+        let bad = Profile {
+            pre_command: "echo 'open".into(),
+            ..sample()
+        };
         assert!(bad.validate().is_err());
         // newlines cannot add extra keys
-        let nl = Profile { pre_command: "a\r\nfull address:s:evil".into(), ..sample() };
-        assert_eq!(Profile::from_rdp_trusted("n", &RdpFile::parse(&nl.to_rdp_text())).host, p.host);
+        let nl = Profile {
+            pre_command: "a\r\nfull address:s:evil".into(),
+            ..sample()
+        };
+        assert_eq!(
+            Profile::from_rdp_trusted("n", &RdpFile::parse(&nl.to_rdp_text())).host,
+            p.host
+        );
     }
 
     #[test]

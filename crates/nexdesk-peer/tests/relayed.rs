@@ -25,7 +25,12 @@ fn control_a_computer_by_id_through_a_relay() {
     let agent = Arc::new(Identity::generate().unwrap());
     let agent_pub = agent.public().clone();
     let viewer = Identity::generate().unwrap();
-    let policy = Arc::new(Policy::new(false, true, vec![viewer.public().fingerprint_string()], None));
+    let policy = Arc::new(Policy::new(
+        false,
+        true,
+        vec![viewer.public().fingerprint_string()],
+        None,
+    ));
     let busy = Arc::new(AtomicBool::new(false));
     let log: Log = Arc::new(|_| {});
     let (a2, p2, b2, l2) = (agent.clone(), policy.clone(), busy.clone(), log.clone());
@@ -41,19 +46,42 @@ fn control_a_computer_by_id_through_a_relay() {
     )
     .unwrap();
     let end = Instant::now() + Duration::from_secs(5);
-    while !crx.recv_timeout(Duration::from_millis(100)).map(|s| s == "registered").unwrap_or(false) {
+    while !crx
+        .recv_timeout(Duration::from_millis(100))
+        .map(|s| s == "registered")
+        .unwrap_or(false)
+    {
         assert!(Instant::now() < end, "agent never registered");
     }
 
     // wrong pin: the viewer refuses the agent before revealing itself, even through the relay
-    let r = client::connect_relay(&relay_addr, "424242424", Identity::generate().unwrap(), |_| false);
-    assert!(matches!(r, Err(nexdesk_peer::PeerError::Crypto(nexdesk_crypto::Error::Rejected))));
+    let r = client::connect_relay(
+        &relay_addr,
+        "424242424",
+        Identity::generate().unwrap(),
+        |_| false,
+    );
+    assert!(matches!(
+        r,
+        Err(nexdesk_peer::PeerError::Crypto(
+            nexdesk_crypto::Error::Rejected
+        ))
+    ));
     std::thread::sleep(Duration::from_millis(700)); // the agent frees its slot after a failed handshake
 
     let pinned = agent_pub.fingerprint();
-    let (mut reader, mut writer, seen) = client::connect_relay(&relay_addr, "424242424", viewer, |p| p.fingerprint() == pinned).unwrap();
-    assert_eq!(seen, agent_pub, "the agent's own identity arrives through the relay");
-    let Msg::Hello { width, height, .. } = reader.recv().unwrap() else { panic!("expected Hello") };
+    let (mut reader, mut writer, seen) =
+        client::connect_relay(&relay_addr, "424242424", viewer, |p| {
+            p.fingerprint() == pinned
+        })
+        .unwrap();
+    assert_eq!(
+        seen, agent_pub,
+        "the agent's own identity arrives through the relay"
+    );
+    let Msg::Hello { width, height, .. } = reader.recv().unwrap() else {
+        panic!("expected Hello")
+    };
     assert!(width > 0 && height > 0);
     writer.send(&Msg::Ping(5)).unwrap();
     loop {
@@ -64,5 +92,11 @@ fn control_a_computer_by_id_through_a_relay() {
     writer.shutdown();
 
     // an ID nobody registered
-    assert!(client::connect_relay(&relay_addr, "100000000", Identity::generate().unwrap(), |_| true).is_err());
+    assert!(client::connect_relay(
+        &relay_addr,
+        "100000000",
+        Identity::generate().unwrap(),
+        |_| true
+    )
+    .is_err());
 }

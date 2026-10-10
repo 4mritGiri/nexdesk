@@ -126,7 +126,10 @@ fn unesc(s: &str) -> String {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Append one entry to the default log directory. Never fails the caller.
@@ -136,10 +139,19 @@ pub fn append(kind: Kind, level: Level, fields: &[&str]) {
     }
 }
 
-pub fn append_in(dir: &Path, kind: Kind, level: Level, fields: &[&str], ts_ms: u64) -> std::io::Result<()> {
+pub fn append_in(
+    dir: &Path,
+    kind: Kind,
+    level: Level,
+    fields: &[&str],
+    ts_ms: u64,
+) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(kind.file_name());
-    if std::fs::metadata(&path).map(|m| m.len() > MAX_BYTES).unwrap_or(false) {
+    if std::fs::metadata(&path)
+        .map(|m| m.len() > MAX_BYTES)
+        .unwrap_or(false)
+    {
         let _ = std::fs::rename(&path, dir.join(format!("{}.1", kind.file_name())));
     }
     let mut line = format!("{ts_ms}\t{}", level.code());
@@ -176,7 +188,11 @@ pub fn read_tail_in(dir: &Path, kind: Kind, max: usize) -> Vec<Entry> {
             let mut p = l.split('\t');
             let ts_ms = p.next()?.parse().ok()?;
             let level = Level::from_code(p.next()?);
-            Some(Entry { ts_ms, level, fields: p.map(unesc).collect() })
+            Some(Entry {
+                ts_ms,
+                level,
+                fields: p.map(unesc).collect(),
+            })
         })
         .take(max)
         .collect()
@@ -192,7 +208,11 @@ pub fn clear(kind: Kind) {
 // ---- convenience writers used by the engines -------------------------------------------
 
 pub fn connection(level: Level, event: &str, profile: &str, host: &str, user: &str, detail: &str) {
-    append(Kind::Connection, level, &[event, profile, host, user, detail]);
+    append(
+        Kind::Connection,
+        level,
+        &[event, profile, host, user, detail],
+    );
 }
 
 static CONTEXT_HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -203,9 +223,21 @@ pub fn set_context_host(host: &str) {
 }
 
 pub fn file(level: Level, direction: &str, items: usize, bytes: u64, status: &str, host: &str) {
-    let host = if host.is_empty() { CONTEXT_HOST.get().map(String::as_str).unwrap_or("") } else { host };
-    let size = if bytes == 0 { "-".to_string() } else { human_size(bytes) };
-    append(Kind::File, level, &[direction, &items.to_string(), &size, status, host]);
+    let host = if host.is_empty() {
+        CONTEXT_HOST.get().map(String::as_str).unwrap_or("")
+    } else {
+        host
+    };
+    let size = if bytes == 0 {
+        "-".to_string()
+    } else {
+        human_size(bytes)
+    };
+    append(
+        Kind::File,
+        level,
+        &[direction, &items.to_string(), &size, status, host],
+    );
 }
 
 pub fn alarm(level: Level, title: &str, host: &str, detail: &str) {
@@ -224,7 +256,11 @@ pub fn human_size(b: u64) -> String {
         v /= 1024.0;
         i += 1;
     }
-    if i == 0 { format!("{b} B") } else { format!("{v:.1} {}", U[i]) }
+    if i == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", U[i])
+    }
 }
 
 /// Local time `YYYY-MM-DD HH:MM:SS` (UTC if the platform cannot tell).
@@ -249,7 +285,12 @@ pub fn format_time(ts_ms: u64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 #[allow(dead_code)]
@@ -309,7 +350,14 @@ mod tests {
     #[test]
     fn roundtrip_and_escaping() {
         let d = tmp("rt");
-        append_in(&d, Kind::Console, Level::Warn, &["engine", "a\tb\nc\\d"], 1000).unwrap();
+        append_in(
+            &d,
+            Kind::Console,
+            Level::Warn,
+            &["engine", "a\tb\nc\\d"],
+            1000,
+        )
+        .unwrap();
         append_in(&d, Kind::Console, Level::Info, &["engine", "second"], 2000).unwrap();
         let v = read_tail_in(&d, Kind::Console, 10);
         assert_eq!(v.len(), 2);
@@ -356,11 +404,25 @@ mod tests {
         let mk = |ts, ev: &str, host: &str| Entry {
             ts_ms: ts,
             level: Level::Info,
-            fields: vec![ev.into(), "p".into(), host.into(), "bob".into(), String::new()],
+            fields: vec![
+                ev.into(),
+                "p".into(),
+                host.into(),
+                "bob".into(),
+                String::new(),
+            ],
         };
-        let entries = vec![mk(30, "Disconnected", "h1"), mk(20, "Connected", "h1"), mk(10, "Connected", "h2"), mk(5, "Connected", "h1")];
+        let entries = vec![
+            mk(30, "Disconnected", "h1"),
+            mk(20, "Connected", "h1"),
+            mk(10, "Connected", "h2"),
+            mk(5, "Connected", "h1"),
+        ];
         let s = device_stats(&entries, "h1");
-        assert_eq!((s.last_ts_ms, s.sessions, s.last_event.as_str()), (30, 2, "Disconnected"));
+        assert_eq!(
+            (s.last_ts_ms, s.sessions, s.last_event.as_str()),
+            (30, 2, "Disconnected")
+        );
         assert_eq!(device_stats(&entries, "nope").sessions, 0);
     }
 }

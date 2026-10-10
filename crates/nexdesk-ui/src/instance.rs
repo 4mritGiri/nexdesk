@@ -23,7 +23,10 @@ fn path() -> PathBuf {
     if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(d).join("nexdesk-manager.sock");
     }
-    let uid = std::env::var_os("HOME").and_then(|h| std::fs::metadata(h).ok()).map(|m| m.uid()).unwrap_or(0);
+    let uid = std::env::var_os("HOME")
+        .and_then(|h| std::fs::metadata(h).ok())
+        .map(|m| m.uid())
+        .unwrap_or(0);
     PathBuf::from(format!("/tmp/nexdesk-manager-{uid}.sock"))
 }
 

@@ -97,7 +97,13 @@ impl Spec {
                 if host.is_empty() || host.len() > 300 {
                     return Err("bad host".into());
                 }
-                let dim = |k: &str| get(k).parse::<u16>().ok().filter(|v| (200..=8192).contains(v)).ok_or(format!("bad {k}"));
+                let dim = |k: &str| {
+                    get(k)
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|v| (200..=8192).contains(v))
+                        .ok_or(format!("bad {k}"))
+                };
                 return Ok(Spec {
                     host,
                     user: get("user"),
@@ -134,7 +140,9 @@ mod sock {
         if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
             return PathBuf::from(d).join("nexdesk-rdp.sock");
         }
-        let uid = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0);
+        let uid = std::fs::metadata("/proc/self")
+            .map(|m| m.uid())
+            .unwrap_or(0);
         PathBuf::from(format!("/tmp/nexdesk-rdp-{uid}.sock"))
     }
 
@@ -175,11 +183,16 @@ pub fn focus_manager() -> bool {
     let path = match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(d) => std::path::PathBuf::from(d).join("nexdesk-manager.sock"),
         None => {
-            let uid = std::env::var_os("HOME").and_then(|h| std::fs::metadata(h).ok()).map(|m| m.uid()).unwrap_or(0);
+            let uid = std::env::var_os("HOME")
+                .and_then(|h| std::fs::metadata(h).ok())
+                .map(|m| m.uid())
+                .unwrap_or(0);
             std::path::PathBuf::from(format!("/tmp/nexdesk-manager-{uid}.sock"))
         }
     };
-    std::os::unix::net::UnixStream::connect(path).and_then(|mut s| s.write_all(b"focus\n")).is_ok()
+    std::os::unix::net::UnixStream::connect(path)
+        .and_then(|mut s| s.write_all(b"focus\n"))
+        .is_ok()
 }
 #[cfg(not(unix))]
 pub fn focus_manager() -> bool {
@@ -196,7 +209,8 @@ pub fn cleanup() {}
 #[cfg(unix)]
 pub fn forward(spec: &Spec) -> Option<i32> {
     let mut s = sock::connect()?;
-    s.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok()?;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(30)))
+        .ok()?;
     s.write_all(spec.encode().as_bytes()).ok()?;
     let mut r = BufReader::new(s.try_clone().ok()?);
     let mut line = String::new();
@@ -235,60 +249,77 @@ pub fn bind() -> Option<()> {
 
 /// Accept hand-offs from later processes and turn them into `UserEvent`s.
 #[cfg(unix)]
-pub fn serve(listener: std::os::unix::net::UnixListener, proxy: winit::event_loop::EventLoopProxy<crate::app::UserEvent>) {
+pub fn serve(
+    listener: std::os::unix::net::UnixListener,
+    proxy: winit::event_loop::EventLoopProxy<crate::app::UserEvent>,
+) {
     use crate::app::UserEvent;
     use std::sync::mpsc;
-    let _ = std::thread::Builder::new().name("ipc-accept".into()).spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let proxy = proxy.clone();
-            let _ = std::thread::Builder::new().name("ipc-client".into()).spawn(move || {
-                let Ok(rd) = stream.try_clone() else { return };
-                let mut w = stream;
-                let mut reader = BufReader::new(rd.take(64 * 1024));
-                let spec = match Spec::read(&mut reader) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = writeln!(w, "ERR {e}");
-                        return;
-                    }
-                };
-                let (ack_tx, ack_rx) = mpsc::channel();
-                let (end_tx, end_rx) = mpsc::channel();
-                if proxy.send_event(UserEvent::NewSession { spec, ack: ack_tx, end: end_tx }).is_err() {
-                    return;
-                }
-                let id = match ack_rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                    Ok(Ok(id)) => id,
-                    Ok(Err(e)) => {
-                        let _ = writeln!(w, "ERR {}", e.replace('\n', " "));
-                        return;
-                    }
-                    Err(_) => {
-                        let _ = writeln!(w, "ERR the viewer window did not answer");
-                        return;
-                    }
-                };
-                let _ = writeln!(w, "OK");
-                // If the other process is killed (the manager's Disconnect), close the tab.
-                let watcher_proxy = proxy.clone();
-                let mut watch = reader.into_inner().into_inner();
-                let _ = std::thread::Builder::new().name("ipc-watch".into()).spawn(move || {
-                    let mut buf = [0u8; 64];
-                    while matches!(watch.read(&mut buf), Ok(n) if n > 0) {}
-                    let _ = watcher_proxy.send_event(UserEvent::CloseSession(id));
-                });
-                match end_rx.recv() {
-                    Ok(Ok(())) => {
-                        let _ = writeln!(w, "END");
-                    }
-                    Ok(Err(m)) => {
-                        let _ = writeln!(w, "FAIL {}", m.replace('\n', " "));
-                    }
-                    Err(_) => {}
-                }
-            });
-        }
-    });
+    let _ = std::thread::Builder::new()
+        .name("ipc-accept".into())
+        .spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let proxy = proxy.clone();
+                let _ = std::thread::Builder::new()
+                    .name("ipc-client".into())
+                    .spawn(move || {
+                        let Ok(rd) = stream.try_clone() else { return };
+                        let mut w = stream;
+                        let mut reader = BufReader::new(rd.take(64 * 1024));
+                        let spec = match Spec::read(&mut reader) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                let _ = writeln!(w, "ERR {e}");
+                                return;
+                            }
+                        };
+                        let (ack_tx, ack_rx) = mpsc::channel();
+                        let (end_tx, end_rx) = mpsc::channel();
+                        if proxy
+                            .send_event(UserEvent::NewSession {
+                                spec,
+                                ack: ack_tx,
+                                end: end_tx,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let id = match ack_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                            Ok(Ok(id)) => id,
+                            Ok(Err(e)) => {
+                                let _ = writeln!(w, "ERR {}", e.replace('\n', " "));
+                                return;
+                            }
+                            Err(_) => {
+                                let _ = writeln!(w, "ERR the viewer window did not answer");
+                                return;
+                            }
+                        };
+                        let _ = writeln!(w, "OK");
+                        // If the other process is killed (the manager's Disconnect), close the tab.
+                        let watcher_proxy = proxy.clone();
+                        let mut watch = reader.into_inner().into_inner();
+                        let _ =
+                            std::thread::Builder::new()
+                                .name("ipc-watch".into())
+                                .spawn(move || {
+                                    let mut buf = [0u8; 64];
+                                    while matches!(watch.read(&mut buf), Ok(n) if n > 0) {}
+                                    let _ = watcher_proxy.send_event(UserEvent::CloseSession(id));
+                                });
+                        match end_rx.recv() {
+                            Ok(Ok(())) => {
+                                let _ = writeln!(w, "END");
+                            }
+                            Ok(Err(m)) => {
+                                let _ = writeln!(w, "FAIL {}", m.replace('\n', " "));
+                            }
+                            Err(_) => {}
+                        }
+                    });
+            }
+        });
 }
 
 #[cfg(not(unix))]

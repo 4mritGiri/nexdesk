@@ -11,7 +11,9 @@ pub enum Lookup {
     Unknown,
     Match,
     /// A different certificate than the pinned one.
-    Mismatch { pinned: String },
+    Mismatch {
+        pinned: String,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -49,7 +51,10 @@ impl KnownHosts {
     }
 
     pub fn load(path: &Path) -> Self {
-        let mut k = KnownHosts { path: Some(path.to_path_buf()), entries: Vec::new() };
+        let mut k = KnownHosts {
+            path: Some(path.to_path_buf()),
+            entries: Vec::new(),
+        };
         if let Ok(text) = std::fs::read_to_string(path) {
             for line in text.lines() {
                 let line = line.trim();
@@ -99,11 +104,15 @@ impl KnownHosts {
     }
 
     fn save(&self) -> io::Result<()> {
-        let Some(path) = &self.path else { return Ok(()) };
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let mut text = String::from("# NexDesk pinned RDP server certificates: <host:port> <sha256:fingerprint>\n");
+        let mut text = String::from(
+            "# NexDesk pinned RDP server certificates: <host:port> <sha256:fingerprint>\n",
+        );
         for (h, f) in &self.entries {
             text.push_str(&format!("{h} {f}\n"));
         }
@@ -113,7 +122,12 @@ impl KnownHosts {
             #[cfg(unix)]
             let mut f = {
                 use std::os::unix::fs::OpenOptionsExt;
-                std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&tmp)?
             };
             #[cfg(not(unix))]
             let mut f = std::fs::File::create(&tmp)?;
@@ -138,20 +152,34 @@ mod tests {
         assert_eq!(k.lookup(&key, "sha256:aa"), Lookup::Unknown);
         k.set(&key, "sha256:aa").unwrap();
         assert_eq!(k.lookup(&key, "sha256:aa"), Lookup::Match);
-        assert_eq!(k.lookup(&key, "sha256:bb"), Lookup::Mismatch { pinned: "sha256:aa".into() });
+        assert_eq!(
+            k.lookup(&key, "sha256:bb"),
+            Lookup::Mismatch {
+                pinned: "sha256:aa".into()
+            }
+        );
 
         let k2 = KnownHosts::load(&path);
         assert_eq!(k2.lookup(&key, "sha256:aa"), Lookup::Match);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         let mut k3 = KnownHosts::load(&path);
         k3.set(&key, "sha256:cc").unwrap();
-        assert_eq!(KnownHosts::load(&path).lookup(&key, "sha256:cc"), Lookup::Match);
+        assert_eq!(
+            KnownHosts::load(&path).lookup(&key, "sha256:cc"),
+            Lookup::Match
+        );
         assert!(k3.forget(&key).unwrap());
-        assert_eq!(KnownHosts::load(&path).lookup(&key, "sha256:cc"), Lookup::Unknown);
+        assert_eq!(
+            KnownHosts::load(&path).lookup(&key, "sha256:cc"),
+            Lookup::Unknown
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

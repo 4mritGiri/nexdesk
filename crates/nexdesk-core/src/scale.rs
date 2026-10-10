@@ -90,11 +90,25 @@ pub struct Actual {
 }
 
 impl Actual {
-    pub fn new(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32, pan_x: u32, pan_y: u32) -> Option<Self> {
+    pub fn new(
+        src_w: u32,
+        src_h: u32,
+        dst_w: u32,
+        dst_h: u32,
+        pan_x: u32,
+        pan_y: u32,
+    ) -> Option<Self> {
         if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
             return None;
         }
-        let mut a = Self { src_w, src_h, dst_w, dst_h, pan_x, pan_y };
+        let mut a = Self {
+            src_w,
+            src_h,
+            dst_w,
+            dst_h,
+            pan_x,
+            pan_y,
+        };
         let (mx, my) = a.max_pan();
         a.pan_x = pan_x.min(mx);
         a.pan_y = pan_y.min(my);
@@ -103,7 +117,10 @@ impl Actual {
 
     /// Largest useful pan in each direction (0 when the desktop fits).
     pub fn max_pan(&self) -> (u32, u32) {
-        (self.src_w.saturating_sub(self.dst_w), self.src_h.saturating_sub(self.dst_h))
+        (
+            self.src_w.saturating_sub(self.dst_w),
+            self.src_h.saturating_sub(self.dst_h),
+        )
     }
 
     pub fn pannable(&self) -> bool {
@@ -113,8 +130,16 @@ impl Actual {
 
     /// Where remote pixel (0, 0) lands in the window (negative when panned).
     pub fn origin(&self) -> (i64, i64) {
-        let ox = if self.src_w <= self.dst_w { i64::from(self.dst_w - self.src_w) / 2 } else { -i64::from(self.pan_x) };
-        let oy = if self.src_h <= self.dst_h { i64::from(self.dst_h - self.src_h) / 2 } else { -i64::from(self.pan_y) };
+        let ox = if self.src_w <= self.dst_w {
+            i64::from(self.dst_w - self.src_w) / 2
+        } else {
+            -i64::from(self.pan_x)
+        };
+        let oy = if self.src_h <= self.dst_h {
+            i64::from(self.dst_h - self.src_h) / 2
+        } else {
+            -i64::from(self.pan_y)
+        };
         (ox, oy)
     }
 
@@ -122,16 +147,30 @@ impl Actual {
         let (ox, oy) = self.origin();
         let rx = (x - ox as f64).floor().clamp(0.0, (self.src_w - 1) as f64) as u32;
         let ry = (y - oy as f64).floor().clamp(0.0, (self.src_h - 1) as f64) as u32;
-        (rx.min(u32::from(u16::MAX)) as u16, ry.min(u32::from(u16::MAX)) as u16)
+        (
+            rx.min(u32::from(u16::MAX)) as u16,
+            ry.min(u32::from(u16::MAX)) as u16,
+        )
     }
 }
 
 /// Copy the visible part of `src` into `dst` (1:1), black around it.
-pub fn blit_actual(src: &[u32], sw: u32, sh: u32, dst: &mut [u32], dw: u32, dh: u32, pan_x: u32, pan_y: u32) {
+pub fn blit_actual(
+    src: &[u32],
+    sw: u32,
+    sh: u32,
+    dst: &mut [u32],
+    dw: u32,
+    dh: u32,
+    pan_x: u32,
+    pan_y: u32,
+) {
     if src.len() < (sw as usize) * (sh as usize) || dst.len() < (dw as usize) * (dh as usize) {
         return;
     }
-    let Some(a) = Actual::new(sw, sh, dw, dh, pan_x, pan_y) else { return };
+    let Some(a) = Actual::new(sw, sh, dw, dh, pan_x, pan_y) else {
+        return;
+    };
     dst[..(dw as usize) * (dh as usize)].fill(0);
     let (ox, oy) = a.origin();
     // window rows/cols that show remote pixels
@@ -170,7 +209,9 @@ impl View {
     pub fn blit(&self, src: &[u32], dst: &mut [u32]) {
         match self {
             View::Fit(f) => blit_fit(src, f.src_w, f.src_h, dst, f.dst_w, f.dst_h),
-            View::Actual(a) => blit_actual(src, a.src_w, a.src_h, dst, a.dst_w, a.dst_h, a.pan_x, a.pan_y),
+            View::Actual(a) => blit_actual(
+                src, a.src_w, a.src_h, dst, a.dst_w, a.dst_h, a.pan_x, a.pan_y,
+            ),
         }
     }
 }

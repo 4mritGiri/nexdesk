@@ -74,7 +74,9 @@ pub fn validate(cmd: &str) -> Result<(), String> {
 /// Run `cmd`; `Ok(())` if it exited with status 0 in time. `env` is added to the environment.
 pub fn run(cmd: &str, env: &[(&str, &str)], timeout: Duration) -> Result<(), String> {
     let argv = split_args(cmd)?;
-    let Some((prog, args)) = argv.split_first() else { return Ok(()) };
+    let Some((prog, args)) = argv.split_first() else {
+        return Ok(());
+    };
     let mut c = Command::new(prog);
     c.args(args)
         .stdin(Stdio::null())
@@ -117,7 +119,10 @@ pub fn run(cmd: &str, env: &[(&str, &str)], timeout: Duration) -> Result<(), Str
             Err(e) => return Err(format!("wait failed: {e}")),
         }
     };
-    let (o, e) = (t_out.join().unwrap_or_default(), t_err.join().unwrap_or_default());
+    let (o, e) = (
+        t_out.join().unwrap_or_default(),
+        t_err.join().unwrap_or_default(),
+    );
     for line in o.lines().chain(e.lines()).take(20) {
         crate::logs::console(crate::logs::Level::Info, "hook", line);
     }
@@ -135,14 +140,23 @@ mod tests {
     #[test]
     fn splitting() {
         assert_eq!(split_args("a b  c").unwrap(), ["a", "b", "c"]);
-        assert_eq!(split_args(r#"nmcli con up "Work VPN""#).unwrap(), ["nmcli", "con", "up", "Work VPN"]);
-        assert_eq!(split_args("x 'a b' c\\ d \"\"").unwrap(), ["x", "a b", "c d", ""]);
+        assert_eq!(
+            split_args(r#"nmcli con up "Work VPN""#).unwrap(),
+            ["nmcli", "con", "up", "Work VPN"]
+        );
+        assert_eq!(
+            split_args("x 'a b' c\\ d \"\"").unwrap(),
+            ["x", "a b", "c d", ""]
+        );
         assert_eq!(split_args(r#"echo "a\"b""#).unwrap(), ["echo", "a\"b"]);
         assert!(split_args("echo 'oops").is_err());
         assert!(split_args("echo \\").is_err());
         assert!(split_args("   ").unwrap().is_empty());
         // no shell: metacharacters stay literal
-        assert_eq!(split_args("echo $HOME; rm -rf /").unwrap(), ["echo", "$HOME;", "rm", "-rf", "/"]);
+        assert_eq!(
+            split_args("echo $HOME; rm -rf /").unwrap(),
+            ["echo", "$HOME;", "rm", "-rf", "/"]
+        );
     }
 
     #[cfg(unix)]
@@ -153,10 +167,19 @@ mod tests {
         assert!(run("/nonexistent/prog", &[], DEFAULT_TIMEOUT).is_err());
         // env is passed, and the password variable never is
         std::env::set_var("NEXDESK_PASSWORD", "secret");
-        run("sh -c 'test -z \"$NEXDESK_PASSWORD\" && test \"$NEXDESK_HOST\" = h'", &[("NEXDESK_HOST", "h")], DEFAULT_TIMEOUT).unwrap();
+        run(
+            "sh -c 'test -z \"$NEXDESK_PASSWORD\" && test \"$NEXDESK_HOST\" = h'",
+            &[("NEXDESK_HOST", "h")],
+            DEFAULT_TIMEOUT,
+        )
+        .unwrap();
         // shell metacharacters are not interpreted (the file must not be created)
         let marker = std::env::temp_dir().join(format!("nexdesk-hook-{}", std::process::id()));
-        let _ = run(&format!("echo hi > {}", marker.display()), &[], DEFAULT_TIMEOUT);
+        let _ = run(
+            &format!("echo hi > {}", marker.display()),
+            &[],
+            DEFAULT_TIMEOUT,
+        );
         assert!(!marker.exists());
     }
 
