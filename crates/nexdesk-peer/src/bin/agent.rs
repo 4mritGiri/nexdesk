@@ -69,6 +69,16 @@ fn main() {
     let (files_tx, files_rx) = mpsc::channel::<bool>();
     let conn_rx = Mutex::new(conn_rx);
     let files_rx = Mutex::new(files_rx);
+    // The screen is read through X11. A Wayland desktop shows only X11 (XWayland) windows there, so
+    // the viewer would see an empty or black screen. Say so instead of leaving people guessing.
+    if std::env::var("XDG_SESSION_TYPE").map(|v| v.eq_ignore_ascii_case("wayland")).unwrap_or(false) {
+        let msg = "This desktop runs Wayland: viewers will see a black or empty screen (only X11 windows are visible). Log in with 'Ubuntu on Xorg' / the X11 session to share the whole screen. Wayland sharing is not built yet.";
+        eprintln!("warning: {msg}");
+        if stdio {
+            println!("WARN {msg}");
+            let _ = std::io::stdout().flush();
+        }
+    }
     let mut policy = Policy::new(
         view_only,
         clipboard,

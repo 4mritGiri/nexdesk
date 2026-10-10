@@ -71,7 +71,14 @@ pub fn probe(addr: &str, relay: Option<&str>) -> Result<String, String> {
         }
     }
     let err = String::from_utf8_lossy(&out.stderr);
-    Err(err.lines().last().unwrap_or("could not reach the agent").trim().to_string())
+    match err.lines().rev().find(|l| !l.trim().is_empty()) {
+        Some(l) => Err(l.trim().to_string()),
+        // No answer and no explanation: almost always an old nexdesk-peer-view next to a newer manager.
+        None => Err(format!(
+            "nexdesk-peer-view stopped without saying why ({}). It is probably an old build: run 'cargo build --workspace' (or reinstall) so every NexDesk program is up to date, then try again.",
+            out.status
+        )),
+    }
 }
 
 /// Open a viewer window. `trust` pins the agent if (and only if) its fingerprint is exactly this.
@@ -107,6 +114,8 @@ pub enum AgentEvent {
     Files(u32, u64, String),
     /// A chat line from the viewer.
     Chat(String),
+    /// A warning the person should read (for example: this desktop is Wayland).
+    Warn(String),
     Exited,
 }
 
@@ -149,6 +158,7 @@ impl Agent {
                     Some(("ID", i)) if nexdesk_network::proto::valid_id(i.trim()) => AgentEvent::Id(i.trim().into()),
                     Some(("RELAY", t)) => AgentEvent::Relay(t.chars().filter(|c| !c.is_control()).take(120).collect()),
                     Some(("REQUEST", f)) if valid_fingerprint(f.trim()) => AgentEvent::Request(f.trim().into()),
+                    Some(("WARN", t)) => AgentEvent::Warn(t.chars().filter(|c| !c.is_control()).take(300).collect()),
                     Some(("CHAT", t)) => AgentEvent::Chat(t.chars().filter(|c| !c.is_control()).take(crate::wire::MAX_CHAT).collect()),
                     Some(("FILES", t)) => {
                         let mut p = t.splitn(3, ' ');

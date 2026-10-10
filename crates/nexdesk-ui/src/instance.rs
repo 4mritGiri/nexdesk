@@ -6,7 +6,18 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+
+/// Set when something wants this window in front: a "focus" message, or a question that needs an answer.
+static RAISE: AtomicBool = AtomicBool::new(false);
+
+pub fn raise() {
+    RAISE.store(true, Ordering::SeqCst);
+}
+
+/// True once per request; the window polls this.
+pub fn take_raise() -> bool {
+    RAISE.swap(false, Ordering::SeqCst)
+}
 
 fn path() -> PathBuf {
     if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -16,24 +27,25 @@ fn path() -> PathBuf {
     PathBuf::from(format!("/tmp/nexdesk-manager-{uid}.sock"))
 }
 
-/// Start listening. The returned flag is set each time somebody asks for the window.
-/// `None` when another manager already owns the socket (that one keeps answering).
-pub fn listen() -> Option<Arc<AtomicBool>> {
+/// Start listening; each "focus" message calls `raise()`.
+/// Returns false when another manager already owns the socket (that one keeps answering).
+pub fn listen() -> bool {
     let p = path();
     let listener = match UnixListener::bind(&p) {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             if std::os::unix::net::UnixStream::connect(&p).is_ok() {
-                return None;
+                return false;
             }
             let _ = std::fs::remove_file(&p); // stale socket from a crashed run
-            UnixListener::bind(&p).ok()?
+            match UnixListener::bind(&p) {
+                Ok(l) => l,
+                Err(_) => return false,
+            }
         }
-        Err(_) => return None,
+        Err(_) => return false,
     };
     let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
-    let flag = Arc::new(AtomicBool::new(false));
-    let f = flag.clone();
     std::thread::Builder::new()
         .name("manager-focus".into())
         .spawn(move || {
@@ -43,12 +55,11 @@ pub fn listen() -> Option<Arc<AtomicBool>> {
                 // at most 64 bytes: anything longer is not ours
                 let read = BufReader::new(conn.take(64)).read_line(&mut line);
                 if read.is_ok() && line.trim() == "focus" {
-                    f.store(true, Ordering::SeqCst);
+                    raise();
                 }
             }
         })
-        .ok()?;
-    Some(flag)
+        .is_ok()
 }
 
 pub fn cleanup() {

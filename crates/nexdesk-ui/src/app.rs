@@ -597,10 +597,15 @@ impl NexDeskApp {
                     AgentEvent::Request(f) => {
                         self.agent_request = Some(f);
                         self.nav.screen = Screen::Remote; // make sure the person sees the question
+                        #[cfg(unix)]
+                        crate::instance::raise(); // and that this window is in front
                     }
+                    AgentEvent::Warn(t) => self.remote_msg = t,
                     AgentEvent::Files(c, b, n) => {
                         self.files_request = Some((c, b, n));
                         self.nav.screen = Screen::Remote;
+                        #[cfg(unix)]
+                        crate::instance::raise();
                     }
                     AgentEvent::Chat(t) => {
                         self.chat_log.push((false, t));
@@ -652,6 +657,9 @@ impl NexDeskApp {
         }
         if !nexdesk_peer::control::valid_addr(&raw) {
             return Err("The relay server must look like relay.example.com or relay.example.com:21117.".into());
+        }
+        if nexdesk_peer::control::is_wildcard_host(&raw) {
+            return Err("0.0.0.0 is the address a relay listens on, not where to find it. Enter the real address of the computer that runs nexdesk-relay, for example 192.168.1.20:21117 (the same on every computer). On a local network you can skip the relay and connect to the other computer's address instead.".into());
         }
         if let Some(d) = &dir {
             let _ = nexdesk_peer::store::save_relay(d, &raw);
@@ -739,6 +747,31 @@ impl NexDeskApp {
             }
         }
         self.chat_input.update(cx, |i, cx| i.set_value("", cx));
+    }
+
+    /// Copy this computer's ID (digits only, no spaces) to the clipboard.
+    fn copy_id(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.agent_id.clone() {
+            cx.write_to_clipboard(ClipboardItem::new_string(id));
+            self.remote_msg = "ID copied.".into();
+        }
+    }
+
+    /// Give this computer a new ID. Sharing restarts so the relay learns it; the fingerprint stays the same.
+    fn new_id(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = nexdesk_peer::store::default_dir() else {
+            self.remote_msg = "Cannot find the config directory.".into();
+            return;
+        };
+        if let Err(e) = nexdesk_peer::store::new_id(&dir) {
+            self.remote_msg = format!("Could not create a new ID: {e}");
+            return;
+        }
+        if self.agent.is_some() {
+            self.toggle_agent(cx); // stop
+            self.toggle_agent(cx); // start again with the new ID
+        }
+        self.remote_msg = "New ID created. The old one no longer reaches this computer.".into();
     }
 
     fn answer_request(&mut self, yes: bool) {
@@ -1844,6 +1877,29 @@ fn remote_view(
             let spaced = format!("{} {} {}", &id[0..3], &id[3..6], &id[6..9]);
             mine.child(hint("Your ID - tell it to the person who will connect".into()))
                 .child(div().text_3xl().font_weight(FontWeight::SEMIBOLD).child(spaced))
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(toolbar_button_dyn(
+                            "id-copy".into(),
+                            "Copy ID",
+                            true,
+                            cx.listener(|this, _e, _w, cx| {
+                                this.copy_id(cx);
+                                cx.notify();
+                            }),
+                        ))
+                        .child(toolbar_button_dyn(
+                            "id-new".into(),
+                            "New ID",
+                            true,
+                            cx.listener(|this, _e, _w, cx| {
+                                this.new_id(cx);
+                                cx.notify();
+                            }),
+                        )),
+                )
         }
         (None, true) => mine
             .child(hint("Sharing is on".into()))
@@ -4579,6 +4635,9 @@ impl Render for TextInput {
 // ============================================================================
 
 pub fn run(engine_path: std::path::PathBuf) {
+    // Lets the session window's "+" button bring this window to the front.
+    #[cfg(unix)]
+    let owns_focus_socket = crate::instance::listen();
     application().with_assets(crate::assets::Assets).run(move |cx: &mut App| {
         cx.bind_keys([
             KeyBinding::new("backspace", InputBackspace, Some("NexDeskTextInput")),
@@ -4646,7 +4705,26 @@ pub fn run(engine_path: std::path::PathBuf) {
         .expect("open NexDesk window");
 
         cx.activate(true);
+
+        // Brings this window to the front when the session window's "+" asks, or a question needs an answer.
+        #[cfg(unix)]
+        cx.spawn(async move |cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+            if crate::instance::take_raise() {
+                cx.update(|cx| {
+                    cx.activate(true);
+                    for w in cx.windows() {
+                        let _ = w.update(cx, |_, window, _| window.activate_window());
+                    }
+                });
+            }
+        })
+        .detach();
     });
+    #[cfg(unix)]
+    if owns_focus_socket {
+        crate::instance::cleanup();
+    }
 }
 
 #[cfg(test)]

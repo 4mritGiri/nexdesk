@@ -791,9 +791,8 @@ impl App {
     }
 
     /// "+": new connections are chosen in the NexDesk manager and open here as tabs.
-    /// Ask the manager to come to the front (or start it). Wayland compositors refuse to raise a
-    /// window that was not asked for by the focused application, so this window also steps aside
-    /// (minimises); the manager is then what the person sees. It comes back when a tab is added.
+    /// If the manager is already open, ask it to come to the front; otherwise start it.
+    /// This window stays as it is.
     fn new_tab_hint(&mut self) {
         if !crate::ipc::focus_manager() {
             let name = if cfg!(windows) { "nexdesk.exe" } else { "nexdesk" };
@@ -804,9 +803,6 @@ impl App {
             }
         }
         self.release_all_keys();
-        if let Some(w) = &self.window {
-            w.set_minimized(true);
-        }
     }
 
     fn bar_action(&mut self, hit: BarHit, el: &ActiveEventLoop) {
