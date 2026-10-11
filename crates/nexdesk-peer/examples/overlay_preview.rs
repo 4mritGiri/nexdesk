@@ -1,5 +1,5 @@
 //! Writes `overlay-preview.ppm`: the viewer overlay drawn over a dummy desktop, to look at the design without a display.
-use nexdesk_peer::overlay::{self, gfx::Canvas, Action, BarItem, ChatView, Mode};
+use nexdesk_peer::overlay::{self, gfx::Canvas, Action, BarItem, BarView, ChatView, Mode};
 fn main() {
     let (w, h) = (1280usize, 720usize);
     let mut buf: Vec<u32> = (0..w * h)
@@ -15,17 +15,22 @@ fn main() {
         group,
     };
     let items = vec![
-        it(Action::Scale, "1:1", false, 0),
-        it(Action::Fullscreen, "Full screen", false, 0),
-        it(Action::Control, "Control on", true, 1),
-        it(Action::Cad, "Ctrl+Alt+Del", false, 1),
-        it(Action::Screenshot, "Copy screen", false, 2),
-        it(Action::Chat, "Chat", true, 2),
+        it(Action::Scale, "Actual size (1:1)", false, 0),
+        it(Action::Cad, "Send Ctrl+Alt+Del", false, 1),
+        it(Action::Screenshot, "Copy screen to clipboard", false, 2),
+        it(Action::Control, "Pause control (Ctrl+Alt+G)", true, 1),
+        it(Action::Chat, "Chat (Ctrl+Alt+C)", true, 2),
     ];
     let mut c = Canvas::new(&mut buf, w, h);
-    let bar = overlay::bar_layout(w as u32, &items);
-    overlay::draw_bar(&mut c, &bar, &items, Some(Action::Cad));
-    let g = overlay::chat_layout(w as u32, h as u32);
+    let bar = overlay::bar_layout(w as u32, 1, true, &items);
+    let view = BarView {
+        title: "nexdesk - 495585340",
+        dot: overlay::dot_live(),
+        fullscreen: false,
+        pinned: false,
+    };
+    overlay::draw_bar(&mut c, &bar, &items, &view, Some(Action::Cad));
+    let g = overlay::chat_layout(w as u32, h as u32, 40);
     let msgs = vec![
         (false, "Hi, can you see my screen?".to_string()),
         (

@@ -117,3 +117,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Fingerprint of the agent identity on this computer, if one exists (never creates it).
+/// A viewer whose target has this fingerprint is looking at its own screen.
+pub fn own_agent_fingerprint(dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(dir.join("agent-identity")).ok()?;
+    let id = Identity::from_seed_bytes(&bytes).ok()?;
+    Some(id.public().fingerprint_string())
+}
+
+#[cfg(test)]
+mod own_agent_tests {
+    use super::*;
+
+    #[test]
+    fn own_agent_fingerprint_matches_only_the_local_identity() {
+        let dir = std::env::temp_dir().join(format!("nexdesk-own-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(own_agent_fingerprint(&dir), None, "nothing is created");
+        let id = load_or_create_identity(&dir, "agent-identity").unwrap();
+        assert_eq!(
+            own_agent_fingerprint(&dir),
+            Some(id.public().fingerprint_string())
+        );
+        let other = Identity::generate().unwrap();
+        assert_ne!(
+            own_agent_fingerprint(&dir),
+            Some(other.public().fingerprint_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

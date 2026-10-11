@@ -23,7 +23,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
-use winit::window::{CustomCursor, Fullscreen, Window, WindowId};
+use winit::window::{CustomCursor, Fullscreen, ResizeDirection, Window, WindowId};
 
 enum Ev {
     Msg(Msg),
@@ -53,6 +53,13 @@ struct App {
     bar_open: bool,
     bar_until: Option<Instant>,
     hover: Option<Action>,
+    /// The target is this very computer: forwarding input would move the real pointer under the user's hand.
+    local_locked: bool,
+    /// Keep the floating bar (full screen) visible.
+    pinned: bool,
+    /// Use the system title bar instead of our own header.
+    native_frame: bool,
+    last_header_click: Option<Instant>,
     /// A press that started on the overlay: its release is not for the remote computer either.
     ui_click: bool,
     toast: Option<(String, Instant)>,
@@ -93,8 +100,45 @@ impl App {
         (s.width > 0 && s.height > 0).then_some((s.width, s.height))
     }
 
-    fn view(&self) -> Option<View> {
+    /// UI scale: 1 normally, 2 on a high-density screen.
+    fn ui(&self) -> i32 {
+        let f = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor())
+            .unwrap_or(1.0);
+        if f >= 2.5 {
+            3
+        } else if f >= 1.5 {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Windowed mode with our own header (no system title bar).
+    fn docked(&self) -> bool {
+        !self.native_frame && !self.fullscreen
+    }
+
+    /// Height of the docked header in pixels (0 when not docked).
+    fn header_h(&self) -> i32 {
+        if self.docked() {
+            overlay::HEADER_H * self.ui()
+        } else {
+            0
+        }
+    }
+
+    /// The part of the window that shows the remote picture (below the docked header).
+    fn view_size(&self) -> Option<(u32, u32)> {
         let (w, h) = self.win_size()?;
+        let h = h.checked_sub(self.header_h() as u32)?;
+        (h > 0).then_some((w, h))
+    }
+
+    fn view(&self) -> Option<View> {
+        let (w, h) = self.view_size()?;
         let sc = self.screen.as_ref()?;
         if self.actual {
             Actual::new(sc.w, sc.h, w, h, self.pan.0, self.pan.1).map(View::Actual)
@@ -110,51 +154,48 @@ impl App {
             on,
             group,
         };
-        let mut l = vec![
-            item(
-                Action::Scale,
-                if self.actual { "Fit" } else { "1:1" },
-                false,
-                0,
-            ),
-            item(
-                Action::Fullscreen,
-                if self.fullscreen {
-                    "Window"
-                } else {
-                    "Full screen"
-                },
-                false,
-                0,
-            ),
-        ];
+        let mut l = vec![item(
+            Action::Scale,
+            if self.actual {
+                "Fit to window"
+            } else {
+                "Actual size (1:1)"
+            },
+            self.actual,
+            0,
+        )];
         if self.monitors.len() > 1 {
             l.push(item(
                 Action::Monitor,
-                &format!(
-                    "Screen {}/{}",
-                    self.current_monitor + 1,
-                    self.monitors.len()
-                ),
+                &format!("{}/{}", self.current_monitor + 1, self.monitors.len()),
                 false,
                 0,
             ));
         }
         if !self.view_only {
+            l.push(item(Action::Cad, "Send Ctrl+Alt+Del", false, 1));
+        }
+        l.push(item(
+            Action::Screenshot,
+            "Copy screen to clipboard",
+            false,
+            2,
+        ));
+        if !self.view_only {
             l.push(item(
                 Action::Control,
                 if self.control {
-                    "Control on"
+                    "Pause control (Ctrl+Alt+G)"
+                } else if self.local_locked {
+                    "Control is off: this is your own computer"
                 } else {
-                    "Control off"
+                    "Resume control (Ctrl+Alt+G)"
                 },
                 self.control,
                 1,
             ));
-            l.push(item(Action::Cad, "Ctrl+Alt+Del", false, 1));
         }
-        l.push(item(Action::Screenshot, "Copy screen", false, 2));
-        l.push(item(Action::Chat, "Chat", self.chat_open, 2));
+        l.push(item(Action::Chat, "Chat (Ctrl+Alt+C)", self.chat_open, 2));
         l
     }
 
@@ -194,6 +235,10 @@ impl App {
         if self.view_only || self.control == on {
             return;
         }
+        if on && self.local_locked {
+            self.say("This is your own computer: controlling it would fight your own mouse. Connect from another computer to control it");
+            return;
+        }
         if !on {
             self.release_all();
         }
@@ -207,14 +252,21 @@ impl App {
 
     fn chat_geom(&self) -> Option<overlay::ChatGeom> {
         let (w, h) = self.win_size()?;
-        self.chat_open.then(|| overlay::chat_layout(w, h))
+        let top = if self.docked() || self.bar_visible() {
+            overlay::HEADER_H * self.ui()
+        } else {
+            0
+        };
+        self.chat_open.then(|| overlay::chat_layout(w, h, top))
     }
 
     /// The overlay control under the pointer, if any.
     fn hit_at(&self, x: f64, y: f64) -> Option<Hit> {
         let (w, _) = self.win_size()?;
         let items = self.bar_items();
-        let bar = self.bar_visible().then(|| overlay::bar_layout(w, &items));
+        let bar = self
+            .bar_visible()
+            .then(|| overlay::bar_layout(w, self.ui(), self.docked(), &items));
         overlay::hit_test(bar.as_ref(), self.chat_geom().as_ref(), x, y)
     }
 
@@ -223,7 +275,10 @@ impl App {
     }
 
     fn bar_visible(&self) -> bool {
-        self.bar_open || self.bar_until.map(|t| t > Instant::now()).unwrap_or(false)
+        self.docked()
+            || (self.fullscreen && self.pinned)
+            || self.bar_open
+            || self.bar_until.map(|t| t > Instant::now()).unwrap_or(false)
     }
 
     fn say(&mut self, msg: impl Into<String>) {
@@ -255,6 +310,15 @@ impl App {
             .filter(|(_, t)| *t > Instant::now())
             .map(|(m, _)| m.clone());
         let chat_geom = self.chat_geom();
+        let (docked, docked_h, ui) = (self.docked(), self.header_h(), self.ui());
+        let (title, pinned, fullscreen) = (self.title.clone(), self.pinned, self.fullscreen);
+        let dot = if self.screen.is_none() {
+            overlay::dot_idle()
+        } else if self.control || self.view_only {
+            overlay::dot_live()
+        } else {
+            overlay::dot_paused()
+        };
         let (Some(win), Some(surface)) = (self.window.as_ref(), self.surface.as_mut()) else {
             return;
         };
@@ -268,9 +332,13 @@ impl App {
         let Ok(mut buf) = surface.buffer_mut() else {
             return;
         };
+        let head = (docked_h as usize * size.width as usize).min(buf.len());
         match (&self.screen, view) {
-            (Some(sc), Some(v)) => v.blit(&sc.buf, &mut buf),
-            _ => buf.fill(0x00_11_13_1d),
+            (Some(sc), Some(v)) => {
+                buf[..head].fill(0x00_1e_1e_1e);
+                v.blit(&sc.buf, &mut buf[head..]);
+            }
+            _ => buf.fill(0x00_1e_1e_1e),
         }
         let mut canvas = Canvas::new(&mut buf, size.width as usize, size.height as usize);
         if self.screen.is_none() {
@@ -281,10 +349,6 @@ impl App {
         }
         if mode != Mode::Controlling || visible {
             overlay::draw_chip(&mut canvas, mode, note);
-        }
-        if visible {
-            let bar = overlay::bar_layout(size.width, &items);
-            overlay::draw_bar(&mut canvas, &bar, &items, hover);
         }
         if let Some(g) = chat_geom {
             overlay::draw_chat(
@@ -297,6 +361,16 @@ impl App {
                     scroll: self.chat_scroll,
                 },
             );
+        }
+        if visible {
+            let bar = overlay::bar_layout(size.width, ui, docked, &items);
+            let view = overlay::BarView {
+                title: &title,
+                dot,
+                fullscreen,
+                pinned,
+            };
+            overlay::draw_bar(&mut canvas, &bar, &items, &view, hover);
         }
         if let Some(m) = toast {
             overlay::draw_toast(&mut canvas, &m);
@@ -314,6 +388,13 @@ impl App {
             Action::Cad => self.send_cad(),
             Action::Screenshot => self.screenshot(),
             Action::Chat => self.toggle_chat(),
+            Action::Minimize => {
+                if let Some(w) = &self.window {
+                    w.set_minimized(true);
+                }
+            }
+            Action::Pin => self.pinned = !self.pinned,
+            Action::Close => {} // handled where the event loop is at hand
             Action::Control => {
                 let on = !self.control;
                 self.set_control(on);
@@ -428,21 +509,24 @@ impl App {
         }
     }
 
+    fn send_chat(&mut self) {
+        let t = crate::wire::clean_chat(self.chat_input.trim());
+        if !t.is_empty() {
+            if self.out.send(Msg::Chat(t.clone())).is_ok() {
+                self.chat.push((true, t));
+                self.chat_scroll = 0;
+            }
+            self.chat_input.clear();
+        }
+        self.redraw();
+    }
+
     fn chat_key(&mut self, event: &winit::event::KeyEvent) {
         if event.state != ElementState::Pressed {
             return;
         }
         match &event.logical_key {
-            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => {
-                let t = crate::wire::clean_chat(self.chat_input.trim());
-                if !t.is_empty() {
-                    if self.out.send(Msg::Chat(t.clone())).is_ok() {
-                        self.chat.push((true, t));
-                        self.chat_scroll = 0;
-                    }
-                    self.chat_input.clear();
-                }
-            }
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => self.send_chat(),
             // Esc gives the keyboard back to the remote computer; the panel stays open
             winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) => {
                 self.chat_focus = false
@@ -450,19 +534,43 @@ impl App {
             winit::keyboard::Key::Named(winit::keyboard::NamedKey::Backspace) => {
                 self.chat_input.pop();
             }
-            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space) => {
-                self.chat_input.push(' ')
-            }
-            winit::keyboard::Key::Character(c)
-                if !self.mods.control_key() && !self.mods.alt_key() =>
-            {
-                if self.chat_input.len() + c.len() <= crate::wire::MAX_CHAT {
-                    self.chat_input.push_str(c);
+            // everything else that produces text (letters, digits, space, accents, other scripts)
+            _ if !self.mods.control_key() && !self.mods.alt_key() => {
+                if let Some(t) = &event.text {
+                    for ch in t.chars().filter(|c| !c.is_control()) {
+                        if self.chat_input.len() + ch.len_utf8() <= crate::wire::MAX_CHAT {
+                            self.chat_input.push(ch);
+                        }
+                    }
                 }
             }
             _ => {}
         }
         self.redraw();
+    }
+
+    /// Window edge under the pointer, for resizing the window that has no system frame.
+    fn resize_edge(&self) -> Option<ResizeDirection> {
+        let w = self.window.as_ref()?;
+        if !self.docked() || w.is_maximized() {
+            return None;
+        }
+        let s = w.inner_size();
+        let e = f64::from(6 * self.ui());
+        let (x, y) = self.cursor;
+        let (l, r) = (x < e, x >= f64::from(s.width) - e);
+        let (t, b) = (y < e, y >= f64::from(s.height) - e);
+        Some(match (l, r, t, b) {
+            (true, _, true, _) => ResizeDirection::NorthWest,
+            (_, true, true, _) => ResizeDirection::NorthEast,
+            (true, _, _, true) => ResizeDirection::SouthWest,
+            (_, true, _, true) => ResizeDirection::SouthEast,
+            (true, ..) => ResizeDirection::West,
+            (_, true, ..) => ResizeDirection::East,
+            (_, _, true, _) => ResizeDirection::North,
+            (_, _, _, true) => ResizeDirection::South,
+            _ => return None,
+        })
     }
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
@@ -471,11 +579,17 @@ impl App {
             return;
         };
         let items = self.bar_items();
-        let bar = overlay::bar_layout(w, &items);
-        if y < f64::from(overlay::HOT_EDGE) {
-            self.bar_open = true;
-        } else if self.bar_open && !bar.rect.contains(x, y) {
+        let bar = overlay::bar_layout(w, self.ui(), self.docked(), &items);
+        // The floating bar (full screen) opens at the top edge and stays open while the pointer is on it.
+        // It starts at y = 0, so there is no gap the pointer can fall through on its way down.
+        if y < f64::from(overlay::HOT_EDGE) || bar.rect.contains(x, y) {
+            if !self.docked() && !self.bar_open {
+                self.bar_open = true;
+                self.redraw();
+            }
+        } else if self.bar_open {
             self.bar_open = false;
+            self.redraw();
         }
         let hover = match self.hit_at(x, y) {
             Some(Hit::Bar(a)) => Some(a),
@@ -487,7 +601,8 @@ impl App {
         }
         // 1:1 view of a bigger screen: pointing at a window edge scrolls
         if self.actual {
-            if let (Some(View::Actual(a)), Some((ww, wh))) = (self.view(), self.win_size()) {
+            if let (Some(View::Actual(a)), Some((ww, wh))) = (self.view(), self.view_size()) {
+                let y = y - f64::from(self.header_h());
                 if a.pannable() {
                     let (mut px, mut py) = (a.pan_x, a.pan_y);
                     let (xi, yi) = (x as i32, y as i32);
@@ -520,6 +635,7 @@ impl ApplicationHandler<Ev> for App {
         }
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
+            .with_decorations(self.native_frame)
             .with_inner_size(LogicalSize::new(1280, 720));
         let Ok(win) = el.create_window(attrs) else {
             el.exit();
@@ -697,11 +813,11 @@ impl ApplicationHandler<Ev> for App {
                     }
                     return;
                 }
-                if !self.forwarding() {
+                if !self.forwarding() || self.resize_edge().is_some() {
                     return;
                 }
                 if let Some(v) = self.view() {
-                    let (x, y) = v.to_remote(position.x, position.y);
+                    let (x, y) = v.to_remote(position.x, position.y - f64::from(self.header_h()));
                     let _ = self.out.send(Msg::MouseMove { x, y });
                 }
             }
@@ -720,15 +836,42 @@ impl ApplicationHandler<Ev> for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
                 if pressed {
+                    if button == MouseButton::Left {
+                        if let (Some(dir), Some(w)) = (self.resize_edge(), self.window.as_ref()) {
+                            let _ = w.drag_resize_window(dir);
+                            return;
+                        }
+                    }
                     if let Some(hit) = self.hit_at(self.cursor.0, self.cursor.1) {
                         self.ui_click = true;
                         if button == MouseButton::Left {
                             match hit {
+                                Hit::Bar(Action::Close) => el.exit(),
                                 Hit::Bar(a) => self.do_action(a),
                                 Hit::ChatClose => self.toggle_chat(),
+                                Hit::ChatSend => {
+                                    self.chat_focus = true;
+                                    self.send_chat();
+                                }
                                 Hit::ChatInput => {
                                     self.chat_focus = true;
                                     self.redraw();
+                                }
+                                Hit::BarBackground if self.docked() => {
+                                    // empty part of the header: drag the window, double-click maximises
+                                    let now = Instant::now();
+                                    let double = self
+                                        .last_header_click
+                                        .map(|t| now.duration_since(t) < Duration::from_millis(400))
+                                        .unwrap_or(false);
+                                    self.last_header_click = Some(now);
+                                    if let Some(w) = &self.window {
+                                        if double {
+                                            w.set_maximized(!w.is_maximized());
+                                        } else {
+                                            let _ = w.drag_window();
+                                        }
+                                    }
                                 }
                                 Hit::ChatPanel | Hit::BarBackground => {}
                             }
@@ -770,7 +913,7 @@ impl ApplicationHandler<Ev> for App {
                 };
                 match self.hit_at(self.cursor.0, self.cursor.1) {
                     // wheel over the chat scrolls the chat
-                    Some(Hit::ChatPanel | Hit::ChatInput) => {
+                    Some(Hit::ChatPanel | Hit::ChatInput | Hit::ChatSend) => {
                         if let Some(g) = self.chat_geom() {
                             let max = overlay::chat_max_scroll(&g, &self.chat);
                             self.chat_scroll =
@@ -1044,7 +1187,7 @@ pub fn run() {
                 )
             }
             "-h" | "--help" => {
-                println!("nexdesk-peer-view HOST:PORT [--relay RELAY:PORT] [--forget] [--no-clipboard] [--trust SHA256:..] [--probe]\n  --relay   treat the address as a nine digit ID and reach it through this relay\n  --forget  drop the pinned identity of this agent first\n  --trust   pin the agent if its fingerprint is exactly this\n  --probe   print \"FINGERPRINT <fp>\" and exit (no session)");
+                println!("nexdesk-peer-view HOST:PORT [--relay RELAY:PORT] [--forget] [--no-clipboard] [--trust SHA256:..] [--probe]\n  --relay   treat the address as a nine digit ID and reach it through this relay\n  --forget  drop the pinned identity of this agent first\n  --trust   pin the agent if its fingerprint is exactly this\n  --probe   print \"FINGERPRINT <fp>\" and exit (no session)\n  --native-frame  use the system title bar instead of NexDesk's own header\n  --allow-local-control  allow controlling this very computer (testing only)");
                 return;
             }
             _ => addr = Some(a),
@@ -1127,6 +1270,8 @@ pub fn run() {
         peer.fingerprint_string()
     );
 
+    let own_dir = dir.clone();
+    let peer_fp = peer.fingerprint_string();
     let target_for_retry = target.clone();
     let el = EventLoop::<Ev>::with_user_event()
         .build()
@@ -1139,10 +1284,11 @@ pub fn run() {
         supervise((reader, writer), rx, proxy, target_for_retry, agent_fp, dir)
     });
     // a viewer that controls its own computer makes the pointer chase itself: start with control off
-    let local = match &target {
-        Target::Direct(a) => crate::local::is_this_computer(a),
-        Target::Relay { relay, .. } => crate::local::is_this_computer(relay),
-    };
+    // The agent's own fingerprint is the reliable test (an ID through a relay can still be this computer);
+    // a loopback or own address is the other sign. `--allow-local-control` is for testing only.
+    let local = store::own_agent_fingerprint(&own_dir).as_deref() == Some(peer_fp.as_str())
+        || matches!(&target, Target::Direct(a) if crate::local::is_this_computer(a));
+    let local_locked = local && !std::env::args().any(|a| a == "--allow-local-control");
     let mut app = App {
         window: None,
         surface: None,
@@ -1159,6 +1305,10 @@ pub fn run() {
         bar_open: false,
         bar_until: None,
         hover: None,
+        local_locked,
+        pinned: false,
+        native_frame: std::env::args().any(|a| a == "--native-frame"),
+        last_header_click: None,
         ui_click: false,
         toast: None,
         monitors: Vec::new(),
@@ -1176,13 +1326,13 @@ pub fn run() {
         chat: Vec::new(),
         chat_focus: false,
         chat_scroll: 0,
-        control: !local,
+        control: !local_locked,
         held_buttons: 0,
         held_keys: HashSet::new(),
     };
     if local {
         app.toast = Some((
-            "This is your own computer, so control starts off. Click \"Control off\" or press Ctrl+Alt+G to turn it on."
+            "This is your own computer, so you can watch it and chat, but not control it: your own mouse would fight the remote one."
                 .into(),
             Instant::now() + Duration::from_secs(8),
         ));

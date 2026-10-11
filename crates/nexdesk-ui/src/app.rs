@@ -2192,6 +2192,79 @@ fn field(input: Entity<TextInput>, cx: &mut Context<NexDeskApp>) -> impl IntoEle
         .child(div().w_full().child(input))
 }
 
+/// Primary (accent) or quiet button with an icon in front of the label.
+fn icon_button(
+    id: &str,
+    icon: &'static str,
+    label: &'static str,
+    primary: bool,
+    enabled: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let fg = if !enabled {
+        dim()
+    } else if primary {
+        on_accent()
+    } else {
+        text()
+    };
+    div()
+        .id(SharedString::from(id.to_string()))
+        .flex_none()
+        .h(px(34.))
+        .px_3()
+        .gap_2()
+        .flex()
+        .items_center()
+        .rounded(px(9.))
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg)
+        .bg(if primary && enabled {
+            accent()
+        } else {
+            panel_2()
+        })
+        .when(enabled, |d| {
+            d.cursor_pointer()
+                .hover(|s| s.bg(if primary { accent_hover() } else { hover() }))
+                .on_click(on_click)
+        })
+        .child(ico(icon, 16., fg))
+        .child(label)
+}
+
+/// Rounded icon tile used in card headers.
+fn icon_tile(name: &'static str, tint: gpui::Rgba) -> impl IntoElement {
+    div()
+        .flex_none()
+        .size(px(34.))
+        .rounded(px(10.))
+        .bg(icon_bg())
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(ico(name, 18., tint))
+}
+
+/// Small status pill: coloured dot and a word.
+fn status_pill(on: bool, on_text: &'static str, off_text: &'static str) -> impl IntoElement {
+    let c = if on { ok() } else { dim() };
+    div()
+        .flex_none()
+        .h(px(24.))
+        .px_2()
+        .gap_1()
+        .flex()
+        .items_center()
+        .rounded(px(12.))
+        .bg(panel_2())
+        .text_xs()
+        .text_color(if on { text() } else { muted() })
+        .child(div().size(px(7.)).rounded(px(4.)).bg(c))
+        .child(if on { on_text } else { off_text })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn remote_view(
     addr: Entity<TextInput>,
@@ -2213,91 +2286,163 @@ fn remote_view(
     let card = || {
         div()
             .flex_1()
-            .min_w(px(300.))
+            .min_w(px(320.))
             .p_5()
-            .rounded(px(12.))
+            .rounded(px(14.))
             .bg(panel())
+            .border_1()
+            .border_color(border())
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_4()
     };
-    let title = |t: &'static str| div().text_base().font_weight(FontWeight::SEMIBOLD).child(t);
-    let hint = |t: String| div().text_xs().text_color(muted()).child(t);
-    let has_relay = !relay_input.read(cx).value().trim().is_empty();
-
-    // Left: this computer (like "This Desk")
-    let mut mine = card().child(title("This computer"));
-    mine = match (&agent_id, sharing) {
-        (Some(id), _) => {
-            let spaced = format!("{} {} {}", &id[0..3], &id[3..6], &id[6..9]);
-            mine.child(hint(
-                "Your ID - tell it to the person who will connect".into(),
-            ))
-            .child(
-                div()
-                    .text_3xl()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(spaced),
-            )
+    let heading = |icon: &'static str, title: &'static str, sub: &'static str| {
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(icon_tile(icon, accent_hover()))
             .child(
                 div()
                     .flex()
-                    .gap_3()
-                    .child(toolbar_button_dyn(
-                        "id-copy".into(),
-                        "Copy ID",
-                        true,
-                        cx.listener(|this, _e, _w, cx| {
-                            this.copy_id(cx);
-                            cx.notify();
-                        }),
-                    ))
-                    .child(toolbar_button_dyn(
-                        "id-new".into(),
-                        "New ID",
-                        true,
-                        cx.listener(|this, _e, _w, cx| {
-                            this.new_id(cx);
-                            cx.notify();
-                        }),
-                    )),
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(div().text_xs().text_color(muted()).child(sub)),
             )
-        }
-        (None, true) => mine
-            .child(hint("Sharing is on".into()))
-            .child(div().text_sm().child(if has_relay {
-                "Getting your ID..."
-            } else {
-                "No ID yet: add a relay server under Settings below, then turn sharing off and on."
-            })),
-        (None, false) => mine
-            .child(hint("Sharing is off. Turn it on to get an ID.".into()))
+    };
+    let hint = |t: String| div().text_xs().text_color(muted()).child(t);
+    let has_relay = !relay_input.read(cx).value().trim().is_empty();
+
+    // ---- left: this computer
+    let mut mine = card().child(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(heading(
+                "monitor",
+                "This computer",
+                "Let someone connect to you",
+            ))
+            .child(status_pill(sharing, "Sharing", "Not sharing")),
+    );
+    // the ID, big, in a quiet box
+    let id_text = match &agent_id {
+        Some(id) => format!("{} {} {}", &id[0..3], &id[3..6], &id[6..9]),
+        None => "--- --- ---".to_string(),
+    };
+    mine = mine.child(
+        div()
+            .p_4()
+            .rounded(px(12.))
+            .bg(input_bg())
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_xs().text_color(muted()).child("Your ID"))
             .child(
                 div()
                     .text_3xl()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(muted())
-                    .child("--- --- ---"),
-            ),
-    };
+                    .text_color(if agent_id.is_some() { text() } else { dim() })
+                    .child(id_text),
+            )
+            .child(hint(match (&agent_id, sharing) {
+                (Some(_), _) => "Tell this number to the person who will connect.".into(),
+                (None, true) if has_relay => "Getting your ID...".into(),
+                (None, true) => {
+                    "No ID yet: add a relay server under Settings, then turn sharing off and on."
+                        .into()
+                }
+                (None, false) => "Start sharing to get an ID.".into(),
+            })),
+    );
+    if agent_id.is_some() {
+        mine = mine.child(
+            div()
+                .flex()
+                .gap_2()
+                .child(icon_button(
+                    "id-copy",
+                    "copy",
+                    "Copy ID",
+                    false,
+                    true,
+                    cx.listener(|this, _e, _w, cx| {
+                        this.copy_id(cx);
+                        cx.notify();
+                    }),
+                ))
+                .child(icon_button(
+                    "id-new",
+                    "refresh-cw",
+                    "New ID",
+                    false,
+                    true,
+                    cx.listener(|this, _e, _w, cx| {
+                        this.new_id(cx);
+                        cx.notify();
+                    }),
+                )),
+        );
+    }
     if sharing && !relay_status.is_empty() {
-        mine = mine.child(hint(format!("Server: {relay_status}")));
+        mine = mine.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .text_color(muted())
+                .child(ico("wifi", 14., muted()))
+                .child(format!("Server: {relay_status}")),
+        );
     }
     if sharing {
         if let Some(fp) = fingerprint {
-            mine = mine.child(hint(format!(
-                "Fingerprint (the other person checks it once): {fp}"
-            )));
+            mine = mine.child(
+                div()
+                    .p_3()
+                    .rounded(px(10.))
+                    .bg(input_bg())
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(muted())
+                            .child(ico("fingerprint", 14., muted()))
+                            .child("Fingerprint: the other person checks it once"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family("Monospace")
+                            .text_color(text())
+                            .child(fp),
+                    ),
+            );
         }
     }
     mine = mine
-        .child(div().flex().child(toolbar_button_dyn(
-            "share-toggle".into(),
+        .child(div().flex().child(icon_button(
+            "share-toggle",
+            "power",
             if sharing {
-                "Turn sharing off"
+                "Stop sharing"
             } else {
-                "Turn sharing on"
+                "Start sharing"
             },
+            !sharing,
             true,
             cx.listener(|this, _e, _w, cx| {
                 this.toggle_agent(cx);
@@ -2306,14 +2451,31 @@ fn remote_view(
         )))
         .child(hint("You are asked to allow every connection.".into()));
 
-    // Right: connect to another computer (like "Remote Desk")
+    // ---- right: connect to another computer
     let theirs = card()
-        .child(title("Connect to another computer"))
-        .child(hint("Enter its ID (9 digits) or its address".into()))
-        .child(div().flex().child(field(addr, cx)))
-        .child(div().flex().child(toolbar_button_dyn(
-            "remote-connect".into(),
+        .child(heading(
+            "link",
+            "Connect to another computer",
+            "Control or help someone else",
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted())
+                        .child("ID (9 digits) or address"),
+                )
+                .child(div().flex().child(field(addr, cx))),
+        )
+        .child(div().flex().child(icon_button(
+            "remote-connect",
+            "arrow-right",
             if probing { "Connecting..." } else { "Connect" },
+            true,
             !probing,
             cx.listener(|this, _e, _w, cx| {
                 this.remote_connect(cx);
@@ -2321,45 +2483,94 @@ fn remote_view(
             }),
         )))
         .when(open_windows > 0, |d| {
-            d.child(hint(format!("{open_windows} remote window(s) open")))
+            d.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(muted())
+                    .child(div().size(px(7.)).rounded(px(4.)).bg(ok()))
+                    .child(format!("{open_windows} remote window(s) open")),
+            )
         })
         .child(hint(
-            "The first time, you compare a fingerprint to be sure it is the right computer.".into(),
+            "The first time, compare the fingerprint to be sure it is the right computer.".into(),
         ));
 
-    // Chat with whoever is connected to this computer (only while sharing)
+    // ---- chat (only while sharing)
     let chat_card = sharing.then(|| {
-        let mut lines = div().flex().flex_col().gap_1().min_h(px(60.));
+        let mut list = div()
+            .id("chat-scroll")
+            .max_h(px(260.))
+            .min_h(px(120.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded(px(12.))
+            .bg(input_bg());
         if chat.is_empty() {
-            lines = lines.child(hint(
-                "Messages between you and the person connected appear here.".into(),
-            ));
-        }
-        for (mine, t) in chat.iter().rev().take(12).rev() {
-            lines = lines.child(
+            list = list.child(
                 div()
-                    .text_sm()
-                    .child(format!("{} {t}", if *mine { "You:" } else { "Them:" })),
+                    .py_6()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(ico("message", 28., dim()))
+                    .child(hint(
+                        "No messages yet. Say hello to the person connected.".into(),
+                    )),
+            );
+        }
+        for (i, (mine_msg, t)) in chat.iter().rev().take(40).rev().enumerate() {
+            let bubble = div()
+                .max_w(relative(0.75))
+                .px_3()
+                .py_2()
+                .rounded(px(12.))
+                .text_sm()
+                .when(*mine_msg, |d| d.bg(accent()).text_color(on_accent()))
+                .when(!*mine_msg, |d| d.bg(panel_2()).text_color(text()))
+                .child(t.clone());
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("chat-{i}")))
+                    .w_full()
+                    .flex()
+                    .when(*mine_msg, |d| d.justify_end())
+                    .child(bubble),
             );
         }
         div()
             .w_full()
-            .p_4()
-            .rounded(px(12.))
+            .p_5()
+            .rounded(px(14.))
             .bg(panel())
+            .border_1()
+            .border_color(border())
             .flex()
             .flex_col()
             .gap_3()
-            .child(title("Chat"))
-            .child(lines)
+            .child(heading(
+                "message",
+                "Chat",
+                "With whoever is connected to this computer",
+            ))
+            .child(list)
             .child(
                 div()
                     .flex()
-                    .gap_3()
+                    .gap_2()
+                    .items_center()
                     .child(div().flex_1().child(field(chat_input, cx)))
-                    .child(toolbar_button_dyn(
-                        "chat-send".into(),
+                    .child(icon_button(
+                        "chat-send",
+                        "send",
                         "Send",
+                        true,
                         true,
                         cx.listener(|this, _e, _w, cx| {
                             this.send_chat(cx);
@@ -2372,24 +2583,36 @@ fn remote_view(
             ))
     });
 
-    // Bottom: settings, hidden by default
+    // ---- settings, collapsed by default
     let mut options = div()
         .w_full()
-        .p_4()
-        .rounded(px(12.))
+        .p_5()
+        .rounded(px(14.))
         .bg(panel())
+        .border_1()
+        .border_color(border())
         .flex()
         .flex_col()
-        .gap_3()
+        .gap_4()
         .child(
             div()
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(title("Settings"))
-                .child(toolbar_button_dyn(
-                    "remote-adv".into(),
+                .child(heading(
+                    "sliders",
+                    "Settings",
+                    "Relay server and sharing rules",
+                ))
+                .child(icon_button(
+                    "remote-adv",
+                    if advanced {
+                        "chevron-down"
+                    } else {
+                        "chevron-right"
+                    },
                     if advanced { "Hide" } else { "Show" },
+                    false,
                     true,
                     cx.listener(|this, _e, _w, cx| {
                         this.remote_adv = !this.remote_adv;
@@ -2404,19 +2627,24 @@ fn remote_view(
             .child(
                 div()
                     .flex()
-                    .gap_3()
-                    .child(toolbar_button_dyn(
-                        "share-viewonly".into(),
+                    .flex_wrap()
+                    .gap_2()
+                    .child(icon_button(
+                        "share-viewonly",
+                        if view_only { "eye" } else { "users" },
                         if view_only { "Others can only watch" } else { "Others can control" },
+                        false,
                         !sharing,
                         cx.listener(|this, _e, _w, cx| {
                             this.share_view_only = !this.share_view_only;
                             cx.notify();
                         }),
                     ))
-                    .child(toolbar_button_dyn(
-                        "share-clip".into(),
+                    .child(icon_button(
+                        "share-clip",
+                        "clipboard",
                         if clipboard { "Clipboard shared" } else { "Clipboard private" },
+                        false,
                         !sharing,
                         cx.listener(|this, _e, _w, cx| {
                             this.share_clipboard = !this.share_clipboard;
@@ -2430,18 +2658,30 @@ fn remote_view(
         .w_full()
         .flex()
         .flex_col()
-        .gap_3()
+        .gap_4()
         .child(
             div()
                 .w_full()
                 .flex()
                 .flex_wrap()
-                .gap_3()
+                .gap_4()
                 .child(mine)
                 .child(theirs),
         )
         .when(!msg.is_empty(), |d| {
-            d.child(div().text_sm().child(msg.to_string()))
+            d.child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .rounded(px(10.))
+                    .bg(accent_soft())
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
+                    .child(ico("info", 16., accent_hover()))
+                    .child(msg.to_string()),
+            )
         })
         .children(chat_card)
         .child(options)

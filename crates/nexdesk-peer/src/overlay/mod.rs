@@ -19,6 +19,11 @@ pub enum Action {
     Screenshot,
     /// Open or close the chat panel.
     Chat,
+    /// Disconnect and close the window.
+    Close,
+    Minimize,
+    /// Keep the floating bar visible (full screen).
+    Pin,
 }
 
 /// One toolbar button as the application describes it.
@@ -55,120 +60,39 @@ pub enum Hit {
     BarBackground,
     ChatClose,
     ChatInput,
+    /// The send button next to the chat line.
+    ChatSend,
     /// Anywhere else on the chat panel.
     ChatPanel,
 }
 
 // ---- look ------------------------------------------------------------------------------------
-const PANEL: u32 = 0x00_16_18_22;
-const PANEL_2: u32 = 0x00_1f_22_30;
-const BORDER: u32 = 0x00_34_39_4f;
-const TEXT: u32 = 0x00_ee_f0_f8;
-const MUTED: u32 = 0x00_9a_a0_b8;
-const ACCENT: u32 = 0x00_6d_7c_ff;
-const GOOD: u32 = 0x00_3e_cf_8e;
-const WARN: u32 = 0x00_ff_b8_4d;
+// The RDP viewer's palette (GNOME / libadwaita dark), so both viewers look like one product.
+pub(crate) const BG: u32 = 0x00_1e_1e_1e;
+pub(crate) const BAR: u32 = 0x00_2b_2b_2b;
+pub(crate) const BAR_HOVER: u32 = 0x00_3d_3d_3d;
+pub(crate) const FG: u32 = 0x00_f0_f0_f0;
+pub(crate) const DIM: u32 = 0x00_9a_99_96;
+pub(crate) const ACCENT: u32 = 0x00_35_84_e4;
+pub(crate) const ACCENT_HI: u32 = 0x00_62_a0_ea;
+pub(crate) const WARN: u32 = 0x00_f5_c2_11;
+pub(crate) const GREEN: u32 = 0x00_28_c8_40;
+pub(crate) const EDGE: u32 = 0x00_44_44_44;
+const PANEL: u32 = BAR;
+const PANEL_2: u32 = 0x00_3a_3a_3a;
+const BORDER: u32 = EDGE;
+const TEXT: u32 = FG;
+const MUTED: u32 = DIM;
+const GOOD: u32 = GREEN;
 const WHITE: u32 = 0x00_ff_ff_ff;
 const FONT: f32 = 13.0;
 const SMALL: f32 = 11.5;
 
-/// Pointer within this many pixels of the top edge reveals the toolbar.
-pub const HOT_EDGE: i32 = 8;
-
-// ---- toolbar ---------------------------------------------------------------------------------
-const BTN_H: i32 = 30;
-const BAR_H: i32 = 42;
-const BAR_TOP: i32 = 10;
-const BTN_PAD: i32 = 14;
-const GAP: i32 = 2;
-const SEP_W: i32 = 11;
-
-#[derive(Debug, Clone)]
-pub struct Bar {
-    pub rect: Rect,
-    pub buttons: Vec<(Action, Rect)>,
-    /// x positions of the separators.
-    pub seps: Vec<i32>,
-}
-
-/// The bar, centred at the top of a window `win_w` wide (it shrinks its padding, never leaves the window).
-pub fn bar_layout(win_w: u32, items: &[BarItem]) -> Bar {
-    let widths: Vec<i32> = items
-        .iter()
-        .map(|i| text_width(&i.label, FONT) + 2 * BTN_PAD)
-        .collect();
-    let mut total = 12; // side padding
-    for (n, w) in widths.iter().enumerate() {
-        total += w + GAP;
-        if n + 1 < items.len() && items[n + 1].group != items[n].group {
-            total += SEP_W;
-        }
-    }
-    let bar_w = total.min(win_w as i32 - 8).max(0);
-    let bar_x = ((win_w as i32 - bar_w) / 2).max(0);
-    let mut x = bar_x + 6;
-    let (mut buttons, mut seps) = (Vec::new(), Vec::new());
-    for (n, (item, w)) in items.iter().zip(&widths).enumerate() {
-        buttons.push((
-            item.action,
-            Rect {
-                x,
-                y: BAR_TOP + (BAR_H - BTN_H) / 2,
-                w: *w,
-                h: BTN_H,
-            },
-        ));
-        x += w + GAP;
-        if n + 1 < items.len() && items[n + 1].group != item.group {
-            seps.push(x + SEP_W / 2 - 1);
-            x += SEP_W;
-        }
-    }
-    Bar {
-        rect: Rect {
-            x: bar_x,
-            y: BAR_TOP,
-            w: bar_w,
-            h: BAR_H,
-        },
-        buttons,
-        seps,
-    }
-}
-
-pub fn draw_bar(c: &mut Canvas, bar: &Bar, items: &[BarItem], hover: Option<Action>) {
-    let r = bar.rect;
-    c.shadow(r.x, r.y, r.w, r.h, BAR_H as f32 / 2.0);
-    c.panel(r.x, r.y, r.w, r.h, BAR_H as f32 / 2.0, PANEL, BORDER, 0.94);
-    for x in &bar.seps {
-        c.vline(*x, r.y + 12, r.h - 24, BORDER, 1.0);
-    }
-    for ((action, b), item) in bar.buttons.iter().zip(items) {
-        let hovered = hover == Some(*action);
-        if item.on {
-            c.rrect(
-                b.x,
-                b.y,
-                b.w,
-                b.h,
-                b.h as f32 / 2.0,
-                ACCENT,
-                if hovered { 0.42 } else { 0.30 },
-            );
-        } else if hovered {
-            c.rrect(b.x, b.y, b.w, b.h, b.h as f32 / 2.0, WHITE, 0.10);
-        }
-        let color = if item.on { WHITE } else { TEXT };
-        let tw = text_width(&item.label, FONT);
-        c.text(
-            b.x + (b.w - tw) / 2,
-            b.y + (b.h - line_height(FONT)) / 2,
-            &item.label,
-            FONT,
-            color,
-        );
-    }
-}
+mod bar;
+pub mod icons;
+pub use bar::{
+    bar_layout, dot_idle, dot_live, dot_paused, draw_bar, Bar, BarView, HEADER_H, HOT_EDGE,
+};
 
 // ---- chat panel ------------------------------------------------------------------------------
 const CHAT_W: i32 = 340;
@@ -185,13 +109,14 @@ pub struct ChatGeom {
     pub close: Rect,
     pub list: Rect,
     pub input: Rect,
+    pub send: Rect,
 }
 
-/// The chat panel docked at the right edge, below the toolbar.
-pub fn chat_layout(win_w: u32, win_h: u32) -> ChatGeom {
+/// The chat panel docked at the right edge, below the header (`top` is the header's bottom edge).
+pub fn chat_layout(win_w: u32, win_h: u32, top: i32) -> ChatGeom {
     let w = (win_w as i32 - 2 * PANEL_MARGIN).clamp(0, CHAT_W);
     let x = win_w as i32 - w - PANEL_MARGIN;
-    let y = BAR_TOP + BAR_H + 10;
+    let y = top + 10;
     let h = (win_h as i32 - y - PANEL_MARGIN).max(HEAD_H + FOOT_H + 40);
     ChatGeom {
         panel: Rect { x, y, w, h },
@@ -210,7 +135,13 @@ pub fn chat_layout(win_w: u32, win_h: u32) -> ChatGeom {
         input: Rect {
             x: x + 12,
             y: y + h - FOOT_H + 10,
-            w: w - 24,
+            w: w - 24 - 44,
+            h: 36,
+        },
+        send: Rect {
+            x: x + w - 12 - 36,
+            y: y + h - FOOT_H + 10,
+            w: 36,
             h: 36,
         },
     }
@@ -309,27 +240,40 @@ pub fn draw_chat(c: &mut Canvas, g: &ChatGeom, v: &ChatView) {
     c.rrect(p.x + 1, p.y + 1, p.w - 2, HEAD_H - 1, 13.0, PANEL, 1.0);
     c.rrect(p.x + 1, p.y + HEAD_H - 14, p.w - 2, 14, 0.0, PANEL, 1.0);
     c.hline(p.x + 1, p.y + HEAD_H, p.w - 2, BORDER, 1.0);
+    icons::draw(
+        c,
+        icons::CHAT,
+        p.x + 28,
+        p.y + HEAD_H / 2,
+        18,
+        1.9,
+        ACCENT_HI,
+    );
     c.text(
-        p.x + 16,
+        p.x + 46,
         p.y + (HEAD_H - line_height(FONT)) / 2,
         "Chat",
         FONT + 1.0,
         TEXT,
     );
     c.text(
-        p.x + 62,
+        p.x + 92,
         p.y + (HEAD_H - line_height(SMALL)) / 2 + 1,
         "with the other computer",
         SMALL,
         MUTED,
     );
-    // close button: a plain cross
+    // close button
     let cl = g.close;
-    let (cx, cy) = (cl.x + cl.w / 2, cl.y + cl.h / 2);
-    for i in -4..=4 {
-        c.rrect(cx + i - 1, cy + i - 1, 2, 2, 1.0, MUTED, 1.0);
-        c.rrect(cx + i - 1, cy - i - 1, 2, 2, 1.0, MUTED, 1.0);
-    }
+    icons::draw(
+        c,
+        icons::CLOSE,
+        cl.x + cl.w / 2,
+        cl.y + cl.h / 2,
+        16,
+        2.0,
+        MUTED,
+    );
     c.rrect(
         p.x + 1,
         p.y + p.h - FOOT_H,
@@ -389,6 +333,27 @@ pub fn draw_chat(c: &mut Canvas, g: &ChatGeom, v: &ChatView) {
             c.rrect(i.x + 13 + w, i.y + 9, 2, i.h - 18, 1.0, ACCENT, 1.0);
         }
     }
+    // send button: lit when there is something to send
+    let sb = g.send;
+    let ready = !v.input.trim().is_empty();
+    c.rrect(
+        sb.x,
+        sb.y,
+        sb.w,
+        sb.h,
+        10.0,
+        if ready { ACCENT } else { PANEL_2 },
+        1.0,
+    );
+    icons::draw(
+        c,
+        icons::SEND,
+        sb.x + sb.w / 2,
+        sb.y + sb.h / 2,
+        18,
+        1.9,
+        if ready { WHITE } else { MUTED },
+    );
 }
 
 // ---- toast and status chip ---------------------------------------------------------------------
@@ -450,6 +415,9 @@ pub fn hit_test(bar: Option<&Bar>, chat: Option<&ChatGeom>, x: f64, y: f64) -> O
         if g.close.contains(x, y) {
             return Some(Hit::ChatClose);
         }
+        if g.send.contains(x, y) {
+            return Some(Hit::ChatSend);
+        }
         if g.input.contains(x, y) {
             return Some(Hit::ChatInput);
         }
@@ -481,7 +449,6 @@ mod tests {
         };
         vec![
             mk(Action::Scale, "1:1", 0),
-            mk(Action::Fullscreen, "Full screen", 0),
             mk(Action::Control, "Control", 1),
             mk(Action::Cad, "Ctrl+Alt+Del", 1),
             mk(Action::Screenshot, "Copy screen", 2),
@@ -492,36 +459,44 @@ mod tests {
     #[test]
     fn bar_is_centred_inside_the_window_and_buttons_do_not_overlap() {
         let it = items();
-        let bar = bar_layout(1280, &it);
-        assert!(bar.rect.x >= 0 && bar.rect.x + bar.rect.w <= 1280);
-        assert_eq!(bar.seps.len(), 2);
-        let mut last = bar.rect.x;
-        for (_, r) in &bar.buttons {
-            assert!(r.x >= last && r.x + r.w <= bar.rect.x + bar.rect.w);
-            last = r.x + r.w;
+        for (docked, u) in [(true, 1), (false, 1), (true, 2), (false, 2)] {
+            let bar = bar_layout(1280, u, docked, &it);
+            assert!(bar.rect.x >= 0 && bar.rect.x + bar.rect.w <= 1280);
+            assert_eq!(bar.rect.h, HEADER_H * u);
+            // buttons stay inside the bar and never overlap each other
+            let mut spans: Vec<(i32, i32)> =
+                bar.buttons.iter().map(|(_, r)| (r.x, r.x + r.w)).collect();
+            spans.sort();
+            for w in spans.windows(2) {
+                assert!(w[0].1 <= w[1].0, "overlap {w:?}");
+            }
+            for (_, r) in &bar.buttons {
+                assert!(r.x >= bar.rect.x && r.x + r.w <= bar.rect.x + bar.rect.w);
+            }
+            // window buttons first, pin only on the floating bar
+            assert_eq!(bar.buttons[0].0, Action::Close);
+            assert_eq!(bar.buttons.iter().any(|(a, _)| *a == Action::Pin), !docked);
         }
+        // narrow window: still inside
+        let narrow = bar_layout(300, 1, false, &it);
+        assert!(narrow.rect.x >= 0 && narrow.rect.w <= 300);
     }
 
     #[test]
     fn hit_testing_finds_buttons_chat_and_background() {
         let it = items();
-        let bar = bar_layout(1280, &it);
+        let bar = bar_layout(1280, 1, true, &it);
         let (a, r) = bar.buttons[3];
         assert_eq!(
             hit_test(Some(&bar), None, f64::from(r.x + 3), f64::from(r.y + 3)),
             Some(Hit::Bar(a))
         );
         assert_eq!(
-            hit_test(
-                Some(&bar),
-                None,
-                f64::from(bar.rect.x) + 1.0,
-                f64::from(bar.rect.y) + 1.0
-            ),
+            hit_test(Some(&bar), None, 640.0, 2.0),
             Some(Hit::BarBackground)
         );
         assert_eq!(hit_test(None, None, 5.0, 5.0), None);
-        let g = chat_layout(1280, 720);
+        let g = chat_layout(1280, 720, 40);
         assert_eq!(
             hit_test(
                 None,
@@ -556,7 +531,7 @@ mod tests {
     #[test]
     fn chat_stays_inside_small_windows_and_scrolls() {
         for (w, h) in [(300u32, 200u32), (1920, 1080), (50, 50)] {
-            let g = chat_layout(w, h);
+            let g = chat_layout(w, h, 40);
             assert!(g.panel.x >= 0 || w < 24, "{w}x{h}");
             let mut buf = vec![0u32; (w * h) as usize];
             let mut c = Canvas::new(&mut buf, w as usize, h as usize);
@@ -578,11 +553,22 @@ mod tests {
                     scroll: 99999,
                 },
             );
-            draw_bar(&mut c, &bar_layout(w, &items()), &items(), None);
+            draw_bar(
+                &mut c,
+                &bar_layout(w, 1, w % 2 == 0, &items()),
+                &items(),
+                &BarView {
+                    title: "nexdesk - 495585340",
+                    dot: dot_live(),
+                    fullscreen: false,
+                    pinned: false,
+                },
+                Some(Action::Chat),
+            );
             draw_toast(&mut c, "hello");
             draw_chip(&mut c, Mode::Paused, "Ctrl+Alt+G to resume");
         }
-        let g = chat_layout(1280, 720);
+        let g = chat_layout(1280, 720, 40);
         let few: Vec<(bool, String)> = vec![(true, "hi".into())];
         assert_eq!(chat_max_scroll(&g, &few), 0);
         let many: Vec<(bool, String)> = (0..50).map(|i| (false, format!("line {i}"))).collect();

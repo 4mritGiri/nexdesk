@@ -46,7 +46,21 @@ icons!(
     "info",
     "shield",
     "palette",
-    "zap"
+    "zap",
+    "copy",
+    "refresh-cw",
+    "power",
+    "link",
+    "send",
+    "message",
+    "monitor",
+    "fingerprint",
+    "arrow-right",
+    "users",
+    "sliders",
+    "eye",
+    "clipboard",
+    "wifi"
 );
 
 impl AssetSource for Assets {

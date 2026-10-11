@@ -126,6 +126,11 @@ impl<'a> Canvas<'a> {
         Self { buf, w, h }
     }
 
+    /// Blend one pixel (clipped to the buffer).
+    pub fn blend(&mut self, x: i32, y: i32, color: u32, alpha: f32) {
+        self.put(x, y, color, alpha);
+    }
+
     fn put(&mut self, x: i32, y: i32, color: u32, alpha: f32) {
         if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h || alpha <= 0.0 {
             return;
@@ -200,6 +205,34 @@ impl<'a> Canvas<'a> {
     pub fn vline(&mut self, x: i32, y: i32, h: i32, color: u32, alpha: f32) {
         for py in y..y + h {
             self.put(x, py, color, alpha);
+        }
+    }
+
+    /// Opaque filled rectangle.
+    pub fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
+        for py in y.max(0)..(y + h).min(self.h as i32) {
+            for px in x.max(0)..(x + w).min(self.w as i32) {
+                self.put(px, py, color, 1.0);
+            }
+        }
+    }
+
+    /// Outline of a rectangle, `t` pixels thick, drawn inside it.
+    pub fn frame(&mut self, x: i32, y: i32, w: i32, h: i32, t: i32, color: u32) {
+        self.fill(x, y, w, t, color);
+        self.fill(x, y + h - t, w, t, color);
+        self.fill(x, y, t, h, color);
+        self.fill(x + w - t, y, t, h, color);
+    }
+
+    /// A straight line of thickness `t` (square pen).
+    pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, t: i32, color: u32) {
+        let (dx, dy) = ((x1 - x0).abs(), (y1 - y0).abs());
+        let steps = dx.max(dy).max(1);
+        for i in 0..=steps {
+            let x = x0 + (x1 - x0) * i / steps;
+            let y = y0 + (y1 - y0) * i / steps;
+            self.fill(x - t / 2, y - t / 2, t, t, color);
         }
     }
 
