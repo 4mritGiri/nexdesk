@@ -4917,7 +4917,7 @@ dependencies = [
  "ironrdp-tls",
  "nexdesk-clipboard",
  "nexdesk-core",
- "picky-krb",
+ "picky-krb 0.13.0",
  "rpassword",
  "rustls-native-certs",
  "sha2 0.10.9",
@@ -6055,6 +6055,34 @@ name = "picky-krb"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d188f3192356068dbdba54bddbca6fd0f7a09565d3861eeb8efe1ab77ae8e97"
+dependencies = [
+ "aes 0.9.3",
+ "block-padding 0.4.2",
+ "byteorder",
+ "cbc 0.2.1",
+ "cipher 0.5.2",
+ "crypto-bigint",
+ "des",
+ "hmac 0.13.0",
+ "inout 0.2.2",
+ "oid",
+ "pbkdf2 0.13.0",
+ "picky-asn1",
+ "picky-asn1-der",
+ "picky-asn1-x509",
+ "rand 0.10.3",
+ "rand_core 0.10.1",
+ "serde",
+ "sha1 0.11.0",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "picky-krb"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a272e7c4191fbb5ea7e0b34f47208804d47a6f748344351ba9229b0e5a604ed"
 dependencies = [
  "aes 0.9.3",
  "block-padding 0.4.2",
@@ -7839,7 +7867,7 @@ dependencies = [
  "picky-asn1",
  "picky-asn1-der",
  "picky-asn1-x509",
- "picky-krb",
+ "picky-krb 0.12.4",
  "pkcs1 0.8.0-rc.4",
  "primeorder",
  "rand 0.10.3",
