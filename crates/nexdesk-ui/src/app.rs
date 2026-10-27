@@ -1269,6 +1269,37 @@ impl NexDeskApp {
         cx.notify();
     }
 
+    /// Select the saved connection called `name` and ask for its password (or connect at once
+    /// when the unlocked vault holds it). This is what `nexdesk --connect <name>` does, so a
+    /// launcher can start a saved connection while NexDesk itself still asks for the password.
+    pub fn connect_to_profile(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // A manager that has been open for a while may not know connections saved since.
+        if let Some(store) = self.state.store.as_ref() {
+            self.state.profiles = store.list();
+        }
+
+        let wanted = name.trim().to_lowercase();
+        let found = self
+            .state
+            .profiles
+            .iter()
+            .position(|p| p.name.to_lowercase() == wanted);
+
+        self.nav.screen = Screen::Connections;
+
+        let Some(index) = found else {
+            self.selected_profile = None;
+            self.state.selected = None;
+            self.state.status = format!("No saved connection named \"{}\".", name.trim());
+            cx.notify();
+            return;
+        };
+
+        self.selected_profile = Some(index);
+        self.state.selected = Some(index);
+        self.open_password_dialog(window, cx);
+    }
+
     fn cancel_password_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.password_input.update(cx, |input, cx| {
             input.reset(cx);
@@ -5655,7 +5686,17 @@ impl Render for TextInput {
 // Run
 // ============================================================================
 
-pub fn run(engine_path: std::path::PathBuf) {
+/// Open the manager. With `connect`, the saved connection of that name is selected and its
+/// password prompt shown; when a manager is already running, it is asked to do that instead and
+/// this process ends.
+pub fn run(engine_path: std::path::PathBuf, connect: Option<String>) {
+    #[cfg(unix)]
+    if let Some(name) = connect.as_deref() {
+        if crate::instance::send(&format!("connect {name}")) {
+            return;
+        }
+    }
+
     // Lets the session window's "+" button bring this window to the front.
     #[cfg(unix)]
     let owns_focus_socket = crate::instance::listen();
@@ -5733,21 +5774,29 @@ pub fn run(engine_path: std::path::PathBuf) {
 
             let bounds = Bounds::centered(None, size(px(1120.), px(720.)), cx);
 
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: None,
-                    window_decorations: Some(WindowDecorations::Client),
-                    window_background: WindowBackgroundAppearance::Transparent,
-                    window_min_size: Some(size(px(760.), px(480.))),
-                    app_id: Some("nexdesk".into()),
-                    ..Default::default()
-                },
-                |window, cx| cx.new(|cx| NexDeskApp::new(engine_path.clone(), window, cx)),
-            )
-            .expect("open NexDesk window");
+            let manager = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        titlebar: None,
+                        window_decorations: Some(WindowDecorations::Client),
+                        window_background: WindowBackgroundAppearance::Transparent,
+                        window_min_size: Some(size(px(760.), px(480.))),
+                        app_id: Some("nexdesk".into()),
+                        ..Default::default()
+                    },
+                    |window, cx| cx.new(|cx| NexDeskApp::new(engine_path.clone(), window, cx)),
+                )
+                .expect("open NexDesk window");
 
             cx.activate(true);
+
+            // `nexdesk --connect <name>` that started this manager.
+            if let Some(name) = connect.as_deref() {
+                let _ = manager.update(cx, |app, window, cx| {
+                    app.connect_to_profile(name, window, cx);
+                });
+            }
 
             // Brings this window to the front when the session window's "+" asks, or a question needs an answer.
             #[cfg(unix)]
@@ -5761,6 +5810,14 @@ pub fn run(engine_path: std::path::PathBuf) {
                         for w in cx.windows() {
                             let _ = w.update(cx, |_, window, _| window.activate_window());
                         }
+                    });
+                }
+                // `nexdesk --connect <name>` run while this manager is open.
+                if let Some(name) = crate::instance::take_connect() {
+                    cx.update(|cx| {
+                        let _ = manager.update(cx, |app, window, cx| {
+                            app.connect_to_profile(&name, window, cx);
+                        });
                     });
                 }
             })

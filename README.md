@@ -87,6 +87,9 @@ For direct protocol testing:
 
 ```bash
 NEXDESK_PASSWORD='...' ./target/release/nexdesk-rdp --host jump.example.com -u alice
+
+# open a saved connection from the manager (asks for the password itself):
+./target/release/nexdesk --connect "Office PC"
 ```
 
 ## Migration status

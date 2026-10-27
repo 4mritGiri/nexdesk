@@ -4,6 +4,7 @@ All notable changes are listed here, newest first. Format: [Keep a Changelog](ht
 
 ## [Unreleased]
 ### Added
+- `nexdesk --connect <NAME>` (also `-c`, `--connect=NAME`): opens the saved connection NAME and shows its password prompt (or connects at once when the unlocked vault holds the password). If a manager is already open it is asked to do this over the local focus socket (`connect <NAME>` message: only a name, never a password) and the new process exits. For launchers such as Aujar's `rdp <name>`. `nexdesk --help` lists the options; unknown arguments are now an error instead of being ignored.
 - Vector (SVG path) icons in the native viewer header and chat; chat has a send button. Remote Control page of the manager redesigned: cards with icons, status pill, ID box, chat bubbles, new SVG icons.
 - Native viewer window now looks and behaves like the RDP viewer: own header with traffic-light buttons, connection tab and icon tools (Ctrl+Alt+Del, copy screen, 1:1, pause/resume control, chat), drag to move, double-click to maximise, resize from the edges, floating pin-able bar in full screen. `--native-frame` keeps the system title bar.
 ### Fixed
